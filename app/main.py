@@ -24,6 +24,18 @@ from pydantic import BaseModel
 
 from app.page import render_landing, render_request_page
 
+# The one-click demo is built from two modules that may not exist yet during a partial
+# deploy. A missing demo must never stop the API that a blocked agent is long-polling.
+try:
+    from app.runner import DemoRun, start_run
+    from app.demo_page import render_demo_page
+
+    DEMO_READY = True
+    DEMO_IMPORT_ERROR = ""
+except Exception as _exc:  # noqa: BLE001
+    DEMO_READY = False
+    DEMO_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+
 PUBLIC_URL = os.environ.get("HANDOFF_PUBLIC_URL", "http://localhost:8080").rstrip("/")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -311,17 +323,9 @@ async def try_it() -> RedirectResponse:
     return RedirectResponse(url=f"/r/{req.id}", status_code=303)
 
 
-@app.get("/demo/statement")
-async def demo_statement(handoff: str = "") -> dict:
-    """The demo's payoff, gated on a real person having cleared a real handoff.
-
-    Serving the wall's HTML also serves the numbers inside it, so an agent with no
-    browser could regex the total straight out of the page and never need anyone. That
-    would make the demo a lie. The deliverable lives here instead, behind a check that
-    only a human resolving this exact handoff id can satisfy: the agent holds the id but
-    has no way to resolve it itself.
-    """
-    req = REQUESTS.get(handoff)
+def _statement_for(handoff_id: str) -> dict:
+    """The demo payoff, or an HTTPException if no human has cleared this handoff."""
+    req = REQUESTS.get(handoff_id)
     if req is None:
         raise HTTPException(status_code=403, detail="unknown handoff; no human has cleared this session")
     req.settle()
@@ -335,6 +339,117 @@ async def demo_statement(handoff: str = "") -> dict:
         "cleared_by": req.resolved_by,
         "cleared_at": req.resolved_at,
     }
+
+
+# ------------------------------------------------------------------ one-click demo
+
+DEMO_RUNS: dict = {}
+
+
+async def _demo_create_handoff(
+    reason: str, live_view_url: Optional[str], timeout_s: int, page: bool
+) -> tuple[str, str]:
+    """Mint a handoff in-process, so the runner needs no HTTP round trip to ourselves."""
+    req = HandoffRequest(
+        id=secrets.token_urlsafe(16),
+        kind="clear_wall",
+        reason=reason,
+        question=None,
+        agent="demo-agent",
+        live_view_url=live_view_url,
+        resume_url=None,
+        resume_token=None,
+        timeout_s=timeout_s,
+        created_at=time.time(),
+    )
+    REQUESTS[req.id] = req
+    if page:
+        asyncio.create_task(page_human(req))
+    else:
+        req.paged = "skipped: page=false"
+    return req.id, f"{PUBLIC_URL}/r/{req.id}"
+
+
+async def _demo_get_handoff(handoff_id: str) -> dict:
+    return _get(handoff_id).public()
+
+
+async def _demo_get_statement(handoff_id: str) -> dict:
+    return _statement_for(handoff_id)
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def demo_page() -> HTMLResponse:
+    if not DEMO_READY:
+        raise HTTPException(status_code=503, detail=f"demo not built: {DEMO_IMPORT_ERROR}")
+    return HTMLResponse(render_demo_page())
+
+
+@app.post("/demo/run", status_code=201)
+async def demo_run_start() -> dict:
+    """Start a real run. This rings a real phone, which the page says before you press Send."""
+    if not DEMO_READY:
+        raise HTTPException(status_code=503, detail=f"demo not built: {DEMO_IMPORT_ERROR}")
+
+    live = sum(1 for r in DEMO_RUNS.values() if r.status in ("running", "blocked"))
+    if live >= 2:
+        raise HTTPException(status_code=429, detail="a demo is already running; try again in a minute")
+
+    run = DemoRun(
+        id=secrets.token_urlsafe(12),
+        status="running",
+        steps=[],
+        handoff_id=None,
+        page_url=None,
+        live_view_url=None,
+        deliverable=None,
+        error=None,
+        mode="http",
+        created_at=time.time(),
+    )
+    DEMO_RUNS[run.id] = run
+    asyncio.create_task(
+        start_run(
+            run,
+            create_handoff=_demo_create_handoff,
+            get_handoff=_demo_get_handoff,
+            get_statement=_demo_get_statement,
+            page=True,
+        )
+    )
+    return {"id": run.id}
+
+
+@app.get("/demo/run/{run_id}")
+async def demo_run_state(run_id: str) -> dict:
+    run = DEMO_RUNS.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="no such run")
+    return {
+        "id": run.id,
+        "status": run.status,
+        "steps": run.steps,
+        "handoff_id": run.handoff_id,
+        "page_url": run.page_url,
+        "live_view_url": run.live_view_url,
+        "deliverable": run.deliverable,
+        "error": run.error,
+        "mode": run.mode,
+        "age_s": round(time.time() - run.created_at, 1),
+    }
+
+
+@app.get("/demo/statement")
+async def demo_statement(handoff: str = "") -> dict:
+    """The demo's payoff, gated on a real person having cleared a real handoff.
+
+    Serving the wall's HTML also serves the numbers inside it, so an agent with no
+    browser could regex the total straight out of the page and never need anyone. That
+    would make the demo a lie. The deliverable lives here instead, behind a check that
+    only a human resolving this exact handoff id can satisfy: the agent holds the id but
+    has no way to resolve it itself.
+    """
+    return _statement_for(handoff)
 
 
 @app.get("/demo/wall", response_class=HTMLResponse)
