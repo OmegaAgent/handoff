@@ -8,6 +8,9 @@ Ranked. Top = handle first/early. Non-blockers get deferred here instead of stop
 3. H7 spike: browser-use on Bedrock bearer (no Anthropic credits available).
 
 ## Deferred (non-blocking)
+- **Paging-UX escalation ladder** — owner-approved direction, full spec in `PAGING-UX.md` (quiet
+  hours hard rail, text-first consent "call now or tomorrow?", morning-digest batching, urgency
+  levels, workflow tie-in). Post-demo v1 feature; mention in submission's "potential" story.
 - Convex port for sponsor points (only if core lands early).
 - H5 voice-answer via Twilio Gather.
 - Landing page / logo.

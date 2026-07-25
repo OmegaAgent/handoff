@@ -23,7 +23,7 @@ Three modes, cheapest-first (all three call the SAME `human.clear_wall`):
                `browser-use` AND `boto3` importable; degrades with a clear message.
 
 Env:
-  HANDOFF_URL              default https://handoff.omegas.dev  (the Handoff API + wall host)
+  HANDOFF_URL              default https://handoff-human.fly.dev  (the Handoff API + wall host)
   WALL_URL                 override the wall page URL entirely
   BEDROCK_API_KEY          bearer key for Bedrock (also accepted as AWS_BEARER_TOKEN_BEDROCK)
   BEDROCK_REGION           default us-east-1
@@ -50,7 +50,7 @@ import urllib.request
 # without installing anything.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff.omegas.dev").rstrip("/")
+HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff-human.fly.dev").rstrip("/")
 WALL_URL = os.environ.get("WALL_URL") or f"{HANDOFF_URL}/demo/wall"
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-east-1")
 BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")

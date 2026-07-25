@@ -4,7 +4,7 @@
 human's phone rings, the human takes the wheel inside the agent's live browser, clears the
 wall, and the agent's blocked call returns so it finishes the job.
 
-MIT licensed (see `LICENSE`). Public page: **https://handoff.omegas.dev** · Repo: `handoff`
+MIT licensed (see `LICENSE`). Public page: **https://handoff-human.fly.dev** · Repo: `handoff`
 
 ## The problem
 
@@ -26,7 +26,7 @@ cp -r human/ /path/to/your/project/
 ```python
 import human
 
-human.configure(base_url="https://handoff.omegas.dev")   # or set HANDOFF_URL
+human.configure(base_url="https://handoff-human.fly.dev")   # or set HANDOFF_URL
 
 # Ask a question. Blocks until a human answers; returns their text.
 address = human.ask("Which shipping address should I use?", timeout_s=600)
@@ -100,7 +100,7 @@ The API's job is to hold the request, ring the phone, and carry the resolution b
 
 ## How judges can test it
 
-Open **https://handoff.omegas.dev** and start a demo request. You get the exact page a paged
+Open **https://handoff-human.fly.dev** and start a demo request. You get the exact page a paged
 human gets: the agent's stated reason, the live view of its browser, and the resolve control.
 Clearing the wall there is what unblocks the agent.
 
@@ -113,8 +113,8 @@ in the live demo and in the backup video.
 - **Anthropic Claude** as the demo agent's brain, called through **AWS Bedrock** (we had no
   direct Anthropic API credits, so Bedrock carried the model).
 - **Retell AI** places the phone call and speaks the agent's reason.
-- **Fly.io** hosts the API and the handoff page.
-- **Cloudflare** for DNS on `handoff.omegas.dev`.
+- **Fly.io** hosts the API and the handoff page, and also runs the microVM browser sandbox the
+  live view streams from.
 
 ## Prior art, and what is different
 
