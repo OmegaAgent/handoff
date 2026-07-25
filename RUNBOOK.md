@@ -29,9 +29,18 @@ Have ready, in this order, on one screen if possible:
 **Beat 1 — the agent starts and hits a wall (~20s).**
 
 ```bash
-cd ~/human
+# Recommended: drives a real browser the human can take over.
+export SPRITES_API_TOKEN=<from ~/hipocampus/.env>
+cd ~/human && python3 demo/agent_sprite.py --page          # --page rings the phone
+
+# Simpler fallback, no sandbox, but the live view is not its browser:
 HANDOFF_URL=https://handoff.omegas.dev python3 demo/agent.py --scripted
 ```
+
+`agent_sprite.py` takes roughly 25 to 40 seconds to reach the wall because every browser step goes
+through the sandbox exec API. It narrates each step, so it reads as an agent working rather than a
+hang. Do not fill the silence by talking over it; let the narration carry the beat. Note that
+`--no-page` is the DEFAULT for this one, so you must pass `--page` for the phone to ring on stage.
 
 The terminal prints the wall it hit, the handoff URL, and a line showing the statement endpoint
 answering **403 while the handoff is still pending** — the payoff is locked and the agent cannot
@@ -50,14 +59,25 @@ checkbox in the live view. Say: *"The agent could not tick this box. I can."*
 
 Be careful what you claim here, because it depends on which agent you ran:
 
+- **`demo/agent_sprite.py`** (recommended for the take) drives a real Chrome inside a sandbox, and
+  the live view is literally that browser. Verified end to end: a relayed click landed and the next
+  screencast frame showed the wall going to "Verifying". Here you can say *"that is the agent's own
+  browser, not a screenshot"* with no qualification. It is the strongest claim in the demo.
 - **`demo/agent.py --scripted`** drives its own HTTP session, so the live view is the wall, not that
   agent's browser. Say *"this is the wall it is stuck on"*. Do NOT say "this is its browser".
-- **`demo/agent_sprite.py`**, if it is working, drives a real Chrome inside a sandbox and the live
-  view is literally that browser. Only then say *"that is the agent's actual browser, not a
-  screenshot"* — and it is worth saying, because it is the strongest claim in the demo.
 
 Either way, what unlocks the payoff is your click plus your press of the button. That part is real
 in both modes: the statement endpoint stays 403 until a person resolves that specific handoff.
+
+### If a judge asks "couldn't the agent just click the box itself?"
+
+Answer honestly, because the true answer is more interesting than a dodge: **yes, a synthetic
+trusted event could tick this particular box.** The wall gates on `event.isTrusted`, and a CDP-
+injected click is trusted. The demo agent deliberately does not do that — it clicks through
+`Runtime.evaluate`, which is untrusted, and takes the rejection rather than cheating its own demo.
+The real-world case this stands in for is a CAPTCHA or an SMS code that no synthetic event
+satisfies. Do not claim the sandbox makes trusted clicks impossible; it does not, and a judge who
+knows CDP will catch it.
 
 **Beat 4 — hand it back (~15s).** Press **I cleared it**. Cut to the terminal: the blocked call has
 returned and the agent finishes and prints the deliverable. Close on: *"It did not restart. It
