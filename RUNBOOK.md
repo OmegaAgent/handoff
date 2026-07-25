@@ -9,7 +9,15 @@ takes the wheel, the agent finishes. Do not explain the architecture on stage �
 
 ```bash
 curl -s https://handoff.omegas.dev/healthz     # expect {"ok":true,...}
+
+# Rehearse silently first. --no-page means your phone stays quiet.
+cd ~/human && HANDOFF_URL=https://handoff.omegas.dev python3 demo/agent.py --scripted --no-page
 ```
+
+**Freeze deploys before you go on stage.** Request state lives in the server process, so a deploy
+or machine restart mid-run orphans the agent's pending handoff and the run hangs until it times
+out. The app is pinned to exactly one machine for this reason: with two, a request created on one
+is unknown to the other. Do not run `flyctl deploy` or `flyctl scale` until the demo is over.
 
 Have ready, in this order, on one screen if possible:
 1. A terminal in `~/human` (this is the agent's voice — its blocked print lands here).
@@ -25,8 +33,14 @@ cd ~/human
 HANDOFF_URL=https://handoff.omegas.dev python3 demo/agent.py --scripted
 ```
 
-The terminal prints the wall it hit and the handoff URL, then goes quiet. Say out loud: *"It is
-blocked. It cannot solve this one, and it has not given up either. It is waiting."*
+The terminal prints the wall it hit, the handoff URL, and a line showing the statement endpoint
+answering **403 while the handoff is still pending** — the payoff is locked and the agent cannot
+unlock it. Then it goes quiet. Say out loud: *"It is blocked. It cannot solve this one, and it has
+not given up either. It is waiting."*
+
+Use `--scripted`. There is also a `--claude` mode (Claude via Bedrock), but do not present it as
+proof of the gate: it is fed the stripped page text, which exposes the template contents, so it can
+read the total without help. `--scripted` is the mode that is honestly gated.
 
 **Beat 2 — the phone rings (~25s).** Let it ring on camera before you answer. The voice states the
 agent's own reason for stopping. This is the beat nobody else has. Do not talk over it.
@@ -74,6 +88,13 @@ curl -s -X POST https://handoff.omegas.dev/v1/requests \
   -d '{"kind":"question","question":"Which shipping address should I use?",
        "agent":"demo-agent","timeout_s":900,"page":true}'
 ```
+
+## Letting a judge try it themselves
+
+Send them to **https://handoff.omegas.dev/try**. It mints a handoff and drops them on the exact page
+a paged human sees, with the live view and the resolve button. Paging is off on that path on
+purpose: a public button that rings a phone is a public button for waking someone up. Say that out
+loud if a judge asks why their click did not ring anything.
 
 ## Reset between takes
 

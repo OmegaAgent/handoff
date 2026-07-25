@@ -19,7 +19,7 @@ from typing import Literal, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from app.page import render_landing, render_request_page
@@ -285,6 +285,30 @@ async def landing() -> HTMLResponse:
 async def request_page(request_id: str) -> HTMLResponse:
     req = _get(request_id)
     return HTMLResponse(render_request_page(req.public()))
+
+
+@app.get("/try")
+async def try_it() -> RedirectResponse:
+    """Self-serve: mint a demo handoff and drop the visitor on the page a paged human sees.
+
+    Paging is off here on purpose. The number on the other end belongs to a person, and a
+    public button that rings it is a public button for waking someone up.
+    """
+    req = HandoffRequest(
+        id=secrets.token_urlsafe(16),
+        kind="clear_wall",
+        reason="A human-verification checkbox is blocking the Northwind partner portal",
+        question=None,
+        agent="demo-agent",
+        live_view_url=os.environ.get("HANDOFF_DEMO_LIVE_VIEW") or f"{PUBLIC_URL}/demo/wall",
+        resume_url=None,
+        resume_token=None,
+        timeout_s=1800,
+        created_at=time.time(),
+    )
+    req.paged = "skipped: self-serve demo does not ring a real phone"
+    REQUESTS[req.id] = req
+    return RedirectResponse(url=f"/r/{req.id}", status_code=303)
 
 
 @app.get("/demo/statement")
