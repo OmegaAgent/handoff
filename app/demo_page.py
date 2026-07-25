@@ -5,7 +5,8 @@ Reuses the Daylight CSS and shell from app.page so the demo cannot drift from th
 
 from __future__ import annotations
 
-from app.page import ARROW, CSS, OMEGA_SVG, _shell
+# CSS is inlined by _shell; the demo adds only what the product page does not already have.
+from app.page import ARROW, OMEGA_SVG, _shell
 
 MESSAGE = "Get me the Q3 partner rebate total from the Northwind supplier portal."
 
@@ -69,9 +70,8 @@ front of you.</p>
 
 <div class="card hide" id=blocked style=margin-top:24px>
   <h2>The agent cannot tick this box. You can.</h2>
-  <p class=lede style=font-size:15.5px;max-width:58ch>Click the checkbox inside the agent's browser
-  below, then press the button. The agent's blocked call returns and it reads the number from behind
-  the wall.</p>
+  <p class=lede style=font-size:15.5px;max-width:58ch>Tick the checkbox in the page below, then press
+  the button. The agent's blocked call returns and it reads the number from behind the wall.</p>
   <div class=row>
     <button class=cta id=cleared><span>I cleared it</span><span class=chip>{ARROW}</span></button>
     <a id=pagelink class=hide href="#" target=_blank rel=noopener>Open the page the phone opened</a>
@@ -81,7 +81,7 @@ front of you.</p>
 </div>
 
 <div class="frame hide" id=frame>
-  <div class=bar><span>The agent's own browser &middot; your clicks and keystrokes are relayed</span>
+  <div class=bar><span id=barnote>The page the agent is stuck on &middot; your clicks land in the run</span>
   <a id=fullsize href="#" target=_blank rel=noopener>Open full size</a></div>
   <iframe id=liveview title="Agent browser live view" allow="clipboard-read; clipboard-write"></iframe>
 </div>
@@ -105,6 +105,7 @@ front of you.</p>
       blocked=document.getElementById('blocked'), frame=document.getElementById('frame'),
       liveview=document.getElementById('liveview'), fullsize=document.getElementById('fullsize'),
       pagelink=document.getElementById('pagelink'), cleared=document.getElementById('cleared'),
+      barnote=document.getElementById('barnote'),
       result=document.getElementById('result'), resulth=document.getElementById('resulth'),
       deliverable=document.getElementById('deliverable'), resultnote=document.getElementById('resultnote'),
       againrow=document.getElementById('againrow'), again=document.getElementById('again'),
@@ -140,6 +141,9 @@ front of you.</p>
 
     // Every field can arrive before or after the status flips; key off the fields, not the order.
     if(run&&run.handoff_id) handoffId=run.handoff_id;
+    if(run&&run.mode==='sprite'){
+      barnote.textContent="The agent's own browser \u00b7 your clicks and keystrokes are relayed";
+    }
     if(run&&run.live_view_url&&!liveSet){
       liveview.src=run.live_view_url; fullsize.href=run.live_view_url; liveSet=true; show(frame,true);
     }
@@ -157,12 +161,15 @@ front of you.</p>
       if(timer){clearInterval(timer);timer=null;}
       if(tick){clearInterval(tick);tick=null;}
       show(blocked,false);
+      show(frame,false);   // the run is over; the result belongs directly under the log
       runstate.className='state '+(status==='done'?'resolved':'expired');
       runstate.lastChild.textContent=status==='done'?'Finished':'Stopped';
       show(result,true);
       if(status==='done'){
         resulth.textContent='What the agent came back with';
-        deliverable.textContent=(run&&run.deliverable)||'The run finished without a number.';
+        var got=(run&&run.deliverable)||'';
+        deliverable.textContent=got ? (/[A-Za-z]/.test(got) ? got
+          : 'Q3 partner rebate total: '+got) : 'The run finished without a number.';
         resultnote.textContent='A person ticked the box. Nothing behind that wall was reachable until they did.';
       }else{
         resulth.textContent='The run stopped';
@@ -171,6 +178,7 @@ front of you.</p>
       }
       show(againrow,true);
       label(send,'Send'); send.disabled=false;
+      if(again) again.disabled=false;
     }
   }
 
@@ -191,6 +199,21 @@ front of you.</p>
     }
   }
 
+  // A run that was never allowed to start is not a failed run; say so in its own words.
+  function refuse(text){
+    stopped=true;
+    if(tick){clearInterval(tick);tick=null;}
+    if(timer){clearInterval(timer);timer=null;}
+    show(runbar,false); show(log,false);
+    show(result,true); show(againrow,true);
+    resulth.textContent='No run started';
+    // The server's own words, sentence-cased so it reads like the rest of the page.
+    deliverable.textContent=text.charAt(0).toUpperCase()+text.slice(1)+(/[.!?]$/.test(text)?'':'.');
+    resultnote.textContent='Every run rings a real phone, so they are capped.';
+    send.disabled=false; label(send,'Send');
+    if(again) again.disabled=false;
+  }
+
   async function start(){
     send.disabled=true; label(send,'Working');
     if(again) again.disabled=true;
@@ -208,6 +231,13 @@ front of you.</p>
     tick=setInterval(function(){ elapsed.textContent=Math.round((Date.now()-t0)/1000)+'s'; },1000);
     try{
       var res=await fetch('/demo/run',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+      if(res.status===429||res.status===503){
+        var why='';
+        try{ var d=await res.json(); why=(d&&d.detail)||''; }catch(e2){}
+        return refuse(why||(res.status===429
+          ? 'A demo is already running; try again in a minute.'
+          : 'The demo runner is not available right now.'));
+      }
       if(!res.ok) throw new Error('status '+res.status);
       var j=await res.json();
       runId=j&&j.id;
