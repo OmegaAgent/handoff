@@ -17,12 +17,19 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
   with the payoff held in a `<template>` so it is absent from the DOM until a human clears it.
 - Public: https://handoff.omegas.dev · https://github.com/NoureddinBakir/handoff (MIT).
 
-## Direction (owner, 2026-07-25): person-centric, channel-agnostic
+## Direction (owner, 2026-07-25): the multi-channel communication layer, person-centric
 
-Handoff is not phone paging for stuck agents. It is **the abstraction layer between an agent and
-the humans it depends on** — an open-source framework any agent harness plugs into so it stops
-owning *how* a person gets reached and stops owning the long-lived wait. Agents run 24/7, humans
-do not, and humans are the accountability layer. That mismatch is the product.
+Handoff is not phone paging for stuck agents. It is **the communication layer between AI agents
+and the humans they depend on** — an open-source framework any agent harness plugs into so it
+stops owning *how* a person gets reached and stops owning the long-lived wait.
+
+**Multi-channel is the identity, not a feature.** A phone call, an SMS, a Slack message, an email,
+a calendar invite: one abstraction, so an agent never hardcodes a channel. Voice with live browser
+takeover is simply the highest-bandwidth channel and the one that is built today; the rest is
+direction, and nothing in the docs or the UI may imply otherwise.
+
+Agents run 24/7, humans do not, and humans are still the accountability layer. That mismatch is
+the product.
 
 Four consequences, all decided:
 
