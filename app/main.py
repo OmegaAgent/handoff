@@ -287,6 +287,32 @@ async def request_page(request_id: str) -> HTMLResponse:
     return HTMLResponse(render_request_page(req.public()))
 
 
+@app.get("/demo/statement")
+async def demo_statement(handoff: str = "") -> dict:
+    """The demo's payoff, gated on a real person having cleared a real handoff.
+
+    Serving the wall's HTML also serves the numbers inside it, so an agent with no
+    browser could regex the total straight out of the page and never need anyone. That
+    would make the demo a lie. The deliverable lives here instead, behind a check that
+    only a human resolving this exact handoff id can satisfy: the agent holds the id but
+    has no way to resolve it itself.
+    """
+    req = REQUESTS.get(handoff)
+    if req is None:
+        raise HTTPException(status_code=403, detail="unknown handoff; no human has cleared this session")
+    req.settle()
+    if req.status != "resolved" or not req.cleared:
+        raise HTTPException(status_code=403, detail=f"handoff is {req.status}; no human has cleared this session")
+    return {
+        "reference": "NWS-Q3-REBATE-48,210.00",
+        "total": "48,210.00",
+        "currency": "USD",
+        "period": "Q3",
+        "cleared_by": req.resolved_by,
+        "cleared_at": req.resolved_at,
+    }
+
+
 @app.get("/demo/wall", response_class=HTMLResponse)
 async def demo_wall() -> HTMLResponse:
     path = REPO_ROOT / "demo" / "wall" / "index.html"

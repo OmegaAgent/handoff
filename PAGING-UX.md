@@ -23,6 +23,23 @@ immediately after — and worth one sentence in the submission's "potential" sto
 5. **Workflow tie-in**: scheduled/overnight automations default `can-wait`+digest; interactive runs
    default immediate. Remember consent answers; learn hours/channel prefs over time.
 
+## The call is a triage session (owner decision, 2026-07-24 late)
+The digest/paging call walks the stuck-workload queue **one item at a time**: a sentence of
+context, one concrete question. Per item the owner has three verbal verbs:
+- **answer** — a few words; the answer becomes the resolution of that parked `human.ask()` and the
+  blocked agent resumes, acting on the owner's behalf. Voice's superpower is throughput of small
+  decisions — this rapid-fire loop is the primary UX (owner: "much better UX").
+- **defer** — item returns to the queue for the next digest.
+- **link-me** — for items that need eyes, not speech (reply-to-this-thread class). The item's
+  request-page URL (every ask already has one — the live-view page) is dropped in Slack when the
+  call ends, with a one-line "this needs your attention".
+Link-sending is thus NOT a separate model (owner explicitly deferred standalone link-first UX) —
+it's one verb inside the triage call plus a post-call Slack drop, nearly free once the call exists.
+
+Mechanics on proven pieces: serialize the queue into the retell-llm prompt (update-retell-llm)
+before create-phone-call; post-call, extract structured answers from the transcript/call analysis
+and resolve each parked request; anything marked link-me/deferred → Slack DM with URLs.
+
 ## Channels & costs
 - Tonight's free text channel = Slack DM (bot token in ~/hipocampus/.env; push still buzzes the phone).
 - Real SMS: Retell add-on is $20/mo — post-hack decision; or any SMS provider later.

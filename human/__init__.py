@@ -1,7 +1,7 @@
 """`await human()` for AI agents — the client half of Handoff.
 
     import human
-    human.configure(base_url="https://handoff-human.fly.dev")
+    human.configure(base_url="https://handoff.omegas.dev")
 
     # Blocks until a person clears the wall in a live view of your agent's browser.
     human.clear_wall(reason="A verification checkbox is blocking checkout",
@@ -34,7 +34,7 @@ __all__ = [
     "HandoffError",
 ]
 
-DEFAULT_BASE_URL = "https://handoff-human.fly.dev"
+DEFAULT_BASE_URL = "https://handoff.omegas.dev"
 _POLL_WAIT_S = 25  # server caps a single long-poll at 30s
 
 _config = {"base_url": os.environ.get("HANDOFF_URL", DEFAULT_BASE_URL).rstrip("/")}

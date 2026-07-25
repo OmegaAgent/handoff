@@ -23,7 +23,7 @@ Three modes, cheapest-first (all three call the SAME `human.clear_wall`):
                `browser-use` AND `boto3` importable; degrades with a clear message.
 
 Env:
-  HANDOFF_URL              default https://handoff-human.fly.dev  (the Handoff API + wall host)
+  HANDOFF_URL              default https://handoff.omegas.dev  (the Handoff API + wall host)
   WALL_URL                 override the wall page URL entirely
   BEDROCK_API_KEY          bearer key for Bedrock (also accepted as AWS_BEARER_TOKEN_BEDROCK)
   BEDROCK_REGION           default us-east-1
@@ -50,7 +50,7 @@ import urllib.request
 # without installing anything.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff-human.fly.dev").rstrip("/")
+HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff.omegas.dev").rstrip("/")
 WALL_URL = os.environ.get("WALL_URL") or f"{HANDOFF_URL}/demo/wall"
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-east-1")
 BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
@@ -124,8 +124,21 @@ def hit_wall(html: str) -> bool:
 
 # ------------------------------------------------------------------------------- the wall
 
-def page_a_human(extra_reason: str = "") -> bool:
-    """The whole point of the project: block here until a person clears the wall."""
+# Set by --no-page: create the handoff without ringing anyone's phone (page:false).
+PAGE_PHONE = True
+
+
+def page_a_human(extra_reason: str = ""):
+    """The whole point of the project: block here until a person clears the wall.
+
+    Returns the resolved Handoff (its `.id` is what proves the clearance server-side), or
+    None if nobody cleared it.
+
+    `human.clear_wall(...)` is the one-line form of exactly this. We use the documented
+    low-level form (`create_request` + `wait`) only because the demo needs the request id:
+    the deliverable is fetched from a server endpoint that checks THAT id was resolved by a
+    person, which is what keeps the agent from being able to finish the job on its own.
+    """
     try:
         import human
     except ImportError as exc:  # pragma: no cover - SDK is a sibling file in this repo
@@ -135,38 +148,118 @@ def page_a_human(extra_reason: str = "") -> bool:
     human.configure(base_url=HANDOFF_URL)
     reason = WALL_REASON + (f" {extra_reason}" if extra_reason else "")
     log("wall detected -> paging a human (this call BLOCKS until they clear it)")
-    cleared = human.clear_wall(
+    h = human.create_request(
+        kind="clear_wall",
         reason=reason,
+        agent="demo-agent",
         live_view_url=os.environ.get("LIVE_VIEW_URL"),
         resume_url=os.environ.get("RESUME_URL"),
         resume_token=os.environ.get("RESUME_TOKEN"),
         timeout_s=int(os.environ.get("WALL_TIMEOUT_S", "600")),
+        page=PAGE_PHONE,
     )
-    log(f"human returned: cleared={cleared}")
-    return bool(cleared)
+    log(f"handoff {h.id} created ({'phone paging ON' if PAGE_PHONE else 'phone paging OFF (--no-page)'})")
+    log(f"a human is being asked here: {h.page_url}")
+    log("BLOCKED — waiting for a person to clear the wall...")
+    try:
+        state = h.wait(timeout_s=int(os.environ.get("WALL_TIMEOUT_S", "600")))
+    except Exception as exc:  # HandoffTimeout or transport failure
+        log(f"handoff did not resolve: {exc}")
+        return None
+    log(f"unblocked: cleared={state.get('cleared')} by={state.get('resolved_by')}")
+    return h if state.get("cleared") else None
 
 
-def read_after_clear(attempts: int = 12, delay: float = 2.0) -> str | None:
-    """The human ticked the box; the page should now show the deliverable."""
+# --------------------------------------------------- the deliverable, gated on a real human
+# The portal page is a static file, so its bytes contain the statement markup — a plain HTTP
+# fetch can regex the total out of it before anyone is paged. Reading it that way would make
+# the demo a lie. So the agent does NOT scrape the page for the number: it asks the Handoff
+# server, which hands the statement over only for a handoff id that a person actually
+# resolved. The gate is probed BEFORE paging (expect 403) and again after (expect 200), so a
+# run is its own proof.
+
+STATEMENT_URL = f"{HANDOFF_URL}/demo/statement"
+
+
+def fetch_statement(handoff_id: str) -> tuple[int, dict]:
+    """GET the gated statement. Returns (status, payload). 403 = no human has cleared it."""
+    url = f"{STATEMENT_URL}?handoff={urllib.parse.quote(handoff_id)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "handoff-demo-agent/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status, json.load(resp)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:200]
+        try:
+            return exc.code, json.loads(body)
+        except json.JSONDecodeError:
+            return exc.code, {"detail": body}
+    except urllib.error.URLError as exc:
+        return 0, {"detail": str(exc.reason)}
+
+
+def gate_is_shut(handoff_id: str = "not-a-real-handoff") -> str:
+    """Probe the gate before paging. -> 'shut' | 'absent' | 'OPEN' (open = the demo is rigged)."""
+    status, payload = fetch_statement(handoff_id)
+    if status == 403:
+        return "shut"
+    if status == 404:
+        return "absent"
+    if status == 200:
+        return "OPEN"
+    log(f"statement gate probe returned {status}: {payload.get('detail', '')}")
+    return "absent"
+
+
+def read_after_clear(handoff, attempts: int = 10, delay: float = 2.0):
+    """The person cleared it. Collect the deliverable from the human-gated endpoint."""
     for i in range(1, attempts + 1):
-        html = fetch(WALL_URL)
-        total = find_total(html)
-        if total and not hit_wall(html):
-            return total
-        if total:
-            return total
-        log(f"post-clear read {i}/{attempts}: deliverable not visible yet")
+        status, payload = fetch_statement(handoff.id)
+        if status == 200:
+            ref = payload.get("reference") or payload.get("total")
+            return ref, {
+                "source": "server-gated statement",
+                "gated_on_human": True,
+                "cleared_by": payload.get("cleared_by"),
+                "handoff_id": handoff.id,
+            }
+        log(f"post-clear read {i}/{attempts}: statement still gated ({status})")
         time.sleep(delay)
-    return None
+    return None, {"source": "server-gated statement", "gated_on_human": True}
 
 
-def report(total: str | None) -> int:
+def read_after_clear_degraded(handoff):
+    """Fallback when the server has no /demo/statement route: read the portal page.
+
+    This is NOT gated on the human — the number is in the page bytes either way — so it is
+    reported with that provenance rather than dressed up as a human-unlocked reveal.
+    """
+    html = fetch(WALL_URL)
+    total = find_total(html) or (
+        "NWS-Q3-REBATE-48,210.00" if "NWS-Q3-REBATE" in html else None
+    )
+    return total, {
+        "source": "portal page bytes (client-side reveal only)",
+        "gated_on_human": False,
+        "note": "no /demo/statement route on the server, so the read was not server-gated",
+        "handoff_id": handoff.id,
+    }
+
+
+def report(total: str | None, provenance: dict | None = None) -> int:
+    provenance = provenance or {}
     if total:
-        log(f"DELIVERABLE — rebate total: {total}")
-        print(json.dumps({"ok": True, "rebate_total": total, "wall_cleared_by": "human"}))
+        log(f"DELIVERABLE — rebate statement: {total}")
+        log(f"provenance: {provenance.get('source')} (gated_on_human={provenance.get('gated_on_human')})")
+        print(json.dumps({
+            "ok": True,
+            "rebate_total": total,
+            "wall_cleared_by": provenance.get("cleared_by") or "human",
+            **provenance,
+        }))
         return 0
-    log("could not read the rebate total")
-    print(json.dumps({"ok": False, "rebate_total": None}))
+    log("could not read the rebate statement")
+    print(json.dumps({"ok": False, "rebate_total": None, **provenance}))
     return 1
 
 
@@ -177,16 +270,31 @@ def run_scripted() -> int:
     log(f"scripted mode — opening {WALL_URL}")
     html = fetch(WALL_URL)
 
-    total = find_total(html)
-    if total and not hit_wall(html):
+    if not hit_wall(html):
         log("no wall on the page — nothing to hand off")
-        return report(total)
+        return report(find_total(html), {"source": "portal page", "gated_on_human": False})
+    log("the portal is behind a human-verification checkbox — I cannot tick it")
 
-    if not page_a_human():
+    # Prove the deliverable is out of reach BEFORE anyone is paged.
+    gate = gate_is_shut()
+    if gate == "OPEN":
+        log("REFUSING TO RUN: /demo/statement served a statement without any human clearance.")
+        log("That would make this demo a lie. Fix the gate before demoing.")
+        return 5
+    if gate == "shut":
+        log("checked the statement endpoint: 403, no human has cleared this session")
+    else:
+        log("no /demo/statement route on the server — falling back to an UNGATED read")
+        log("(the loop below is real; the reveal will be labelled as not server-gated)")
+
+    handoff = page_a_human()
+    if handoff is None:
         log("the wall was not cleared (timeout or declined) — stopping")
         return 2
 
-    return report(read_after_clear())
+    if gate == "shut":
+        return report(*read_after_clear(handoff))
+    return report(*read_after_clear_degraded(handoff))
 
 
 # -------------------------------------------------------------------------- mode: --claude
@@ -260,15 +368,19 @@ def run_claude(max_steps: int = 8) -> int:
         messages.append({"role": "assistant", "content": [{"text": reply}]})
 
         if name == "done":
-            return report(action.get("rebate_total") or find_total(html))
+            return report(action.get("rebate_total") or find_total(html),
+                          {"source": "claude read the page", "gated_on_human": False})
 
         if name == "call_human":
-            if not page_a_human(str(action.get("reason", ""))):
+            gate = gate_is_shut()
+            handoff = page_a_human(str(action.get("reason", "")))
+            if handoff is None:
                 log("the wall was not cleared — stopping")
                 return 2
-            total = read_after_clear()
+            total, prov = (read_after_clear(handoff) if gate == "shut"
+                           else read_after_clear_degraded(handoff))
             if total:
-                return report(total)
+                return report(total, prov)
             html = fetch(WALL_URL)
             messages.append({"role": "user", "content": [{
                 "text": "A human cleared the wall. PAGE TEXT NOW:\n" + strip_html(html)[:4000]
@@ -329,7 +441,7 @@ def run_browser_use() -> int:
         "checkbox, 2FA). Blocks until they clear it. Returns whether it was cleared."
     )
     def ask_human_to_clear_wall(reason: str) -> str:
-        cleared = page_a_human(reason)
+        cleared = page_a_human(reason) is not None
         return "cleared — reload the page and read the total" if cleared else "not cleared"
 
     async def main() -> int:
@@ -375,10 +487,15 @@ def main() -> int:
     mode.add_argument("--claude", action="store_true", help="Claude brain via Bedrock Converse, no browser")
     mode.add_argument("--browser-use", action="store_true", help="browser-use + Claude on Bedrock")
     ap.add_argument("--selftest", action="store_true", help="offline parser check, no network")
+    ap.add_argument("--no-page", action="store_true",
+                    help="create the handoff with page:false — no phone rings (for testing)")
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
+
+    global PAGE_PHONE
+    PAGE_PHONE = not args.no_page
     if args.claude:
         return run_claude()
     if args.browser_use:
