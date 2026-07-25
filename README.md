@@ -15,12 +15,13 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/handoff-page.png" alt="The Handoff page while an agent is blocked: the reason it stopped, a live view of its own browser showing the portal it could not get past, and the button that hands control back." width="820">
+  <img src=".github/assets/handoff-page.png" alt="The Handoff page while an agent is blocked: the reason it stopped, a live view of the page it is stuck on, and the button that hands control back." width="820">
 </p>
 
 <p align="center">
-  <sub>A real blocked handoff in production. The agent stated why it stopped, and the person can act
-  inside its browser and hand control back.</sub>
+  <sub>A real blocked handoff in production. The agent stated why it stopped, and the person clears
+  the wall in the pane and hands control back. Here the pane is the wall itself; when a sandbox
+  drives the run, it is the agent's own browser session.</sub>
 </p>
 
 ---
@@ -43,14 +44,18 @@ cleared = human.clear_wall(
     live_view_url="https://<sandbox>/live?token=<hex>",
     resume_url="https://<sandbox>/resume",
     resume_token="<hex>",
+    live_view_is_agent_browser=True,   # this pane is the agent's real session
     timeout_s=600,
 )
 ```
 
 Both calls block by long-polling the API, so a human's decision arrives as an ordinary function
 return. `live_view_url` and `resume_url` are optional: pass them when your agent drives a browser
-you want the human to touch, and the handoff page embeds that live view. Lower level, if you want
-to own the waiting: `req = human.create_request(...)` then `req.wait(timeout_s=600)`.
+you want the human to touch, and the handoff page embeds that live view. Set
+`live_view_is_agent_browser=True` only when the pane really is the agent's own session, since that
+is what makes the page tell the person their keystrokes land in the run rather than in a copy of the
+page. Lower level, if you want to own the waiting: `req = human.create_request(...)` then
+`req.wait(timeout_s=600)`.
 
 ## The problem
 
@@ -83,9 +88,11 @@ is complementary, not competing.
    browser it is driving.
 3. The API pages a human by phone through Retell AI. The voice states the reason and points at the
    handoff link.
-4. The human opens `/r/{id}`: the reason, the context, and a live view of the agent's real browser
-   (CDP screencast frames over a WebSocket, input relayed back), so they can drive it rather than
-   only watch.
+4. The human opens `/r/{id}`: the reason, the context, and a live view, so they can act rather than
+   only watch. When a sandbox drives the run, that pane is the agent's real browser (CDP screencast
+   frames over a WebSocket, input relayed back) and the agent declares it with
+   `live_view_is_agent_browser`. Without that assertion the page says only that this is the page the
+   agent is stuck on, so the strong claim is never made on the caller's behalf.
 5. The human clears the wall or types an answer, then presses "I cleared it". That hits `/resolve`,
    which POSTs the agent browser's `resume_url`.
 6. The blocked long-poll returns with `cleared=True` or the typed answer, and the run continues
@@ -186,7 +193,7 @@ a working key in the wild. The phone leg is shown in the live demo and in the ba
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Liveness. Returns `{"ok": true}`. |
-| `POST /v1/requests` | Create a handoff request. `kind` is `clear_wall` or `question`; body carries `reason`, `question`, `agent`, optional `live_view_url` / `resume_url` / `resume_token`, `timeout_s`, and `page` (set `false` to skip phone paging). Returns `201` with the id and its public `page_url`. |
+| `POST /v1/requests` | Create a handoff request. `kind` is `clear_wall` or `question`; body carries `reason`, `question`, `agent`, optional `live_view_url` / `resume_url` / `resume_token`, `live_view_is_agent_browser` (default `false`; assert it only when the pane is the agent's own session, since it decides how strongly the page describes the live view), `timeout_s`, and `page` (set `false` to skip phone paging). Returns `201` with the id and its public `page_url`. |
 | `GET /v1/requests/{id}?wait=25` | Long-poll. Returns as soon as status leaves `pending`, or after `wait` seconds. Carries `status`, `answer`, `cleared`, `resolved_by`, and timestamps. |
 | `POST /v1/requests/{id}/resolve` | Resolve one request: `{"answer", "cleared", "by"}`. Side effect: if the request carried a `resume_url`, the server POSTs it with `resume_token` as a bearer. |
 | `GET /r/{id}` | The public handoff page for one request. No auth; the id is a 22-character unguessable string. |
