@@ -264,7 +264,7 @@ def render_request_page(r: dict) -> str:
 </dl>
 {live}
 <div class="card r" id=action style=animation-delay:.2s;margin-top:22px>{action}</div>
-<p class=foot>Handoff pages a real person when an agent hits a wall. <a href="/">What this is</a></p>
+<p class=foot>Handoff pages a real person when an agent hits a wall. <a href="/">What this is</a>. Part of <a href="https://omegas.dev" target=_blank rel="noopener noreferrer">Omegas</a>.</p>
 """
 
     script = f"""<script>
@@ -375,6 +375,7 @@ browser. They clear the wall or type the answer, press one button, and the block
   <h2>Every handoff so far</h2>
   {table}
 </div>
-<p class=foot>Built at Night Hack, 2026-07-24. MIT. Requests live in one process on purpose.</p>
+<p class=foot>Handoff is part of <a href="https://omegas.dev" target=_blank rel="noopener noreferrer">Omegas</a>. Built at Night Hack, 2026-07-24. MIT.
+Requests live in one process on purpose.</p>
 """
     return _shell("Handoff — an await human() API for AI agents", body)

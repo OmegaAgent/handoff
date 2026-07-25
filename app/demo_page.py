@@ -94,7 +94,7 @@ front of you.</p>
     <span>Send it again</span><span class=chip>{ARROW}</span></button></div>
 </div>
 
-<p class=foot>Handoff pages a real person when an agent hits a wall. <a href="/">What this is</a></p>
+<p class=foot>Handoff pages a real person when an agent hits a wall. <a href="/">What this is</a>. Part of <a href="https://omegas.dev" target=_blank rel="noopener noreferrer">Omegas</a>.</p>
 """
 
     script = """<script>
