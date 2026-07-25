@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Northwind Supply — Partner Portal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232563a8'/%3E%3Cpath d='M7 22 L11 10 L16 19 L21 10 L25 22' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#f4f5f7;
+    --surface:#ffffff;
+    --border:#dcdfe4;
+    --border-strong:#c3c8cf;
+    --text:#1f2328;
+    --muted:#61676e;
+    --faint:#8b9198;
+    --blue:#2563a8;
+    --blue-dark:#1d4f88;
+    --blue-faint:#eef4fa;
+    --red:#b42318;
+    --red-faint:#fdf3f2;
+    --green:#1f7a4d;
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    font-size:15px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* ---------- chrome ---------- */
+  .topbar{
+    background:var(--surface);
+    border-bottom:1px solid var(--border);
+    height:56px;
+    display:flex;align-items:center;
+    padding:0 20px;
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:-.01em}
+  .brand svg{display:block;border-radius:5px}
+  .brand .sep{color:var(--border-strong);font-weight:400}
+  .brand .sub{color:var(--muted);font-weight:500}
+  .topbar .env{margin-left:auto;font-size:12.5px;color:var(--faint)}
+
+  .shell{
+    min-height:calc(100% - 56px);
+    display:flex;align-items:flex-start;justify-content:center;
+    padding:56px 20px 40px;
+  }
+  .col{width:100%;max-width:420px}
+  .col.wide{max-width:640px}
+
+  .card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:28px;
+  }
+  h1{font-size:20px;line-height:1.3;margin:0 0 6px;letter-spacing:-.015em}
+  .lede{color:var(--muted);font-size:14px;margin:0 0 24px}
+
+  label{display:block;font-size:13px;font-weight:600;color:var(--text);margin:0 0 6px}
+  input[type=email],input[type=password]{
+    width:100%;
+    font:inherit;
+    font-size:14.5px;
+    color:var(--text);
+    background:var(--surface);
+    border:1px solid var(--border-strong);
+    border-radius:6px;
+    padding:9px 11px;
+  }
+  input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,168,.15)}
+  .field{margin-bottom:16px}
+  .row{display:flex;align-items:center;justify-content:space-between;margin:4px 0 22px;font-size:13px}
+  .row label{font-weight:400;color:var(--muted);display:flex;align-items:center;gap:7px;margin:0}
+
+  button.primary{
+    width:100%;
+    font:inherit;font-size:14.5px;font-weight:600;
+    color:#fff;background:var(--blue);
+    border:1px solid var(--blue-dark);
+    border-radius:6px;
+    padding:10px 14px;
+    cursor:pointer;
+  }
+  button.primary:hover{background:var(--blue-dark)}
+  button.primary:active{background:#194471}
+
+  .foot{margin-top:20px;font-size:12.5px;color:var(--faint);text-align:center}
+  .legal{margin-top:24px;font-size:12px;color:var(--faint);text-align:center}
+  .legal a{color:var(--faint);text-decoration:underline}
+
+  /* ---------- verification widget ---------- */
+  .verify-head{text-align:center;margin-bottom:22px}
+  .verify-head h1{font-size:17px;margin-bottom:4px}
+  .verify-head p{margin:0;color:var(--muted);font-size:13.5px}
+
+  .widget{
+    border:1px solid var(--border-strong);
+    border-radius:6px;
+    background:#fbfbfc;
+    padding:14px 16px;
+    display:flex;align-items:center;gap:12px;
+    min-height:64px;
+    cursor:pointer;
+    user-select:none;
+  }
+  .widget:hover{background:#f7f8f9}
+  .widget.failed{border-color:#e3b5b0;background:var(--red-faint);cursor:pointer}
+  .widget.busy,.widget.done{cursor:default}
+
+  .box{
+    width:22px;height:22px;flex:0 0 22px;
+    border:1px solid #9aa1a9;
+    border-radius:3px;
+    background:#fff;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .widget:hover .box{border-color:#7d858e}
+  .box svg{width:14px;height:14px;display:none}
+  .widget.done .box{background:var(--green);border-color:var(--green)}
+  .widget.done .box svg{display:block}
+  .widget.failed .box{border-color:#c9736a}
+
+  .wtext{font-size:14px;font-weight:500;flex:1 1 auto}
+  .widget.failed .wtext{color:var(--red);font-weight:600}
+  .wtext small{display:block;font-weight:400;font-size:12.5px;color:var(--red);margin-top:2px}
+
+  .mark{margin-left:auto;text-align:right;flex:0 0 auto}
+  .mark .m-name{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.01em}
+  .mark .m-legal{font-size:10px;color:var(--faint)}
+
+  .spinner{
+    width:18px;height:18px;
+    border:2px solid #c7ccd2;
+    border-top-color:var(--blue);
+    border-radius:50%;
+    animation:spin .7s linear infinite;
+    display:none;
+  }
+  .widget.busy .spinner{display:block}
+  .widget.busy .box{display:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.spinner{animation-duration:2s}}
+
+  .ref{margin-top:18px;font-size:11.5px;color:var(--faint);text-align:center;font-variant-numeric:tabular-nums}
+
+  /* ---------- statement ---------- */
+  .stmt-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:4px}
+  .stmt-head h1{margin:0}
+  .pill{
+    font-size:11.5px;font-weight:600;
+    color:var(--green);background:#eff7f2;
+    border:1px solid #cfe6da;border-radius:4px;
+    padding:2px 8px;white-space:nowrap;
+  }
+  .meta{display:flex;flex-wrap:wrap;gap:0 28px;color:var(--muted);font-size:13px;margin:0 0 22px}
+  .meta span b{color:var(--text);font-weight:600}
+
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:10px 0;border-bottom:1px solid var(--border)}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);font-weight:600;padding-bottom:8px}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  td .code{display:block;font-size:12px;color:var(--faint)}
+  tr.total td{border-bottom:none;border-top:2px solid var(--text);padding-top:12px;font-weight:700;font-size:15px}
+
+  .deliverable{
+    margin-top:22px;
+    border:1px solid var(--border);
+    border-radius:6px;
+    background:var(--blue-faint);
+    padding:12px 14px;
+    display:flex;align-items:center;justify-content:space-between;gap:14px;
+    flex-wrap:wrap;
+  }
+  .deliverable .k{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .deliverable .v{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:14.5px;font-weight:600;color:var(--text);
+    font-variant-numeric:tabular-nums;
+    user-select:all;
+  }
+
+  .restart{
+    position:fixed;right:14px;bottom:12px;
+    font-size:11.5px;color:var(--faint);
+    background:rgba(255,255,255,.85);
+    border:1px solid var(--border);
+    border-radius:5px;
+    padding:3px 8px;
+    text-decoration:none;
+  }
+  .restart:hover{color:var(--muted);text-decoration:none}
+
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="6" fill="#2563a8"></rect>
+      <path d="M7 22 L11 10 L16 19 L21 10 L25 22" stroke="#ffffff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+    <span>Northwind Supply</span>
+    <span class="sep">/</span>
+    <span class="sub">Partner Portal</span>
+  </div>
+  <div class="env">Region: us-east · v4.18.2</div>
+</header>
+
+<main class="shell">
+
+  <!-- ============ STAGE 1: LOGIN ============ -->
+  <section class="col" id="stage-login">
+    <div class="card">
+      <h1>Sign in to the Partner Portal</h1>
+      <p class="lede">Use the supplier account credentials issued to your organization.</p>
+
+      <form id="login-form" autocomplete="on" novalidate>
+        <div class="field">
+          <label for="email">Work email</label>
+          <input type="email" id="email" name="email" placeholder="name@company.com" autocomplete="username" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" placeholder="••••••••••" autocomplete="current-password">
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="remember" checked> Keep me signed in</label>
+          <a href="#" onclick="return false">Forgot password?</a>
+        </div>
+        <button type="submit" class="primary" id="signin">Sign in</button>
+      </form>
+
+      <p class="foot">Need access? Contact your Northwind account manager.</p>
+    </div>
+    <p class="legal">© Northwind Supply Co. · <a href="#" onclick="return false">Privacy</a> · <a href="#" onclick="return false">Terms</a></p>
+  </section>
+
+  <!-- ============ STAGE 2: THE WALL ============ -->
+  <section class="col" id="stage-verify" hidden>
+    <div class="card">
+      <div class="verify-head">
+        <h1>Additional verification required</h1>
+        <p>We need to confirm a person is completing this sign-in before we can show account documents.</p>
+      </div>
+
+      <div class="widget" id="widget" role="checkbox" aria-checked="false" tabindex="0" aria-labelledby="widget-text">
+        <div class="box" aria-hidden="true">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6 L6.2 11.8 L13 4.6" stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </div>
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="wtext" id="widget-text">Verify you are human</div>
+        <div class="mark" aria-hidden="true">
+          <div class="m-name">Sentinel</div>
+          <div class="m-legal">Privacy · Terms</div>
+        </div>
+      </div>
+
+      <p class="ref">Challenge ref <span id="chal-ref">—</span></p>
+    </div>
+    <p class="legal">Protected by Sentinel human verification · <a href="#" onclick="return false">Privacy</a> · <a href="#" onclick="return false">Terms</a></p>
+  </section>
+
+  <!-- ============ STAGE 3: THE PAYOFF ============
+       Held in a <template> so the statement — and #deliverable — is NOT in the
+       queryable document until verification actually passes. Without this an
+       agent could scrape the payoff straight off the login screen. -->
+  <div id="statement-host"></div>
+  <template id="statement-tpl">
+  <section class="col wide" id="stage-statement">
+    <div class="card">
+      <div class="stmt-head">
+        <h1>Q3 partner rebate statement</h1>
+        <span class="pill">Approved for payment</span>
+      </div>
+      <p class="meta">
+        <span>Partner <b>Meridian Trading Ltd.</b></span>
+        <span>Account <b>NWS-11482</b></span>
+        <span>Period <b>Jul 1 – Sep 30</b></span>
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Line item</th>
+            <th class="num">Amount (USD)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Volume tier 3 rebate — Q3 net purchases<span class="code">SKU group AGG-100 · $1,257,900.00 @ 2.50%</span></td>
+            <td class="num">31,450.00</td>
+          </tr>
+          <tr>
+            <td>Early-payment discount accrual<span class="code">42 invoices settled inside terms</span></td>
+            <td class="num">6,820.00</td>
+          </tr>
+          <tr>
+            <td>Co-op marketing credit<span class="code">Claim CM-2291 · approved Oct 4</span></td>
+            <td class="num">4,500.00</td>
+          </tr>
+          <tr>
+            <td>Freight recovery adjustment<span class="code">Lanes MIDW-3, SE-1</span></td>
+            <td class="num">3,940.00</td>
+          </tr>
+          <tr>
+            <td>Q3 rebate true-up<span class="code">Reconciled against Q2 provisional accrual</span></td>
+            <td class="num">1,500.00</td>
+          </tr>
+          <tr class="total">
+            <td>Total rebate payable</td>
+            <td class="num">48,210.00</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="deliverable">
+        <span class="k">Statement reference</span>
+        <span class="v" id="deliverable">NWS-Q3-REBATE-48,210.00</span>
+      </div>
+
+      <p class="foot">Payment is remitted by ACH within 15 business days of statement approval.</p>
+    </div>
+    <p class="legal">© Northwind Supply Co. · <a href="#" onclick="return false">Privacy</a> · <a href="#" onclick="return false">Terms</a></p>
+  </section>
+  </template>
+
+</main>
+
+<a class="restart" href="?reset" id="restart" title="Return to sign-in">Restart demo</a>
+
+<script>
+(function () {
+  "use strict";
+
+  var DWELL_MS = 600;           // widget must be on screen this long before a click counts
+  var FAIL_COOLDOWN_MS = 1200;  // how long the red failure state sticks before re-arming
+
+  var host   = document.getElementById("statement-host");
+  var widget = document.getElementById("widget");
+  var wtext  = document.getElementById("widget-text");
+
+  var stages = {
+    login:     document.getElementById("stage-login"),
+    verify:    document.getElementById("stage-verify"),
+    statement: null            // materialised from the <template> on success only
+  };
+
+  var armedAt = 0;              // timestamp the widget became clickable
+  var settled = false;          // true once verification passed
+  var busy    = false;          // spinner / cooldown in flight
+
+  function show(name) {
+    if (name === "statement" && !stages.statement) {
+      host.appendChild(document.getElementById("statement-tpl").content.cloneNode(true));
+      stages.statement = document.getElementById("stage-statement");
+    }
+    Object.keys(stages).forEach(function (k) {
+      if (stages[k]) stages[k].hidden = (k !== name);
+    });
+  }
+
+  function ref() {
+    var s = "";
+    var alphabet = "0123456789abcdef";
+    for (var i = 0; i < 16; i++) s += alphabet[Math.floor(Math.random() * 16)];
+    return s;
+  }
+
+  /* ---------- stage 1 -> 2 : any credentials are accepted ---------- */
+  document.getElementById("login-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    document.getElementById("chal-ref").textContent = ref();
+    show("verify");
+    armWidget();
+    try { widget.focus({ preventScroll: true }); } catch (_) {}
+  });
+
+  function armWidget() {
+    settled = false;
+    busy = false;
+    armedAt = Date.now();
+    widget.className = "widget";
+    widget.setAttribute("aria-checked", "false");
+    wtext.textContent = "Verify you are human";
+  }
+
+  /* ---------- the wall ----------
+     A page-script click (element.click(), dispatchEvent(new MouseEvent(...)))
+     produces isTrusted === false. Only the browser itself — including a CDP
+     Input.dispatchMouseEvent relay of a real human's click in a live view —
+     produces isTrusted === true. That single bit is the wall.
+     Secondary checks stay deliberately loose so a relayed click never breaks:
+       - mouse/pointer clicks must land at real coordinates (a synthetic
+         .click() reports 0,0);
+       - the click must arrive after the dwell window.
+  ------------------------------------------------------------------- */
+  function evaluate(e) {
+    if (!e.isTrusted) return "automated activity detected";
+
+    var isKeyboard = (e.type === "keydown");
+    if (!isKeyboard) {
+      var x = e.clientX || 0, y = e.clientY || 0;
+      if (x === 0 && y === 0) return "automated activity detected";
+    }
+
+    if (Date.now() - armedAt < DWELL_MS) return "challenge answered too quickly";
+
+    return null; // pass
+  }
+
+  function attempt(e) {
+    if (settled || busy) return;
+    var problem = evaluate(e);
+    if (problem) { fail(problem); return; }
+    pass();
+  }
+
+  function fail(reason) {
+    busy = true;
+    widget.className = "widget failed";
+    widget.setAttribute("aria-checked", "false");
+    wtext.innerHTML = "Verification failed — " + reason +
+                      "<small>Click the checkbox to try again.</small>";
+    setTimeout(function () {
+      if (settled) return;
+      armWidget();  // re-arm (and restart the dwell window) so a human can retry
+    }, FAIL_COOLDOWN_MS);
+  }
+
+  function pass() {
+    settled = true;
+    busy = true;
+    widget.className = "widget busy";
+    wtext.textContent = "Verifying…";
+    setTimeout(function () {
+      widget.className = "widget done";
+      widget.setAttribute("aria-checked", "true");
+      wtext.textContent = "Verified";
+      setTimeout(function () { show("statement"); }, 500);
+    }, 900);
+  }
+
+  widget.addEventListener("click", attempt);
+  widget.addEventListener("keydown", function (e) {
+    if (e.key === " " || e.key === "Enter" || e.key === "Spacebar") {
+      e.preventDefault();
+      attempt(e);
+    }
+  });
+
+  /* ---------- reset: no persistence, so a plain reload is the reset ---------- */
+  document.getElementById("restart").addEventListener("click", function (e) {
+    e.preventDefault();
+    var q = new URLSearchParams(location.search);
+    q.set("reset", "1");                        // full reload; keeps any ?email/?password prefill
+    location.replace(location.pathname + "?" + q.toString());
+  });
+
+  /* ---------- optional prefill: /demo/wall?email=…&password=… ---------- */
+  function prefill() {
+    var q = new URLSearchParams(location.search);
+    if (q.has("email")) document.getElementById("email").value = q.get("email");
+    if (q.has("password")) document.getElementById("password").value = q.get("password");
+  }
+
+  show("login");
+  prefill();
+})();
+</script>
+</body>
+</html>
