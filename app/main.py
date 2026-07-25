@@ -344,6 +344,8 @@ def _statement_for(handoff_id: str) -> dict:
 # ------------------------------------------------------------------ one-click demo
 
 DEMO_RUNS: dict = {}
+DEMO_MAX_CONCURRENT = int(os.environ.get("DEMO_MAX_CONCURRENT", "4"))
+DEMO_RUN_MAX_AGE_S = float(os.environ.get("DEMO_RUN_MAX_AGE_S", "900"))
 
 
 async def _demo_create_handoff(
@@ -391,9 +393,29 @@ async def demo_run_start() -> dict:
     if not DEMO_READY:
         raise HTTPException(status_code=503, detail=f"demo not built: {DEMO_IMPORT_ERROR}")
 
-    live = sum(1 for r in DEMO_RUNS.values() if r.status in ("running", "blocked"))
-    if live >= 2:
-        raise HTTPException(status_code=429, detail="a demo is already running; try again in a minute")
+    # A run nobody finishes would otherwise hold a slot until its handoff times out, so one
+    # abandoned visitor locks out the next. Count only runs that are genuinely still alive.
+    now = time.time()
+    live = 0
+    for r in DEMO_RUNS.values():
+        if r.status not in ("running", "blocked"):
+            continue
+        if now - r.created_at > DEMO_RUN_MAX_AGE_S:
+            r.status = "failed"
+            r.error = "This run was abandoned and timed out."
+            continue
+        handoff = REQUESTS.get(r.handoff_id) if r.handoff_id else None
+        if handoff is not None:
+            handoff.settle()
+            if handoff.status != "pending":
+                continue  # settled elsewhere; the runner will notice on its next poll
+        live += 1
+
+    if live >= DEMO_MAX_CONCURRENT:
+        raise HTTPException(
+            status_code=429,
+            detail="Someone else is running the demo right now. Try again in a minute.",
+        )
 
     run = DemoRun(
         id=secrets.token_urlsafe(12),

@@ -17,6 +17,38 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
   with the payoff held in a `<template>` so it is absent from the DOM until a human clears it.
 - Public: https://handoff.omegas.dev · https://github.com/NoureddinBakir/handoff (MIT).
 
+## Direction (owner, 2026-07-25): person-centric, channel-agnostic
+
+Handoff is not phone paging for stuck agents. It is **the abstraction layer between an agent and
+the humans it depends on** — an open-source framework any agent harness plugs into so it stops
+owning *how* a person gets reached and stops owning the long-lived wait. Agents run 24/7, humans
+do not, and humans are the accountability layer. That mismatch is the product.
+
+Four consequences, all decided:
+
+1. **The unit is a person's attention queue, not a request.** Requests become items in that queue.
+   One human contact can then resolve many blocked runs across many sessions, instead of the agent
+   paging once per blocker. This is the reframe everything else depends on.
+2. **Channels are pluggable and capability-first, never per-vendor.** No `match` over
+   slack/email/sms/voice. A channel declares capabilities — can it carry rich actions, capture free
+   text, interrupt someone, survive being ignored, what latency class — and the framework routes on
+   requirements. Adding a provider must never add a branch in the core. Open question worth
+   settling: drive an existing action registry (Pipedream Connect enumerates 3,000+ apps
+   dynamically) rather than hand-writing integrations, and keep first-class ownership only of the
+   genuinely special channels, voice and calendar.
+3. **The agent negotiates modality and timing, with an LLM.** Not "send a message" but: how urgent
+   is this, is this person awake, do I have their calendar, do I interrupt or batch, do I text
+   first and ask "call now or tomorrow?". Needs a person model (channels, timezone, quiet hours,
+   calendar access, learned preferences) reasoned over, not a config file. `PAGING-UX.md` is the
+   seed of this.
+4. **Durable state stops being a nice-to-have.** Handoffs outliving the agent process is the
+   premise, not a limitation to fix later.
+
+What survives from the hack build: the blocking primitive, the request object, the resolve-and-
+resume wiring, and the live browser takeover — which stays the differentiator because it is the
+only channel where the human can *act* rather than reply. Voice + takeover is simply the
+highest-bandwidth channel, and it is the one that is built.
+
 ## Blockers / early (next session)
 1. **Real sprite live view.** The iframe points at our own demo wall as a placeholder. H2
    (embedding omega's in-sprite CDP screencast from a foreign origin) is near-certain on paper but
