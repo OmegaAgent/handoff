@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 
 CSS = """
 *,*::before,*::after{box-sizing:border-box}
@@ -130,13 +131,118 @@ OMEGA_SVG = (
 
 ARROW = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 5l7 7-7 7"/></svg>'
 
+# Landing-only styles. Every selector is prefixed `lp-` or nested under a band root,
+# following the omegas.dev scoping rule: no bare generic names at global scope.
+LANDING_CSS = """
+.lp-nav{max-width:1180px;margin:0 auto;padding:22px clamp(20px,4vw,44px);
+  display:flex;align-items:center;justify-content:space-between;gap:16px}
+.lp-navlink{font-size:15px;font-weight:600;color:var(--ink)}
+.lp-navlink:hover{color:var(--green);text-decoration:none}
+.lp-band{padding:clamp(66px,10vh,124px) clamp(20px,4vw,44px)}
+.lp-band-hero{padding-top:clamp(40px,8vh,96px);padding-bottom:clamp(64px,10vh,116px);text-align:center}
+.lp-band-hero .lp-in{max-width:940px}
+.lp-band-hero .lp-h1{max-width:17ch;margin-inline:auto}
+.lp-band-hero .lp-lede,.lp-band-hero .lp-copy{margin-inline:auto;text-align:center}
+.lp-band-hero .lp-copy{max-width:52ch}
+/* the accent half of the headline always starts its own line */
+.lp-band-hero .lp-h1 .tt{display:block}
+.lp-band-hero .lp-actions{justify-content:center}
+.lp-band-stone{background-color:var(--stone);border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  background-image:radial-gradient(circle at 1px 1px, rgba(42,33,24,.062) 1px, transparent 0);
+  background-size:22px 22px}
+.lp-in{max-width:1180px;margin:0 auto}
+.lp-in-narrow{max-width:760px;margin:0 auto}
+.lp-two{display:grid;grid-template-columns:minmax(0,.86fr) minmax(0,1fr);
+  gap:clamp(34px,4.6vw,72px);align-items:center}
+.lp-h1{margin:0;font-size:clamp(37px,5.3vw,63px);line-height:1.04;letter-spacing:-.03em;
+  font-weight:700;max-width:16ch;text-wrap:balance}
+.lp-h2{margin:0;font-size:clamp(28px,3.5vw,45px);line-height:1.1;letter-spacing:-.022em;
+  font-weight:700;max-width:19ch;text-wrap:balance}
+.tt{color:var(--green)}
+.lp-lede{margin:20px 0 0;font-size:clamp(16px,1.35vw,19px);line-height:1.55;color:var(--muted);max-width:56ch}
+.lp-copy{margin:16px 0 0;font-size:clamp(15.5px,1.25vw,17.5px);line-height:1.65;max-width:46ch}
+.lp-actions{margin-top:32px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+a.lp-quiet{font-size:14.5px;color:var(--green);font-weight:600}
+a.lp-quiet:hover{text-decoration:underline;text-underline-offset:4px}
+.lp-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:4px 20px 8px;box-shadow:0 18px 50px rgba(42,33,24,.07)}
+.lp-panel-h{display:flex;align-items:baseline;justify-content:space-between;gap:14px;
+  padding:15px 0 11px;border-bottom:1px solid var(--line);font-size:13px;font-weight:600;color:var(--muted)}
+.lp-panel-h span{font-weight:500}
+.lp-row{display:grid;grid-template-columns:92px 1fr;gap:14px;padding:14px 0;
+  border-bottom:1px solid var(--line);align-items:baseline}
+.lp-row:last-child{border-bottom:0}
+.lp-state{font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--green)}
+.lp-state.wait{color:var(--amber)}
+.lp-main{display:block;font-size:14.5px;font-weight:600;line-height:1.4}
+.lp-det{display:block;margin-top:3px;font-size:12.5px;line-height:1.5;color:var(--muted)}
+.lp-panel table{margin:4px 0}
+.lp-panel th:first-child,.lp-panel td:first-child{padding-left:0}
+.lp-panel th:last-child,.lp-panel td:last-child{padding-right:0}
+.lp-open{text-align:right}
+.lp-chan{margin:0;border-top:1px solid var(--line)}
+.lp-chan-row{display:grid;grid-template-columns:minmax(180px,max-content) 1fr;gap:8px 30px;
+  padding:18px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.lp-chan-name{font-size:17.5px;font-weight:600;letter-spacing:-.01em}
+.lp-chan-state{margin-top:4px;font-size:12.5px;font-weight:600;color:var(--muted)}
+.lp-chan-state.on{color:var(--green)}
+.lp-chan-note{font-size:15.5px;line-height:1.55;color:var(--muted)}
+.lp-chan-note b{color:var(--ink);font-weight:600}
+.lp-center{text-align:center}
+.lp-center .lp-h2,.lp-center .lp-lede{margin-left:auto;margin-right:auto}
+.lp-center .lp-actions{justify-content:center}
+.lp-foot{max-width:1180px;margin:0 auto;padding:34px clamp(20px,4vw,44px) 52px;
+  display:flex;align-items:baseline;justify-content:space-between;gap:14px 34px;flex-wrap:wrap;
+  font-size:13.5px;color:var(--muted)}
+.lp-foot .mark{font-size:16px}
+/* The hidden state is gated on `jsrv`, which the head script sets only when it is
+   going to reveal them again. No JS, a thrown error, or reduced motion: the page
+   renders final states instead of a blank column. */
+.jsrv .rv{opacity:0;transform:translateY(14px);
+  transition:opacity .55s cubic-bezier(.2,.6,.2,1),transform .55s cubic-bezier(.2,.6,.2,1)}
+.jsrv .rv.in{opacity:1;transform:none}
+.jsrv .bf{opacity:0;transform:translateY(11px);transition:opacity .5s ease-out,transform .5s ease-out}
+.jsrv .bf2{transition-delay:.07s}.jsrv .bf3{transition-delay:.14s}.jsrv .bf4{transition-delay:.21s}
+.jsrv .bf5{transition-delay:.28s}.jsrv .bf6{transition-delay:.35s}
+.jsrv .in .bf{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){
+  .jsrv .rv,.jsrv .bf,.jsrv .rv.in,.jsrv .in .bf{opacity:1;transform:none;transition:none}
+}
+@media (max-width:900px){
+  .lp-two{grid-template-columns:1fr;gap:34px}
+  .lp-h2{max-width:24ch}
+  .lp-copy{max-width:56ch}
+}
+@media (max-width:640px){
+  .lp-nav{padding:18px}
+  .lp-band{padding:clamp(52px,8vh,72px) 18px}
+  .lp-band-hero{padding-top:14px}
+  .lp-panel{padding:2px 15px 6px}
+  .lp-row{grid-template-columns:76px 1fr;gap:10px}
+  .lp-chan-row{grid-template-columns:1fr;gap:6px;padding:16px 0}
+  .lp-chan-note{font-size:15px}
+  .lp-foot{padding:28px 18px 44px}
+  .lp-actions .cta{width:100%;justify-content:space-between}
+  .lp-panel thead{display:none}
+  .lp-panel table,.lp-panel tbody,.lp-panel tr,.lp-panel td{display:block;width:auto}
+  .lp-panel tr{padding:15px 0;border-bottom:1px solid var(--line)}
+  .lp-panel tbody tr:last-child{border-bottom:0}
+  .lp-panel td{padding:0;border:0;white-space:normal}
+  .lp-panel td:nth-child(2){margin-top:9px;font-size:15px;line-height:1.45}
+  .lp-panel td:nth-child(3){display:block;margin-top:4px;font-size:13px;color:var(--muted)}
+  .lp-open{margin-top:8px;text-align:left}
+}
+"""
 
-def _shell(title: str, body: str, head: str = "") -> str:
+
+def _shell(title: str, body: str, head: str = "", full: bool = False) -> str:
+    """`full` skips the centered column so a page can run edge-to-edge bands."""
+    open_wrap, close_wrap = ("", "") if full else ("<div class=wrap>", "</div>")
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{html.escape(title)}</title><style>{CSS}</style>{head}"
-        f"</head><body><div class=wrap>{body}</div></body></html>"
+        f"</head><body>{open_wrap}{body}{close_wrap}</body></html>"
     )
 
 
@@ -314,75 +420,227 @@ if(btn) btn.addEventListener('click',async()=>{{
 # ---------------------------------------------------------------------- landing
 
 
+GITHUB = "https://github.com/NoureddinBakir/handoff"
+
+# app/main.py owns this flag and 404s /demo when it is off. The landing reads the
+# same switch so its primary CTA never points at a route that is not there.
+DEMO_ENABLED = os.environ.get("DEMO_ENABLED", "").lower() in ("1", "true", "yes", "on")
+
+# Runs before the body parses, so nothing is ever hidden unless this landed.
+REVEAL_GATE = (
+    "<script>try{if(!matchMedia('(prefers-reduced-motion: reduce)').matches"
+    "&&'IntersectionObserver' in window)"
+    "document.documentElement.classList.add('jsrv')}catch(e){}</script>"
+)
+
+# The record of the run this whole thing exists for. Four states, no invented
+# timestamps: the page claims only what the server actually does.
+RUN_RECORD = [
+    ("STOPPED", "A verification checkbox refused the agent's click",
+     "The agent held its run open instead of guessing its way past"),
+    ("CALLED", "A phone rang and read out what was blocking the run",
+     "The agent asked for a person; it never named a channel"),
+    ("CLEARED", "A person ticked the box inside the agent's own browser",
+     "Not a reply. They acted inside the session the agent was stuck in"),
+    ("FINISHED", "The blocked call returned and the run carried on",
+     "The number came from behind the wall, after clearance"),
+]
+
+CHANNELS = [
+    ("Voice, with the browser", "Built and running", True,
+     "The phone rings, the person hears what stopped the run, and they get the agent's own "
+     "session to act in. <b>The one channel where a person can act instead of reply.</b>"),
+    ("SMS, Slack, email, calendar", "Designed, not built", False,
+     "The same request object reaching the same person a different way. None of these work "
+     "today. When they do, nothing in the SDK above changes."),
+]
+
+
 def render_landing(recent: list[dict]) -> str:
     if recent:
         rows = "".join(
             f"<tr><td>{_state_pill(r['status'])}</td>"
             f"<td>{html.escape((r['question'] or r['reason'] or '')[:70])}</td>"
             f"<td>{html.escape(r['agent'])}</td>"
-            f"<td style=text-align:right><a href=\"/r/{html.escape(r['id'])}\">Open</a></td></tr>"
+            f'<td class=lp-open><a href="/r/{html.escape(r["id"])}">Open</a></td></tr>'
             for r in recent
         )
-        table = (
-            "<table><thead><tr><th>State</th><th>What stopped the run</th><th>Agent</th>"
-            f"<th></th></tr></thead><tbody>{rows}</tbody></table>"
+        queue = (
+            '<div class="lp-panel rv"><table><thead><tr><th>State</th>'
+            "<th>What stopped the run</th><th>Agent</th><th></th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
         )
     else:
-        table = "<div class=none>No agent has asked for a human yet.</div>"
+        queue = '<div class="none rv">No agent has asked for a person yet.</div>'
+
+    if DEMO_ENABLED:
+        cta_href, cta_label = "/demo", "See it run"
+        nav_link = '<a class=lp-navlink href="/demo">See it run</a>'
+    elif recent:
+        cta_href = "/r/" + html.escape(recent[0]["id"])
+        cta_label = "Open the last handoff"
+        nav_link = f'<a class=lp-navlink href="{GITHUB}" target=_blank rel="noopener noreferrer">Source</a>'
+    else:
+        cta_href, cta_label = GITHUB, "Read the code"
+        nav_link = f'<a class=lp-navlink href="{GITHUB}" target=_blank rel="noopener noreferrer">Source</a>'
+    cta = (
+        f'<a class=cta href="{cta_href}"><span>{cta_label}</span>'
+        f"<span class=chip>{ARROW}</span></a>"
+    )
 
     waiting = next((r for r in recent if r["status"] == "pending"), None)
-    latest = waiting or (recent[0] if recent else None)
-    if latest:
-        label = "Open the waiting handoff" if waiting else "Open the last handoff"
-        cta = (
-            f'<div class="row r" style=animation-delay:.14s;margin-top:26px>'
-            f'<a class=cta href="/r/{html.escape(latest["id"])}"><span>{label}</span>'
-            f"<span class=chip>{ARROW}</span></a></div>"
+    live_line = (
+        f'<a class=lp-quiet href="/r/{html.escape(waiting["id"])}">A run is waiting on a person '
+        "right now.</a>"
+        if waiting
+        else (
+            '<a class=lp-quiet href="' + GITHUB + '" target=_blank rel="noopener noreferrer">'
+            "Read the code</a>"
+            if cta_href != GITHUB
+            else ""
         )
-    else:
-        cta = ""
+    )
+
+    record = "".join(
+        f'<div class="lp-row bf bf{i + 2}"><span class=lp-state>{state}</span>'
+        f"<span><span class=lp-main>{main}</span><span class=lp-det>{det}</span></span></div>"
+        for i, (state, main, det) in enumerate(RUN_RECORD)
+    )
+
+    channels = "".join(
+        f'<div class="lp-chan-row rv"><div><div class=lp-chan-name>{name}</div>'
+        f'<div class="lp-chan-state{" on" if built else ""}">{state}</div></div>'
+        f"<p class=lp-chan-note>{note}</p></div>"
+        for name, state, built, note in CHANNELS
+    )
 
     sample = (
         "<b>import human</b>\n\n"
-        "<i># The agent hits a verification checkbox it cannot solve.</i>\n"
+        "<i># The agent cannot tick a verification checkbox. It says so and waits.</i>\n"
         "cleared = human.<b>clear_wall</b>(\n"
-        '    reason="A human-verification checkbox is blocking checkout",\n'
-        "    live_view_url=browser.live_url,   <i># your sandbox's screencast</i>\n"
-        "    resume_url=browser.resume_url,    <i># told the moment the wall is gone</i>\n"
+        '    reason="A verification checkbox is blocking checkout",\n'
+        "    live_view_url=browser.live_url,   <i># the session to hand over</i>\n"
+        "    resume_url=browser.resume_url,    <i># told when the wall is gone</i>\n"
         "    timeout_s=600,\n"
         ")\n\n"
-        "<i># Or just ask a question and wait for a typed answer.</i>\n"
-        'shipping = human.<b>ask</b>("Which address should I ship to?")'
+        "<i># Or ask for a judgement and wait for the answer.</i>\n"
+        'address = human.<b>ask</b>("Which address should I ship to?")'
     )
 
     body = f"""
-{_brand()}
-<h1 class=r style=margin-top:34px;max-width:19ch>When an agent hits a wall, it asks a person.</h1>
-<p class="lede r" style=animation-delay:.06s;margin-top:18px>Handoff is an <code>await human()</code>
-call. The agent blocks, a phone rings, and whoever picks up gets a live view of the agent's own
-browser. They clear the wall or type the answer, press one button, and the blocked call returns.</p>
-{cta}
-<div class=section>
-  <h2>What a handoff looks like</h2>
-  <dl class=trace>
-    <dt>Agent</dt><dd>Stopped at a verification checkbox it could not tick, and held its run open.</dd>
-    <dt>Phone</dt><dd>Rang a real person and read out what was blocking the run.</dd>
-    <dt>Person</dt><dd>Ticked the box inside the agent's own browser and pressed <b>I cleared it</b>.</dd>
-    <dt>Agent</dt><dd>Resumed mid-call and finished the run.</dd>
-  </dl>
-</div>
-<div class="card section">
-  <h2>The whole SDK</h2>
-  <pre>{sample}</pre>
-  <p style="margin:18px 0 0;color:var(--muted);font-size:14.5px;max-width:62ch">Text approvals in chat
-  already exist. What they leave out is a phone that actually rings and a browser a person can take
-  the wheel of.</p>
-</div>
-<div class=section>
-  <h2>Every handoff so far</h2>
-  {table}
-</div>
-<p class=foot>Handoff is part of <a href="https://omegas.dev" target=_blank rel="noopener noreferrer">Omegas</a>. Built at Night Hack, 2026-07-24. MIT.
-Requests live in one process on purpose.</p>
+<header class=lp-nav>
+  {_brand()}
+  {nav_link}
+</header>
+
+<section class="lp-band lp-band-hero">
+  <div class=lp-in>
+    <h1 class="lp-h1 rv">The communication layer between agents
+      <span class=tt>and the people they depend on.</span></h1>
+    <p class="lp-lede rv">Agents run around the clock. The people accountable for their work do not.
+    Handoff is the one call an agent makes when it needs someone: it reaches a real person on
+    whatever channel fits, and holds the run open until they answer.</p>
+    <p class="lp-copy rv">An agent stopped at a verification checkbox tonight, rang a phone, handed
+    over its own browser, and finished the run the moment a person ticked the box.</p>
+    <div class="lp-actions rv">
+      {cta}
+      {live_line}
+    </div>
+  </div>
+</section>
+
+<section class="lp-band lp-band-stone">
+  <div class="lp-in lp-two">
+    <div>
+      <h2 class="lp-h2 rv">The agent stopped. <span class=tt>A person finished it.</span></h2>
+      <p class="lp-copy rv">One call blocks the run: <code>human.clear_wall(...)</code>. Handoff
+      reaches a person, they act inside the agent's own session, and the call returns with the run
+      intact. The agent never guessed, and never faked its way past.</p>
+      <p class="lp-copy rv">Text approvals in chat already exist. What they leave out is a phone
+      that rings and a browser a person can take the wheel of.</p>
+    </div>
+    <div class="lp-panel rv">
+      <div class=lp-panel-h>Run record<span>handoff.omegas.dev</span></div>
+      {record}
+    </div>
+  </div>
+</section>
+
+<section class=lp-band>
+  <div class=lp-in>
+    <h2 class="lp-h2 rv">One request. <span class=tt>Any way of reaching someone.</span></h2>
+    <p class="lp-lede rv">An agent should not hardcode a channel or own the waiting. It says a
+    person is needed and how urgent that is. The layer decides whether that becomes a call, a
+    message, or an invite, and who is even awake to take it.</p>
+    <div class=lp-chan style=margin-top:38px>
+      {channels}
+    </div>
+  </div>
+</section>
+
+<section class="lp-band lp-band-stone">
+  <div class=lp-in>
+    <h2 class="lp-h2 rv">A request belongs to <span class=tt>a person, not a run.</span></h2>
+    <p class="lp-lede rv">Requests land in a person's queue rather than firing once per blocked
+    run, so one human answer can settle several waiting agents. Every handoff this server has been
+    asked for is below.</p>
+    <div style=margin-top:36px>{queue}</div>
+  </div>
+</section>
+
+<section class=lp-band>
+  <div class="lp-in lp-two">
+    <div>
+      <h2 class="lp-h2 rv">The whole SDK <span class=tt>is two calls.</span></h2>
+      <p class="lp-copy rv">One file, standard library only. <code>clear_wall</code> blocks until a
+      person clears the way; <code>ask</code> blocks until someone answers. A timeout raises, or
+      returns the default you passed, so a run never hangs forever.</p>
+      <p class="lp-copy rv">Nothing in these signatures names a channel. That is the point.</p>
+    </div>
+    <pre class=rv>{sample}</pre>
+  </div>
+</section>
+
+<section class="lp-band lp-band-stone lp-center">
+  <div class=lp-in-narrow>
+    <h2 class="lp-h2 rv">The wall is still there. <span class=tt>Someone has to clear it.</span></h2>
+    <p class="lp-lede rv">Handoff is how the agent reaches that someone, and how the run stays
+    alive while they are on their way.</p>
+    <div class="lp-actions rv">
+      {cta}
+    </div>
+  </div>
+</section>
+
+<footer class=lp-foot>
+  <span>Handoff is part of
+  <a href="https://omegas.dev" target=_blank rel="noopener noreferrer">Omegas</a>.</span>
+  <span>Built at Night Hack, 2026-07-24. MIT.
+  <a href="{GITHUB}" target=_blank rel="noopener noreferrer">Source</a>.
+  Requests live in one process on purpose.</span>
+</footer>
+
+<script>
+(function(){{
+  var els=document.querySelectorAll('.rv');
+  var still=window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    || !('IntersectionObserver' in window);
+  if(still){{ els.forEach(function(el){{ el.classList.add('in'); }}); return; }}
+  // Fire once per element, then stop watching it. Nothing runs after the page settles.
+  var io=new IntersectionObserver(function(entries){{
+    entries.forEach(function(en){{
+      if(!en.isIntersecting) return;
+      en.target.classList.add('in');
+      io.unobserve(en.target);
+    }});
+  }},{{threshold:.2}});
+  els.forEach(function(el){{ io.observe(el); }});
+}})();
+</script>
 """
-    return _shell("Handoff — an await human() API for AI agents", body)
+    return _shell(
+        "Handoff — the communication layer between agents and people",
+        body,
+        head=f"<style>{LANDING_CSS}</style>{REVEAL_GATE}",
+        full=True,
+    )
