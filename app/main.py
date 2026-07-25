@@ -63,6 +63,7 @@ class HandoffRequest:
     question: Optional[str]
     agent: str
     live_view_url: Optional[str]
+    live_view_is_agent_browser: bool
     resume_url: Optional[str]
     resume_token: Optional[str]
     timeout_s: int
@@ -99,6 +100,7 @@ class HandoffRequest:
             "answer": self.answer,
             "cleared": self.cleared,
             "live_view_url": self.live_view_url,
+            "live_view_is_agent_browser": self.live_view_is_agent_browser,
             "has_resume": bool(self.resume_url),
             "resume_posted": self.resume_posted,
             "paged": self.paged,
@@ -195,6 +197,8 @@ class CreateBody(BaseModel):
     question: Optional[str] = None
     agent: str = "agent"
     live_view_url: Optional[str] = None
+    # Assert this only when the live view really is the browser the agent drives.
+    live_view_is_agent_browser: bool = False
     resume_url: Optional[str] = None
     resume_token: Optional[str] = None
     timeout_s: int = 600
@@ -225,6 +229,7 @@ async def create_request(body: CreateBody) -> JSONResponse:
         question=body.question,
         agent=body.agent,
         live_view_url=body.live_view_url,
+        live_view_is_agent_browser=body.live_view_is_agent_browser,
         resume_url=body.resume_url,
         resume_token=body.resume_token,
         timeout_s=max(10, min(body.timeout_s, 3600)),
@@ -313,6 +318,7 @@ async def try_it() -> RedirectResponse:
         question=None,
         agent="demo-agent",
         live_view_url=os.environ.get("HANDOFF_DEMO_LIVE_VIEW") or f"{PUBLIC_URL}/demo/wall",
+        live_view_is_agent_browser=bool(os.environ.get("HANDOFF_DEMO_LIVE_VIEW")),
         resume_url=None,
         resume_token=None,
         timeout_s=1800,
@@ -360,7 +366,11 @@ def _require_demo() -> None:
 
 
 async def _demo_create_handoff(
-    reason: str, live_view_url: Optional[str], timeout_s: int, page: bool
+    reason: str,
+    live_view_url: Optional[str],
+    timeout_s: int,
+    page: bool,
+    is_agent_browser: bool = False,
 ) -> tuple[str, str]:
     """Mint a handoff in-process, so the runner needs no HTTP round trip to ourselves."""
     req = HandoffRequest(
@@ -370,6 +380,7 @@ async def _demo_create_handoff(
         question=None,
         agent="demo-agent",
         live_view_url=live_view_url,
+        live_view_is_agent_browser=is_agent_browser,
         resume_url=None,
         resume_token=None,
         timeout_s=timeout_s,

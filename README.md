@@ -14,6 +14,15 @@
   Python 3.12
 </p>
 
+<p align="center">
+  <img src=".github/assets/handoff-page.png" alt="The Handoff page while an agent is blocked: the reason it stopped, a live view of its own browser showing the portal it could not get past, and the button that hands control back." width="820">
+</p>
+
+<p align="center">
+  <sub>A real blocked handoff in production. The agent stated why it stopped, and the person can act
+  inside its browser and hand control back.</sub>
+</p>
+
 ---
 
 ## The 10-line version
@@ -65,6 +74,10 @@ is complementary, not competing.
 
 ## How it works
 
+<p align="center">
+  <img src=".github/assets/flow.svg" alt="Flow diagram: the agent calls clear_wall and blocks; Handoff holds the request and pages a phone; a person answers and drives the agent's own browser through a live view; pressing I cleared it resolves the request, POSTs resume, and the blocked call returns." width="900">
+</p>
+
 1. The agent hits a wall and calls `human.clear_wall(...)` or `human.ask(...)`. The call blocks.
 2. The SDK POSTs `/v1/requests` with the agent's reason, plus the live-view and resume URLs for the
    browser it is driving.
@@ -77,6 +90,12 @@ is complementary, not competing.
    which POSTs the agent browser's `resume_url`.
 6. The blocked long-poll returns with `cleared=True` or the typed answer, and the run continues
    from where it stopped.
+
+The live view is a direct connection between the human's page and the agent's browser sandbox. The
+API holds the request, rings the phone, and carries the resolution back.
+
+<details>
+<summary>The same flow as a sequence, for reading in a terminal</summary>
 
 ```
  agent + browser      handoff API       phone        human
@@ -93,8 +112,13 @@ is complementary, not competing.
         |  run continues    |             |            |
 ```
 
-The live view is a direct connection between the human's page and the agent's browser sandbox. The
-API holds the request, rings the phone, and carries the resolution back.
+</details>
+
+Once the person acts, the same page records what happened and the run carries on:
+
+<p align="center">
+  <img src=".github/assets/resolved.png" alt="A resolved handoff page: the question, a Handed back state, the answer the person typed, and a line confirming the agent is running again." width="820">
+</p>
 
 ## The gate that makes the demo honest
 
@@ -149,6 +173,10 @@ gated statement.
 Paging is off on that self-serve path, on purpose. A public button that rings a real person's phone
 is a public button for waking someone up. We also publish no `curl` that pages, since that would put
 a working key in the wild. The phone leg is shown in the live demo and in the backup video.
+
+<p align="center">
+  <img src=".github/assets/landing.png" alt="The Handoff landing page: the headline When an agent hits a wall, it asks a person, a button to open the waiting handoff, a four-line record of what a handoff looks like, and the whole SDK in one code block." width="820">
+</p>
 
 <details>
 <summary><strong>Full HTTP API</strong></summary>
@@ -206,14 +234,25 @@ Full detail in [DISCLOSURE.md](DISCLOSURE.md).
 - **Fly.io** hosts the API and the handoff page.
 - **Cloudflare** for DNS on `handoff.omegas.dev`.
 
-## Roadmap
+## Where this goes
 
-- TypeScript SDK with the same two calls.
-- Durable state, so a redeploy cannot drop a pending request.
+Handoff is meant to become the layer between an agent and the people it depends on: an open-source
+framework for reaching a human across whatever channel suits the moment, Slack, email, SMS, voice or
+calendar, behind one abstraction. The reframe is that a request belongs to a person's attention
+queue rather than to a single run, so one human contact can settle several blocked runs instead of
+each blocker paging separately. Voice with live browser takeover is the highest-bandwidth channel,
+and it is the one that is built. The rest is roadmap, not product:
+
+- Pluggable channels, described by capability rather than by vendor: what a channel can carry, what
+  it can capture, whether it can interrupt someone, how long it survives being ignored. Adding a
+  provider should never add a branch in the core.
+- A person model instead of a config file: channels, timezone, quiet hours, calendar awareness,
+  learned preferences, so an agent can weigh whether to interrupt now, text first, or wait.
+- Cross-session batching, so several agents' asks reach one person as one conversation.
+- Durable state, so a handoff outlives the process and the machine that created it.
 - API keys on request creation, and signed handoff-page links.
-- Voice answers: the human speaks the answer on the call, speech-to-text returns it to the agent.
-- Framework adapters for LangGraph, browser-use, and the Claude Agent SDK.
-- Escalation policy: re-ring, fall back to a second contact, then SMS or Slack.
+- Voice answers: the person speaks the answer on the call, speech-to-text returns it to the agent.
+- A TypeScript SDK, and framework adapters for LangGraph, browser-use, and the Claude Agent SDK.
 
 ## License
 

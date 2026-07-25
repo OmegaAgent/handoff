@@ -178,13 +178,20 @@ def render_request_page(r: dict) -> str:
     else:
         subline = f"Nobody arrived in time, so <b>{agent}</b> took its own fallback path."
 
-    # Live view of the agent's own browser. The viewer can drive it, not just watch.
+    # Only claim this is the agent's own browser when the caller said it is. A live view
+    # can legitimately be just the page the agent is stuck on, and the stronger sentence
+    # would be a lie there.
+    caption = (
+        "The agent's own browser &middot; your clicks and keystrokes are relayed"
+        if r.get("live_view_is_agent_browser")
+        else "The page the agent is stuck on &middot; your clicks are relayed"
+    )
     live = ""
     if status == "pending":
         if r.get("live_view_url"):
             live = (
                 '<div class="frame r" style=animation-delay:.16s><div class=bar>'
-                "<span>The agent's own browser &middot; your clicks and keystrokes are relayed</span>"
+                f"<span>{caption}</span>"
                 f'<a href="{html.escape(r["live_view_url"])}" target=_blank rel=noopener>Open full size</a></div>'
                 f'<iframe src="{html.escape(r["live_view_url"])}" title="Agent browser live view"'
                 ' allow="clipboard-read; clipboard-write"></iframe></div>'
