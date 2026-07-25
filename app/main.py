@@ -347,6 +347,17 @@ DEMO_RUNS: dict = {}
 DEMO_MAX_CONCURRENT = int(os.environ.get("DEMO_MAX_CONCURRENT", "4"))
 DEMO_RUN_MAX_AGE_S = float(os.environ.get("DEMO_RUN_MAX_AGE_S", "900"))
 
+# Every demo run places a real phone call and drives a real sandbox, so it spends the
+# host's credits. It is therefore OFF unless whoever runs this instance opts in.
+DEMO_ENABLED = os.environ.get("DEMO_ENABLED", "").lower() in ("1", "true", "yes", "on")
+
+
+def _require_demo() -> None:
+    if not DEMO_ENABLED:
+        raise HTTPException(status_code=404, detail="the interactive demo is not enabled on this instance")
+    if not DEMO_READY:
+        raise HTTPException(status_code=503, detail=f"demo not built: {DEMO_IMPORT_ERROR}")
+
 
 async def _demo_create_handoff(
     reason: str, live_view_url: Optional[str], timeout_s: int, page: bool
@@ -382,16 +393,14 @@ async def _demo_get_statement(handoff_id: str) -> dict:
 
 @app.get("/demo", response_class=HTMLResponse)
 async def demo_page() -> HTMLResponse:
-    if not DEMO_READY:
-        raise HTTPException(status_code=503, detail=f"demo not built: {DEMO_IMPORT_ERROR}")
+    _require_demo()
     return HTMLResponse(render_demo_page())
 
 
 @app.post("/demo/run", status_code=201)
 async def demo_run_start() -> dict:
     """Start a real run. This rings a real phone, which the page says before you press Send."""
-    if not DEMO_READY:
-        raise HTTPException(status_code=503, detail=f"demo not built: {DEMO_IMPORT_ERROR}")
+    _require_demo()
 
     # A run nobody finishes would otherwise hold a slot until its handoff times out, so one
     # abandoned visitor locks out the next. Count only runs that are genuinely still alive.
@@ -444,6 +453,7 @@ async def demo_run_start() -> dict:
 
 @app.get("/demo/run/{run_id}")
 async def demo_run_state(run_id: str) -> dict:
+    _require_demo()
     run = DEMO_RUNS.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="no such run")
