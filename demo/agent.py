@@ -160,14 +160,31 @@ def page_a_human(extra_reason: str = ""):
     )
     log(f"handoff {h.id} created ({'phone paging ON' if PAGE_PHONE else 'phone paging OFF (--no-page)'})")
     log(f"a human is being asked here: {h.page_url}")
+
+    # Prove the deliverable is out of reach with THIS handoff id while it is still pending.
+    gate = gate_state(h.id)
+    if gate == "shut":
+        log(f"ASSERT ok — statement gate SHUT: 403 'pending' for {h.id}, no human has acted")
+    elif gate == "OPEN":
+        log("REFUSING TO CONTINUE: the statement endpoint served the deliverable for a")
+        log("PENDING handoff — no human has cleared anything. That is a rigged demo.")
+        return None, "OPEN"
+    elif gate == "lost":
+        log("WARNING: the server does not recognise the handoff it just issued — in-memory")
+        log("state was dropped (restart or a second machine). The wait below will hang.")
+    elif gate == "expired":
+        log("the handoff expired before the gate was probed")
+    else:
+        log("no /demo/statement route on this server — the read below is NOT server-gated")
+
     log("BLOCKED — waiting for a person to clear the wall...")
     try:
         state = h.wait(timeout_s=int(os.environ.get("WALL_TIMEOUT_S", "600")))
     except Exception as exc:  # HandoffTimeout or transport failure
         log(f"handoff did not resolve: {exc}")
-        return None
+        return None, gate
     log(f"unblocked: cleared={state.get('cleared')} by={state.get('resolved_by')}")
-    return h if state.get("cleared") else None
+    return (h if state.get("cleared") else None), gate
 
 
 # --------------------------------------------------- the deliverable, gated on a real human
@@ -198,16 +215,33 @@ def fetch_statement(handoff_id: str) -> tuple[int, dict]:
         return 0, {"detail": str(exc.reason)}
 
 
-def gate_is_shut(handoff_id: str = "not-a-real-handoff") -> str:
-    """Probe the gate before paging. -> 'shut' | 'absent' | 'OPEN' (open = the demo is rigged)."""
+def gate_state(handoff_id: str) -> str:
+    """Probe the gate with a REAL, still-PENDING handoff id.
+
+    The distinction matters: a 403 for an unknown id only proves the route rejects garbage.
+    A 403 that says *pending* proves the gate is shut on the very handoff this agent is
+    about to block on — i.e. the deliverable is unreachable precisely while a person has not
+    yet acted. That is the assertion the demo rests on, so it is checked by detail text.
+
+    -> 'shut'    403 + "pending": the gate is shut on THIS handoff, human not yet acted
+       'lost'    403 but the server does not know this id (in-memory state dropped)
+       'expired' 403 + "expired": the handoff timed out
+       'absent'  404: no such route on this server (the id itself definitely exists)
+       'OPEN'    200: served the deliverable with nobody having cleared it — rigged
+    """
     status, payload = fetch_statement(handoff_id)
-    if status == 403:
-        return "shut"
-    if status == 404:
-        return "absent"
+    detail = str(payload.get("detail", "")).lower()
     if status == 200:
         return "OPEN"
-    log(f"statement gate probe returned {status}: {payload.get('detail', '')}")
+    if status == 403:
+        if "pending" in detail:
+            return "shut"
+        if "expired" in detail:
+            return "expired"
+        log(f"statement gate 403 but not 'pending': {detail!r}")
+        return "lost"
+    if status != 404:
+        log(f"statement gate probe returned {status}: {detail}")
     return "absent"
 
 
@@ -275,19 +309,9 @@ def run_scripted() -> int:
         return report(find_total(html), {"source": "portal page", "gated_on_human": False})
     log("the portal is behind a human-verification checkbox — I cannot tick it")
 
-    # Prove the deliverable is out of reach BEFORE anyone is paged.
-    gate = gate_is_shut()
+    handoff, gate = page_a_human()
     if gate == "OPEN":
-        log("REFUSING TO RUN: /demo/statement served a statement without any human clearance.")
-        log("That would make this demo a lie. Fix the gate before demoing.")
         return 5
-    if gate == "shut":
-        log("checked the statement endpoint: 403, no human has cleared this session")
-    else:
-        log("no /demo/statement route on the server — falling back to an UNGATED read")
-        log("(the loop below is real; the reveal will be labelled as not server-gated)")
-
-    handoff = page_a_human()
     if handoff is None:
         log("the wall was not cleared (timeout or declined) — stopping")
         return 2
@@ -372,8 +396,7 @@ def run_claude(max_steps: int = 8) -> int:
                           {"source": "claude read the page", "gated_on_human": False})
 
         if name == "call_human":
-            gate = gate_is_shut()
-            handoff = page_a_human(str(action.get("reason", "")))
+            handoff, gate = page_a_human(str(action.get("reason", "")))
             if handoff is None:
                 log("the wall was not cleared — stopping")
                 return 2
@@ -441,7 +464,7 @@ def run_browser_use() -> int:
         "checkbox, 2FA). Blocks until they clear it. Returns whether it was cleared."
     )
     def ask_human_to_clear_wall(reason: str) -> str:
-        cleared = page_a_human(reason) is not None
+        cleared = page_a_human(reason)[0] is not None
         return "cleared — reload the page and read the total" if cleared else "not cleared"
 
     async def main() -> int:

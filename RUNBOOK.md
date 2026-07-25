@@ -1,6 +1,6 @@
 # Demo runbook — Handoff
 
-Live: **https://handoff.omegas.dev** · Repo: **https://github.com/NoureddinBakir/handoff**
+Live: **https://handoff.omegas.dev** · Repo: **https://github.com/OmegaAgent/handoff**
 
 Two minutes, one uninterrupted take. The whole story is: the agent stops, a phone rings, a person
 takes the wheel, the agent finishes. Do not explain the architecture on stage — show the phone.
@@ -45,9 +45,19 @@ read the total without help. `--scripted` is the mode that is honestly gated.
 **Beat 2 — the phone rings (~25s).** Let it ring on camera before you answer. The voice states the
 agent's own reason for stopping. This is the beat nobody else has. Do not talk over it.
 
-**Beat 3 — the human takes the wheel (~40s).** Open the handoff page. Point at the live view: *"That
-is the agent's actual browser, not a screenshot."* Click the verification checkbox in the live view.
-Say: *"The agent could not tick this box. I can."*
+**Beat 3 — the human takes the wheel (~40s).** Open the handoff page. Click the verification
+checkbox in the live view. Say: *"The agent could not tick this box. I can."*
+
+Be careful what you claim here, because it depends on which agent you ran:
+
+- **`demo/agent.py --scripted`** drives its own HTTP session, so the live view is the wall, not that
+  agent's browser. Say *"this is the wall it is stuck on"*. Do NOT say "this is its browser".
+- **`demo/agent_sprite.py`**, if it is working, drives a real Chrome inside a sandbox and the live
+  view is literally that browser. Only then say *"that is the agent's actual browser, not a
+  screenshot"* — and it is worth saying, because it is the strongest claim in the demo.
+
+Either way, what unlocks the payoff is your click plus your press of the button. That part is real
+in both modes: the statement endpoint stays 403 until a person resolves that specific handoff.
 
 **Beat 4 — hand it back (~15s).** Press **I cleared it**. Cut to the terminal: the blocked call has
 returned and the agent finishes and prints the deliverable. Close on: *"It did not restart. It

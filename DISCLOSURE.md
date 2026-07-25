@@ -32,8 +32,17 @@ The whole standalone product, from nothing:
   answer field, and the resolve control.
 - **Phone paging through Retell AI**: write the agent's reason into the call's opening message,
   then place the call to a real phone.
-- **The demo wall** (a self-controlled login and CAPTCHA page) and the demo agent that drives it
-  with Claude on AWS Bedrock.
+- **The demo wall** (a self-controlled login and CAPTCHA page) and the demo agent that drives it.
+  Two modes: `--scripted`, which is the mode measured end to end tonight, and `--claude`, which
+  runs the agent on Claude via AWS Bedrock but is fed stripped page text, so it does not
+  demonstrate the gate below.
+- **`GET /demo/statement?handoff=<id>`**, the gated payoff: it returns the demo's rebate statement
+  only when a human resolved that exact handoff id, and 403 otherwise. It exists because serving
+  the wall's HTML also serves the numbers inside it, so an agent could regex the total out of the
+  page and never need a person. The agent holds the handoff id and has no way to resolve it itself,
+  which is what makes the demo prove something.
+- **`GET /try`**, a self-serve route that mints a demo handoff with paging off and redirects to its
+  page, so anyone can see what a paged human sees without ringing a real phone.
 - **The "I cleared it" to `POST /resume` path**, described below.
 
 ## The gap that closed tonight
@@ -47,3 +56,14 @@ caller anywhere.
 Tonight's handoff page gives the human an explicit "I cleared it" button, which calls `/resolve`,
 which POSTs the agent browser's `resume_url`. Clearance stopped being a guess and became a
 stated fact. That is the human-facing half of the product, and it is new.
+
+Measured against the deployed server: the blocked long-poll returned 3 seconds after a human
+resolved, inside a 25-second wait window, so the resume tracked the click rather than a polling
+tick. `POST /resume` reached the browser sandbox with its bearer token. A real phone call fired from
+the deployed server through Retell AI. In `--scripted` mode the demo agent ran the full loop and read
+the payoff only after clearance, passing ten of ten assertions against production: the 403 while
+pending names the state as `pending` rather than an unknown handoff, the agent process was confirmed
+still blocked while it waited, and the wall was checked as production serves it over HTTPS, where a
+scripted `.click()` is rejected and only a trusted CDP click reveals the payoff.
+
+Source: https://github.com/OmegaAgent/handoff · Live: https://handoff.omegas.dev

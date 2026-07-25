@@ -36,6 +36,14 @@ context, one concrete question. Per item the owner has three verbal verbs:
 Link-sending is thus NOT a separate model (owner explicitly deferred standalone link-first UX) —
 it's one verb inside the triage call plus a post-call Slack drop, nearly free once the call exists.
 
+**Owner refinement (2026-07-25 late): not everything is voice-answerable — route by request kind.**
+`question` kind → the triage verbs above. `clear_wall` kind (captcha, checkbox, OTP screen) cannot
+be resolved by speaking — the call is only the pager. For these, ALWAYS auto-send the handoff-page
+link (Slack DM / SMS) alongside or immediately after the call, and have the voice say so: "I'm
+blocked by a captcha — I just sent you the link, tap it and I'll take it from there." No link-me
+verb needed; the link is implicit in the kind. (Omega-prod equivalent today: the bell notification
+already deep-links to /spaces/{id}/computer, and the call points the owner at it.)
+
 Mechanics on proven pieces: serialize the queue into the retell-llm prompt (update-retell-llm)
 before create-phone-call; post-call, extract structured answers from the transcript/call analysis
 and resolve each parked request; anything marked link-me/deferred → Slack DM with URLs.

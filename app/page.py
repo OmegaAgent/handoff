@@ -19,61 +19,103 @@ body{
   color:var(--ink);
   font:16px/1.55 "Schibsted Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
   -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
 }
-.wrap{max-width:920px;margin:0 auto;padding:32px 22px 80px}
+.wrap{max-width:940px;margin:0 auto;padding:34px 22px 90px}
 a{color:var(--green);text-decoration:none}
 a:hover{text-decoration:underline}
-.mark{display:flex;align-items:center;gap:9px;font-size:19px;font-weight:700;letter-spacing:-.01em}
+.mark{display:inline-flex;align-items:center;gap:9px;font-size:19px;font-weight:700;
+  letter-spacing:-.015em;color:var(--ink)}
+.mark:hover{text-decoration:none}
 .mark svg{width:.78em;height:.76em;color:var(--green)}
-h1{font-size:34px;line-height:1.14;letter-spacing:-.02em;margin:26px 0 10px;font-weight:700}
-h2{font-size:15px;letter-spacing:.02em;text-transform:none;color:var(--muted);font-weight:600;margin:0 0 10px}
+h1{font-size:clamp(31px,5.1vw,50px);line-height:1.08;letter-spacing:-.028em;margin:0;font-weight:700;
+  overflow-wrap:break-word}
+h2{font-size:15px;letter-spacing:.005em;color:var(--muted);font-weight:600;margin:0 0 12px}
 p{margin:0 0 14px}
-.lede{color:var(--muted);font-size:17px;max-width:62ch}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px}
+.lede{color:var(--muted);font-size:17.5px;line-height:1.6;max-width:60ch}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}
 .card+.card{margin-top:18px}
 .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-.between{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
-.meta{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;font-size:14px;margin:0}
-.meta dt{color:var(--muted)}
-.meta dd{margin:0;font-variant-numeric:tabular-nums}
-.reason{font-size:21px;line-height:1.35;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
+.between{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+
+/* one quiet entrance, transform+opacity only */
+@keyframes rise{from{opacity:0;transform:translateY(11px)}to{opacity:1;transform:none}}
+.r{animation:rise .58s cubic-bezier(.22,.72,.18,1) both}
+@media (prefers-reduced-motion:reduce){.r{animation:none}}
+
+/* the record: who did what, in order */
+.trace{margin:0;display:grid;grid-template-columns:max-content 1fr;gap:0;
+  border-top:1px solid var(--line)}
+.trace dt{padding:13px 26px 13px 0;font-size:13.5px;font-weight:600;color:var(--muted)}
+.trace dd{margin:0;padding:13px 0;font-size:16.5px;border-bottom:1px solid var(--line)}
+.trace dt{border-bottom:1px solid var(--line)}
+.trace dd b{font-weight:600}
+
+.facts{display:flex;flex-wrap:wrap;gap:9px 26px;margin:18px 0 0;font-size:13.5px;
+  font-variant-numeric:tabular-nums}
+.facts div{display:flex;gap:7px}
+.facts dt{color:var(--muted)}
+.facts dd{margin:0;font-weight:600}
+.facts code{font-size:.95em;color:var(--muted);overflow-wrap:anywhere}
+
+.reason{font-size:20px;line-height:1.35;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
 .state{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;
-  padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--stone);color:var(--muted)}
-.state.pending{color:var(--amber);border-color:#E6D6BC;background:#FBF5EA}
+  padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--stone);color:var(--muted);
+  white-space:nowrap}
+.state.pending{color:#8A6224;border-color:#E6D6BC;background:#FBF5EA}
 .state.resolved{color:var(--green);border-color:#CFE0D2;background:#EEF4EF}
 .state.expired{color:#8C4A3F;border-color:#E8D2CD;background:#F9EFED}
 .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
-.state.pending .dot{animation:pulse 1.4s ease-in-out infinite}
+.state.pending .dot{animation:pulse 1.5s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.28}}
+@media (prefers-reduced-motion:reduce){.state.pending .dot{animation:none}}
+
 .cta{display:inline-flex;align-items:center;gap:12px;background:var(--green);color:#fff;border:0;
   font:700 17px/1 inherit;padding:13px 15px 13px 22px;border-radius:999px;cursor:pointer;
+  text-decoration:none;
   box-shadow:0 1px 2px rgba(42,33,24,.16),0 8px 22px rgba(42,33,24,.13);transition:background .16s,transform .16s}
 .cta .chip{width:32px;height:32px;border-radius:50%;background:#fff;color:var(--green);
-  display:grid;place-items:center;transition:transform .16s}
-.cta:hover{background:var(--green-deep);transform:translateY(-2px)}
+  display:grid;place-items:center;transition:transform .16s;flex:none}
+.cta:hover{background:var(--green-deep);transform:translateY(-2px);text-decoration:none}
 .cta:hover .chip{transform:translateX(3px)}
 .cta:disabled{background:var(--muted);cursor:default;box-shadow:none;transform:none}
 .ghost{background:none;border:1px solid var(--line);color:var(--ink);border-radius:8px;
   font:600 14px/1 inherit;padding:11px 14px;cursor:pointer}
 .ghost:hover{border-color:var(--muted)}
-textarea{width:100%;min-height:104px;border:1px solid var(--line);border-radius:10px;padding:12px 13px;
-  font:16px/1.5 inherit;color:var(--ink);background:var(--canvas);resize:vertical}
+textarea{width:100%;min-height:112px;border:1px solid var(--line);border-radius:10px;padding:13px 14px;
+  font:16.5px/1.5 inherit;color:var(--ink);background:var(--canvas);resize:vertical}
 textarea:focus{outline:2px solid var(--green);outline-offset:1px;border-color:var(--green)}
-.frame{margin-top:16px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--scrim)}
-.frame iframe{display:block;width:100%;height:520px;border:0;background:#fff}
+
+.frame{margin:22px 0 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--scrim)}
+.frame iframe{display:block;width:100%;height:540px;border:0;background:#fff}
 .frame .bar{display:flex;align-items:center;justify-content:space-between;gap:10px;
-  padding:9px 13px;background:var(--stone);border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
+  padding:10px 14px;background:var(--stone);border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
 .none{border:1px dashed var(--line);border-radius:12px;padding:26px;text-align:center;color:var(--muted);font-size:14px}
 code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
-pre{background:var(--scrim);color:#F4F1EA;border-radius:12px;padding:18px;overflow-x:auto;font-size:13.5px;line-height:1.6}
+pre{background:var(--scrim);color:#F4F1EA;border-radius:12px;padding:20px;overflow-x:auto;
+  font-size:13.5px;line-height:1.65;margin:0}
 pre b{color:#9CC7A3;font-weight:600}
-table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line)}
+pre i{color:#B7B0A2;font-style:normal}
+table{width:100%;border-collapse:collapse;font-size:14.5px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
 th{color:var(--muted);font-weight:600;font-size:13px}
 tbody tr:last-child td{border-bottom:0}
-.foot{margin-top:34px;color:var(--muted);font-size:13.5px}
-.hr{height:1px;background:var(--line);margin:30px 0}
-@media (max-width:640px){h1{font-size:27px}.frame iframe{height:60vh}}
+td:first-child{width:1%;white-space:nowrap}
+.foot{margin-top:36px;color:var(--muted);font-size:13.5px}
+.hr{height:1px;background:var(--line);margin:34px 0}
+.section{margin-top:38px}
+@media (max-width:640px){
+  .wrap{padding:24px 18px 72px}
+  .frame iframe{height:56vh}
+  .frame .bar span{display:none}
+  .frame .bar{justify-content:flex-end}
+  .cta{width:100%;justify-content:space-between;padding:14px 15px 14px 22px}
+  .trace{grid-template-columns:1fr;gap:0}
+  .trace dt{padding:14px 0 0;border-bottom:0}
+  .trace dd{padding:2px 0 14px}
+  table{font-size:13.5px}
+  th:nth-child(3),td:nth-child(3){display:none}
+}
 """
 
 OMEGA_SVG = (
@@ -115,9 +157,7 @@ def render_request_page(r: dict) -> str:
     status = r["status"]
     is_question = r["kind"] == "question"
     prompt_text = r["question"] if is_question and r["question"] else r["reason"]
-    heading = "A human is needed" if status == "pending" else (
-        "Handed back to the agent" if status == "resolved" else "This request timed out"
-    )
+    agent = html.escape(r["agent"])
 
     paged = r.get("paged") or ""
     if paged == "ringing":
@@ -129,27 +169,38 @@ def render_request_page(r: dict) -> str:
     else:
         page_note = "Placing the call."
 
-    # Live view of the agent's own browser. The viewer can drive it, not just watch.
-    if r.get("live_view_url"):
-        live = (
-            '<div class=frame><div class=bar><span>Live view of the agent\'s browser'
-            " &middot; your clicks and keystrokes are relayed</span>"
-            f'<a href="{html.escape(r["live_view_url"])}" target=_blank rel=noopener>Open full size</a></div>'
-            f'<iframe src="{html.escape(r["live_view_url"])}" title="Agent browser live view"'
-            ' allow="clipboard-read; clipboard-write"></iframe></div>'
+    if status == "pending":
+        subline = (
+            f"<b>{agent}</b> stopped here and is holding its run open until you act. {html.escape(page_note)}"
         )
+    elif status == "resolved":
+        subline = f"A person cleared this and <b>{agent}</b> carried on from where it stopped."
     else:
-        live = (
-            "<div class=none style=margin-top:16px>This request did not attach a live view."
-            " Answer from the context above.</div>"
-        )
+        subline = f"Nobody arrived in time, so <b>{agent}</b> took its own fallback path."
+
+    # Live view of the agent's own browser. The viewer can drive it, not just watch.
+    live = ""
+    if status == "pending":
+        if r.get("live_view_url"):
+            live = (
+                '<div class="frame r" style=animation-delay:.16s><div class=bar>'
+                "<span>The agent's own browser &middot; your clicks and keystrokes are relayed</span>"
+                f'<a href="{html.escape(r["live_view_url"])}" target=_blank rel=noopener>Open full size</a></div>'
+                f'<iframe src="{html.escape(r["live_view_url"])}" title="Agent browser live view"'
+                ' allow="clipboard-read; clipboard-write"></iframe></div>'
+            )
+        elif not is_question:
+            live = (
+                '<div class=none style=margin-top:22px>This request did not attach a live view.'
+                " Clear the wall wherever the agent is working, then press the button below.</div>"
+            )
 
     if is_question:
         action = (
             "<h2>Your answer goes straight back to the agent</h2>"
             f'<textarea id=answer placeholder="Type what the agent should do..." '
             f'{"disabled" if status != "pending" else "autofocus"}></textarea>'
-            "<div class=row style=margin-top:14px>"
+            "<div class=row style=margin-top:16px>"
             f'<button class=cta id=resolve {"disabled" if status != "pending" else ""}>'
             f"<span>Send answer</span><span class=chip>{ARROW}</span></button>"
             "</div>"
@@ -157,8 +208,8 @@ def render_request_page(r: dict) -> str:
     else:
         action = (
             "<h2>When the wall is gone, hand control back</h2>"
-            "<p class=lede style=font-size:15px>Clear it in the live view above, then press this."
-            " The agent's blocked call returns immediately and it keeps going from where it stopped.</p>"
+            "<p class=lede style=font-size:15.5px;max-width:56ch>Clear it in the live view, then press this."
+            " The agent's blocked call returns immediately and the run continues from where it stopped.</p>"
             "<div class=row>"
             f'<button class=cta id=resolve {"disabled" if status != "pending" else ""}>'
             f"<span>I cleared it</span><span class=chip>{ARROW}</span></button>"
@@ -168,45 +219,51 @@ def render_request_page(r: dict) -> str:
     if status == "resolved":
         answer_block = ""
         if r.get("answer"):
-            answer_block = f"<p style=margin-top:10px>You answered: <b>{html.escape(r['answer'])}</b></p>"
+            answer_block = (
+                '<p style="margin:12px 0 0"><span style=color:var(--muted)>You answered</span> '
+                f"<b>{html.escape(r['answer'])}</b></p>"
+            )
         resumed = r.get("resume_posted")
         resume_line = ""
         if r.get("has_resume"):
             resume_line = (
-                "<p style=margin-top:6px;color:var(--muted);font-size:14px>"
+                '<p style="margin:8px 0 0;color:var(--muted);font-size:14px">'
                 + ("Resume signal delivered to the agent's browser sandbox."
                    if resumed else "Resume signal could not be delivered; the agent's poll still returned.")
                 + "</p>"
             )
         action = (
-            "<h2>Done</h2><p class=reason style=font-size:18px>The agent is running again.</p>"
+            "<h2>Done</h2>"
+            "<p class=reason style=margin:0;color:var(--green)>The agent is running again.</p>"
             + answer_block + resume_line
         )
     elif status == "expired":
         action = (
-            "<h2>Too late</h2><p class=lede>The agent gave up waiting after "
-            f"{int(r['timeout_s'])} seconds and took its own fallback path.</p>"
+            "<h2>Too late</h2>"
+            "<p class=reason style=margin:0>The agent gave up waiting after "
+            f"{int(r['timeout_s'])} seconds.</p>"
+            '<p style="margin:8px 0 0;color:var(--muted);font-size:14px">Nothing you do here reaches it now.'
+            " The next page will arrive the moment another run stops.</p>"
         )
+
+    waiting_label = "Waiting" if status == "pending" else "Waited"
+    timeout_label = "Gives up after" if status == "pending" else "Gave up after"
 
     body = f"""
 {_brand()}
-<div class=between style=margin-top:26px>
-  <h1 style=margin:0>{heading}</h1>
+<div class="between r" style=margin-top:30px>
+  <h1 style=max-width:24ch>{html.escape(prompt_text or "An agent is blocked.")}</h1>
   {_state_pill(status)}
 </div>
-<div class=card style=margin-top:22px>
-  <p class=reason>{html.escape(prompt_text or "An agent is blocked.")}</p>
-  <p style=color:var(--muted);font-size:14px;margin-bottom:18px>{html.escape(page_note)}</p>
-  <dl class=meta>
-    <dt>Agent</dt><dd>{html.escape(r["agent"])}</dd>
-    <dt>Asked for</dt><dd>{"an answer" if is_question else "a wall to be cleared"}</dd>
-    <dt>Waiting</dt><dd id=age>{r["age_s"]}s</dd>
-    <dt>Gives up after</dt><dd>{int(r["timeout_s"])}s</dd>
-    <dt>Request</dt><dd><code>{rid}</code></dd>
-  </dl>
-  {live}
-</div>
-<div class=card id=action>{action}</div>
+<p class="lede r" style=animation-delay:.07s;margin-top:16px>{subline}</p>
+<dl class="facts r" style=animation-delay:.11s>
+  <div><dt>Asked for</dt><dd>{"an answer" if is_question else "a wall to be cleared"}</dd></div>
+  <div><dt>{waiting_label}</dt><dd id=age>{int(r["age_s"])}s</dd></div>
+  <div><dt>{timeout_label}</dt><dd>{int(r["timeout_s"])}s</dd></div>
+  <div><dt>Request</dt><dd><code>{rid}</code></dd></div>
+</dl>
+{live}
+<div class="card r" id=action style=animation-delay:.2s;margin-top:22px>{action}</div>
 <p class=foot>Handoff pages a real person when an agent hits a wall. <a href="/">What this is</a></p>
 """
 
@@ -241,6 +298,9 @@ if(btn) btn.addEventListener('click',async()=>{{
 }});
 </script>"""
 
+    heading = "A human is needed" if status == "pending" else (
+        "Handed back to the agent" if status == "resolved" else "This request timed out"
+    )
     return _shell(f"Handoff — {heading}", body + script)
 
 
@@ -251,43 +311,70 @@ def render_landing(recent: list[dict]) -> str:
     if recent:
         rows = "".join(
             f"<tr><td>{_state_pill(r['status'])}</td>"
-            f"<td>{html.escape((r['reason'] or '')[:70])}</td>"
+            f"<td>{html.escape((r['question'] or r['reason'] or '')[:70])}</td>"
             f"<td>{html.escape(r['agent'])}</td>"
-            f"<td><a href=\"/r/{html.escape(r['id'])}\">open</a></td></tr>"
+            f"<td style=text-align:right><a href=\"/r/{html.escape(r['id'])}\">Open</a></td></tr>"
             for r in recent
         )
-        table = f"<table><thead><tr><th>State</th><th>What blocked it</th><th>Agent</th><th></th></tr></thead><tbody>{rows}</tbody></table>"
+        table = (
+            "<table><thead><tr><th>State</th><th>What stopped the run</th><th>Agent</th>"
+            f"<th></th></tr></thead><tbody>{rows}</tbody></table>"
+        )
     else:
         table = "<div class=none>No agent has asked for a human yet.</div>"
 
+    waiting = next((r for r in recent if r["status"] == "pending"), None)
+    latest = waiting or (recent[0] if recent else None)
+    if latest:
+        label = "Open the waiting handoff" if waiting else "Open the last handoff"
+        cta = (
+            f'<div class="row r" style=animation-delay:.14s;margin-top:26px>'
+            f'<a class=cta href="/r/{html.escape(latest["id"])}"><span>{label}</span>'
+            f"<span class=chip>{ARROW}</span></a></div>"
+        )
+    else:
+        cta = ""
+
     sample = (
         "<b>import human</b>\n\n"
-        "# The agent hits a verification checkbox it cannot solve.\n"
+        "<i># The agent hits a verification checkbox it cannot solve.</i>\n"
         "cleared = human.<b>clear_wall</b>(\n"
         '    reason="A human-verification checkbox is blocking checkout",\n'
-        "    live_view_url=browser.live_url,   # your sandbox's screencast\n"
-        "    resume_url=browser.resume_url,    # told the moment the wall is gone\n"
+        "    live_view_url=browser.live_url,   <i># your sandbox's screencast</i>\n"
+        "    resume_url=browser.resume_url,    <i># told the moment the wall is gone</i>\n"
         "    timeout_s=600,\n"
         ")\n\n"
-        "# Or just ask a question and wait for a typed answer.\n"
+        "<i># Or just ask a question and wait for a typed answer.</i>\n"
         'shipping = human.<b>ask</b>("Which address should I ship to?")'
     )
 
     body = f"""
 {_brand()}
-<h1>When an agent hits a wall,<br>it can ask a person.</h1>
-<p class=lede>Handoff is an <code>await human()</code> call for AI agents. The agent blocks, a real
-phone rings, and whoever answers gets a live view of the agent's own browser. They clear the wall or
-type the answer, press one button, and the blocked call returns so the run finishes.</p>
-<div class=card style=margin-top:26px>
+<h1 class=r style=margin-top:34px;max-width:19ch>When an agent hits a wall, it asks a person.</h1>
+<p class="lede r" style=animation-delay:.06s;margin-top:18px>Handoff is an <code>await human()</code>
+call. The agent blocks, a phone rings, and whoever picks up gets a live view of the agent's own
+browser. They clear the wall or type the answer, press one button, and the blocked call returns.</p>
+{cta}
+<div class=section>
+  <h2>What a handoff looks like</h2>
+  <dl class=trace>
+    <dt>Agent</dt><dd>Stopped at a verification checkbox it could not tick, and held its run open.</dd>
+    <dt>Phone</dt><dd>Rang a real person and read out what was blocking the run.</dd>
+    <dt>Person</dt><dd>Ticked the box inside the agent's own browser and pressed <b>I cleared it</b>.</dd>
+    <dt>Agent</dt><dd>Resumed mid-call and finished the run.</dd>
+  </dl>
+</div>
+<div class="card section">
   <h2>The whole SDK</h2>
   <pre>{sample}</pre>
-  <p style=margin:0;color:var(--muted);font-size:14px>Text approvals in chat already exist. The two
-  things they leave out are a phone that actually rings and a browser a person can take the wheel of.</p>
+  <p style="margin:18px 0 0;color:var(--muted);font-size:14.5px;max-width:62ch">Text approvals in chat
+  already exist. What they leave out is a phone that actually rings and a browser a person can take
+  the wheel of.</p>
 </div>
-<div class=hr></div>
-<h2>Recent handoffs</h2>
-{table}
+<div class=section>
+  <h2>Every handoff so far</h2>
+  {table}
+</div>
 <p class=foot>Built at Night Hack, 2026-07-24. MIT. Requests live in one process on purpose.</p>
 """
     return _shell("Handoff — an await human() API for AI agents", body)
