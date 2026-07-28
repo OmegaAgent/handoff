@@ -42,6 +42,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RETELL_API_KEY = os.environ.get("RETELL_API_KEY", "")
 RETELL_FROM_NUMBER = os.environ.get("RETELL_FROM_NUMBER", "")
 RETELL_AGENT_ID = os.environ.get("RETELL_AGENT_ID", "")
+# Kept for setup only: the agent's begin_message is a template holding {{reason}}, written once
+# against this LLM id. Nothing writes to it per call — see page_human.
 RETELL_LLM_ID = os.environ.get("RETELL_LLM_ID", "")
 # The human on call. TWILIO_TO_NUMBER is kept as an alias: it is where the owner's
 # verified personal number already lived before the Twilio path was abandoned.
@@ -133,22 +135,15 @@ async def page_human(req: HandoffRequest) -> None:
         return
 
     what = req.question if req.kind == "question" else req.reason
-    spoken = (
-        f"Hi, this is Handoff calling on behalf of your agent {req.agent}. "
-        f"It is blocked and needs a human. {what}. "
-        f"Open the handoff link we generated to take over the browser and clear it. "
-        f"The agent is waiting on the line."
-    )
+    spoken = f"{what.rstrip('.')}, for the agent called {req.agent}."
+
+    # Pass the reason as a per-call variable instead of rewriting the agent's begin_message.
+    # Mutating shared agent config once per page was a race: two handoffs at the same time and
+    # the second write lands before the first call connects, so a person is phoned and told the
+    # wrong reason. The agent's begin_message is a template containing {{reason}}, set once.
     headers = {"Authorization": f"Bearer {RETELL_API_KEY}"}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            if RETELL_LLM_ID:
-                # The agent's reason becomes the first thing the voice says.
-                await client.patch(
-                    f"https://api.retellai.com/update-retell-llm/{RETELL_LLM_ID}",
-                    headers=headers,
-                    json={"begin_message": spoken},
-                )
             resp = await client.post(
                 "https://api.retellai.com/v2/create-phone-call",
                 headers=headers,
@@ -156,6 +151,7 @@ async def page_human(req: HandoffRequest) -> None:
                     "from_number": RETELL_FROM_NUMBER,
                     "to_number": TO_NUMBER,
                     "override_agent_id": RETELL_AGENT_ID,
+                    "retell_llm_dynamic_variables": {"reason": spoken},
                     "metadata": {"handoff_id": req.id, "page_url": f"{PUBLIC_URL}/r/{req.id}"},
                 },
             )
