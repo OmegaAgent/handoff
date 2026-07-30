@@ -57,6 +57,21 @@ def test_signing_fixture_round_trips_byte_identically(path: Path):
     assert canonical_bytes(json.loads(raw)) == raw
 
 
+def test_the_round_trip_assertion_is_byte_level_not_parse_level():
+    """The guard on the guard.
+
+    A reformatted document parses to an equal object but is a different byte sequence, so a suite
+    that compared parsed objects would pass here — and the fixtures would quietly stop being a
+    cross-language contract. This proves the distinction is load-bearing rather than assumed.
+    """
+    raw = (FIXTURES / "05-signal-answered.json").read_bytes()
+    parsed = json.loads(raw)
+    reformatted = json.dumps(parsed, indent=4, ensure_ascii=False).encode() + b"\n"
+
+    assert json.loads(reformatted) == parsed, "a parse-level comparison cannot tell these two apart"
+    assert reformatted != raw, "a byte-level comparison can, and that is what we assert"
+
+
 def test_signing_fixture_hashes_match_the_worked_vectors():
     """signing.md §1.6 and §2.5 publish these lengths and hashes. They are the check on whether
     this implementation canonicalizes correctly."""
