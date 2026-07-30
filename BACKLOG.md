@@ -2,6 +2,22 @@
 
 Ranked. Top = handle first. Non-blockers get deferred here instead of stopping the build.
 
+## Stated gaps — things that do not exist, said plainly
+
+An empty directory named after a package is worse than an absent one, because it implies a
+deliverable. These are the things a reader might reasonably expect to find and will not.
+
+- **`@handoffproto/types` is not built.** The layout reserved `sdk/types/` for types generated from
+  `spec/openapi.yaml`. Nothing was generated, and the empty directory has been removed rather than
+  left as a stub. The TypeScript SDK's `src/models.ts` is **hand-written against the spec** and is
+  covered by the byte-identical fixture tests, so the SDK is not blocked — but there is no separate
+  published types package, and no generator wired into CI. Until one exists, the guard against the
+  hand-written types drifting from the spec is the fixture round-trip suite and nothing else.
+- **No case exists for a Level 2 deployment that declines the continuation extension.** C-17 covers
+  the positive path only.
+- **The conformance CI job is still `continue-on-error`.** It must be turned off now that cases
+  exist; see the H0 list below.
+
 ## Open now — H0, publish the contract
 
 Landed in H0:

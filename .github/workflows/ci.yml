@@ -153,21 +153,39 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Lint and test
+      # `npm ci` is deliberately not used: it requires a lockfile, and the SDK has no runtime
+      # dependencies to lock. `npm install` here fetches only the TypeScript compiler, which is a
+      # devDependency — the zero-runtime-dependency property is `dependencies: {}` and is asserted
+      # separately below.
+      - name: Test
+        if: steps.probe.outputs.present == 'true'
+        working-directory: sdk/ts
+        run: npm test
+
+      - name: Typecheck
         if: steps.probe.outputs.present == 'true'
         working-directory: sdk/ts
         run: |
-          npm ci
-          npm run lint
-          npm test
+          npm install --no-audit --no-fund
+          npm run typecheck
+
+      - name: No runtime dependencies
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          deps = json.load(open("sdk/ts/package.json")).get("dependencies") or {}
+          if deps:
+              sys.exit(f"@handoffproto/sdk must have no runtime dependencies, found: {deps}")
+          print("zero runtime dependencies")
+          PY
 
   conformance:
     name: conformance suite
     runs-on: ubuntu-latest
-    # TODO(H1): delete this line. The suite becomes a required check the moment the first case
-    # lands. Until then the runner exits non-zero on purpose — a pipeline must never report
-    # conformance it has not measured — and this flag keeps that visible without blocking H0.
-    continue-on-error: true
+    # Required. `continue-on-error` was removed when the first cases landed in H1 — a pipeline must
+    # never report conformance it has not measured, and a suite that cannot fail a build is
+    # decorative.
     steps:
       - uses: actions/checkout@v4
 
@@ -178,12 +196,30 @@ jobs:
         working-directory: core
         run: cargo build -p handoff-conformance
 
-      - name: Run the suite against the reference server
+      # Until the reference server passes the suite, the check that matters is the opposite one:
+      # that the suite reports red against a server which implements nothing. A suite written
+      # before its implementation only means something if it can be shown to fail.
+      - name: The suite fails loudly against a server that implements nothing
         working-directory: core
         run: |
-          echo "::warning::TODO(H1) — the conformance suite has no cases yet. This job is"
-          echo "::warning::advisory until the first case lands, then continue-on-error goes away."
-          ./target/debug/handoff-conformance --base-url http://127.0.0.1:8080
+          python3 crates/handoff-conformance/dev/stub_501.py --port 8080 &
+          # Readiness is "the socket answers", not "the socket answers 2xx" — the stub replies 501
+          # to everything by design, so `curl -f` would never succeed and the loop would always
+          # exhaust silently.
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null "http://127.0.0.1:8080/v1/requests" && break || sleep 0.2
+          done
+          set +e
+          ./target/debug/handoff-conformance \
+            --base-url http://127.0.0.1:8080/v1 \
+            --profile crates/handoff-conformance/profile.example.yaml
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::The suite passed against a stub that implements nothing. It is measuring nothing."
+            exit 1
+          fi
+          echo "The suite correctly reported non-conformance (exit ${rc})."
 
   spec-needs-conformance:
     name: a spec change must carry a conformance case
