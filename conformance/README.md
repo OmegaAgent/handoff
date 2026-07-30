@@ -5,12 +5,26 @@ Declarative cases that decide whether an implementation is Handoff-compatible. T
 not care what is listening there.
 
 ```
-handoff-conformance --base-url http://127.0.0.1:8080
+handoff-conformance --base-url https://your-deployment.example.com/v1 --profile your-profile.yaml
 ```
 
-**Status: no cases yet.** They land in milestone H1, where every one of them is expected to fail
-against a stub server, and go green in H2 against the reference implementation. The runner exits
-non-zero while the case count is zero, so no pipeline can report conformance it has not measured.
+**Status: 23 Level 1 cases and 1 Level 2 case, all red.** They were written before any conforming
+server existed, and the last thing done to them was to run them against a server that answers `501`
+to everything and confirm the report reads `0/23 passing` with twenty-three individually named
+failures and a non-zero exit. A suite that cannot fail loudly is not a suite. They go green in H2,
+against the reference implementation.
+
+The runner checks the case set against `spec/conformance-map.json` before running anything, so a
+case §18 defines with no file, or a file §18 does not define, stops the run rather than quietly
+changing the total.
+
+Two things a deployment must supply beyond a base URL, both documented in
+`core/crates/handoff-conformance/profile.example.yaml`: credentials for the principal aliases the
+cases name, and the handful of commands that reach below the HTTP API — C-15 must attempt a receipt
+mutation at the **storage** layer, because §9.4 puts the application inside the threat model, and
+C-7 must grep the logs. A case whose requirements are missing **fails**; it is never skipped.
+
+The case format is documented in `core/crates/handoff-conformance/CASE-FORMAT.md`.
 
 ## Why this directory is not a test folder
 
@@ -36,7 +50,10 @@ somewhere a skeptic can find them and rerun them against your endpoint. See
 ## Contributing a case
 
 Cases are declarative YAML under `cases/`, so a case is readable by someone who does not write Rust.
-The format is defined alongside the first cases in H1. Until then, the most useful contribution is an
-**issue describing an edge you hit in production** and what the correct behaviour should be. Edges
-found in the field are worth more than edges imagined at a desk, and the four the design already
-calls hardest are: double-resolve conflict, attempt lapse, callback retry, and receipt verification.
+The format is `core/crates/handoff-conformance/CASE-FORMAT.md`; every case-specific fact lives in the
+YAML, and the runner is an interpreter that knows nothing about any individual case.
+
+The most useful contribution is an **issue describing an edge you hit in production** and what the
+correct behaviour should be. Edges found in the field are worth more than edges imagined at a desk,
+and the four the design already calls hardest are: double-resolve conflict, attempt lapse, callback
+retry, and receipt verification.

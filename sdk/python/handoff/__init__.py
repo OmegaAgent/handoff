@@ -1,214 +1,297 @@
-"""`await human()` for AI agents — the client half of Handoff.
+"""The Python client for the Handoff protocol — human intervention in automated work.
+
+A program that cannot proceed asks a person, a person answers, and the answer comes back as
+typed data with a durable record of who decided what, on what basis, and through which channel.
 
     import handoff
-    handoff.configure(base_url="https://handoff.omegas.dev")
 
-    # Blocks until a person clears the wall in a live view of your agent's browser.
-    handoff.clear_wall(reason="A verification checkbox is blocking checkout",
-                       live_view_url=..., resume_url=...)
+    handoff.configure(base_url="https://handoff.example.com", api_key=...)
 
-    # Blocks until a person types an answer.
-    address = handoff.ask("Which shipping address should I use?")
+    # Ask a person. Blocks until they answer.
+    address = handoff.ask("Which shipping address should I use?", default="the billing address")
 
-One file, standard library only. Copy it into your project or `pip install handoff-human`.
+    # Ask for a decision, then spend it on exactly one effect.
+    outcome = handoff.approve("Refund $2,400 to Acme Corp?", mode="gated")
+    if outcome and outcome.redeem("stripe:refund:ch_1B").first_redemption:
+        stripe.refund("ch_1B")
 
-The distribution is named `handoff-human` and the module is `handoff`. In 0.1.x the module was
-named `human`; that name still imports and forwards here, with a DeprecationWarning, and will be
-removed in 0.3.0.
+The wait is not in this process. It is a durable row on the server keyed by ``waiter_ref``
+(protocol §8), so a client may die at any point and a later one reattaches and finds the answer
+still waiting, unacked:
+
+    waiter = handoff.resume("run:0198f2a1")
+    with waiter.receive() as received:
+        apply(received.values)      # the ack is sent when this block completes
+
+What that buys is precise, and it is worth stating precisely: **one human answer, delivered to
+your agent exactly once, as typed data, authorizing exactly one effect.** It is not execution
+resumption. Whether your program can pick up where it stopped is a property of your program;
+this protocol makes sure the answer is there when it does (§1.3).
+
+Standard library only, deliberately. The one exception is documented where it lives:
+:func:`handoff.signing.verify_receipt_signature` needs ``cryptography`` for Ed25519, and the
+hash chain that the protocol actually requires is stdlib and always available.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import time
-import urllib.error
-import urllib.request
-from dataclasses import dataclass
-from typing import Optional
+import warnings
+from typing import Any, Mapping, Optional, Sequence
+
+from ._document import Document, canonical_bytes, digest, encode_document
+from .client import Client, DEFAULT_BASE_URL, new_idempotency_key
+from .errors import (
+    AlreadyAnswered,
+    AnswerValidationFailed,
+    AuthStrengthNotPermitted,
+    AuthenticationError,
+    AuthorizationNotFound,
+    AuthorizationSpent,
+    BlastRadiusMismatch,
+    CallbackSignatureError,
+    CapabilityExpired,
+    CapabilityNotFound,
+    DeliveryUnavailable,
+    EffectDigestMismatch,
+    FieldError,
+    GrantAlreadyHeld,
+    HandoffError,
+    HandoffProtocolError,
+    HandoffTimeout,
+    IdempotencyKeyReused,
+    InsufficientAuthority,
+    InsufficientScope,
+    InvalidRequest,
+    NotEntitled,
+    NotFound,
+    PresentationStale,
+    RateLimited,
+    RequestCancelled,
+    RequestExpired,
+    RequestInProgress,
+    RequestNotFound,
+    RequestSuperseded,
+    RequesterMayNotAnswer,
+    SignalNotApplied,
+    SignalNotFound,
+    TenantMismatch,
+    TransportError,
+    UnsupportedCapabilityType,
+    UnsupportedFieldType,
+    UnsupportedRequiresVersion,
+)
+from .models import (
+    AckResult,
+    AnswerResult,
+    Authorization,
+    Decision,
+    Meta,
+    ReattachResult,
+    Receipt,
+    RedeemResult,
+    Request,
+    Signal,
+    TERMINAL_SIGNAL_TYPES,
+    authority,
+    capability,
+    evidence,
+    fields,
+    prompt,
+    requires,
+    ttl_policy,
+)
+from .signing import (
+    VerifiedCallback,
+    chain_digest,
+    receipt_core_hash,
+    verify_callback,
+    verify_chain,
+    verify_receipt_chain,
+)
+from .waiter import Outcome, PendingRequest, Received, Waiter
 
 __all__ = [
-    "configure",
-    "ask",
-    "clear_wall",
-    "create_request",
-    "Handoff",
-    "HandoffTimeout",
-    "HandoffError",
     "__version__",
+    # configuration
+    "configure",
+    "client",
+    "Client",
+    "DEFAULT_BASE_URL",
+    "new_idempotency_key",
+    # raising and asking
+    "raise_request",
+    "ask",
+    "approve",
+    "meta",
+    # waiting
+    "waiter",
+    "resume",
+    "Waiter",
+    "PendingRequest",
+    "Received",
+    "Outcome",
+    # spending
+    "redeem",
+    # declarations
+    "prompt",
+    "requires",
+    "authority",
+    "capability",
+    "fields",
+    "evidence",
+    "ttl_policy",
+    # typed objects
+    "Document",
+    "Request",
+    "Signal",
+    "Decision",
+    "Receipt",
+    "Authorization",
+    "AnswerResult",
+    "AckResult",
+    "RedeemResult",
+    "ReattachResult",
+    "Meta",
+    "TERMINAL_SIGNAL_TYPES",
+    # callbacks and receipts
+    "verify_callback",
+    "VerifiedCallback",
+    "verify_receipt_chain",
+    "verify_chain",
+    "receipt_core_hash",
+    "chain_digest",
+    "canonical_bytes",
+    "encode_document",
+    "digest",
+    # errors
+    "HandoffError",
+    "HandoffProtocolError",
+    "HandoffTimeout",
+    "SignalNotApplied",
+    "CallbackSignatureError",
+    "TransportError",
+    "FieldError",
+    "InvalidRequest",
+    "UnsupportedFieldType",
+    "UnsupportedCapabilityType",
+    "UnsupportedRequiresVersion",
+    "AuthenticationError",
+    "InsufficientScope",
+    "NotEntitled",
+    "InsufficientAuthority",
+    "RequesterMayNotAnswer",
+    "TenantMismatch",
+    "AuthStrengthNotPermitted",
+    "NotFound",
+    "RequestNotFound",
+    "CapabilityNotFound",
+    "SignalNotFound",
+    "AuthorizationNotFound",
+    "AlreadyAnswered",
+    "RequestExpired",
+    "RequestCancelled",
+    "RequestSuperseded",
+    "RequestInProgress",
+    "IdempotencyKeyReused",
+    "AuthorizationSpent",
+    "EffectDigestMismatch",
+    "BlastRadiusMismatch",
+    "GrantAlreadyHeld",
+    "PresentationStale",
+    "CapabilityExpired",
+    "AnswerValidationFailed",
+    "RateLimited",
+    "DeliveryUnavailable",
+    # deprecated
+    "clear_wall",
 ]
 
 __version__ = "0.2.0"
+PROTOCOL_VERSION = "0.1"
 
-DEFAULT_BASE_URL = "https://handoff.omegas.dev"
-_POLL_WAIT_S = 25  # server caps a single long-poll at 30s
-
-_config = {"base_url": os.environ.get("HANDOFF_URL", DEFAULT_BASE_URL).rstrip("/")}
+_default: Optional[Client] = None
 
 
-class HandoffError(RuntimeError):
-    """The Handoff service could not be reached or refused the request."""
+def configure(base_url: Optional[str] = None, api_key: Optional[str] = None, **kwargs: Any) -> Client:
+    """Point the module-level helpers at a server. Falls back to ``$HANDOFF_URL`` and
+    ``$HANDOFF_API_KEY``."""
+    global _default
+    _default = Client(base_url, api_key, **kwargs)
+    return _default
 
 
-class HandoffTimeout(TimeoutError):
-    """No human resolved the request before it expired."""
+def client() -> Client:
+    """The module-level client, created from the environment on first use."""
+    global _default
+    if _default is None:
+        _default = Client()
+    return _default
 
 
-def configure(base_url: Optional[str] = None) -> None:
-    """Point the SDK at a Handoff server. Defaults to $HANDOFF_URL."""
-    if base_url:
-        _config["base_url"] = base_url.rstrip("/")
+def raise_request(waiter_ref: str, prompt: Mapping[str, Any], requires: Mapping[str, Any], **kwargs: Any) -> PendingRequest:
+    """Raise a request on the module-level client. See :meth:`Client.raise_request`."""
+    return client().raise_request(waiter_ref, prompt, requires, **kwargs)
 
 
-def _request(method: str, path: str, body: Optional[dict] = None, timeout: float = 40) -> dict:
-    url = _config["base_url"] + path
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("content-type", "application/json")
-    req.add_header("accept", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read() or b"{}")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:300]
-        raise HandoffError(f"{method} {path} -> {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise HandoffError(f"{method} {path} -> unreachable: {exc.reason}") from exc
+def ask(question: str, **kwargs: Any) -> Optional[str]:
+    """Ask a person a question and block until they answer. See :func:`handoff.ergonomics.ask`."""
+    from .ergonomics import ask as _ask
+
+    return _ask(client(), question, **kwargs)
 
 
-@dataclass
-class Handoff:
-    """A pending ask. `wait()` blocks until a human settles it."""
+def approve(title: str, **kwargs: Any) -> Outcome:
+    """Ask a person to approve or reject, and block. See :func:`handoff.ergonomics.approve`."""
+    from .ergonomics import approve as _approve
 
-    id: str
-    page_url: str
-    status: str = "pending"
-    answer: Optional[str] = None
-    cleared: bool = False
-
-    def poll(self, wait: float = 0) -> dict:
-        state = _request("GET", f"/v1/requests/{self.id}?wait={wait}", timeout=wait + 15)
-        self.status = state.get("status", self.status)
-        self.answer = state.get("answer")
-        self.cleared = bool(state.get("cleared"))
-        return state
-
-    def wait(self, timeout_s: float = 600, on_tick=None) -> dict:
-        """Block until resolved or expired. Raises HandoffTimeout if nobody answered."""
-        deadline = time.time() + timeout_s
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise HandoffTimeout(f"nobody resolved {self.id} within {timeout_s}s ({self.page_url})")
-            state = self.poll(wait=min(_POLL_WAIT_S, max(1, int(remaining))))
-            if state.get("status") == "resolved":
-                return state
-            if state.get("status") == "expired":
-                raise HandoffTimeout(f"handoff {self.id} expired ({self.page_url})")
-            if on_tick:
-                on_tick(state)
+    return _approve(client(), title, **kwargs)
 
 
-def create_request(
-    kind: str = "clear_wall",
-    reason: str = "",
-    question: Optional[str] = None,
-    agent: str = "agent",
-    live_view_url: Optional[str] = None,
-    live_view_is_agent_browser: bool = False,
-    resume_url: Optional[str] = None,
-    resume_token: Optional[str] = None,
-    timeout_s: int = 600,
-    page: bool = True,
-) -> Handoff:
-    """Create the request and page a human. Returns immediately; nothing blocks yet."""
-    created = _request(
-        "POST",
-        "/v1/requests",
-        {
-            "kind": kind,
-            "reason": reason,
-            "question": question,
-            "agent": agent,
-            "live_view_url": live_view_url,
-            "live_view_is_agent_browser": live_view_is_agent_browser,
-            "resume_url": resume_url,
-            "resume_token": resume_token,
-            "timeout_s": timeout_s,
-            "page": page,
-        },
-        timeout=25,
-    )
-    return Handoff(id=created["id"], page_url=created["page_url"])
+def waiter(waiter_ref: str) -> Waiter:
+    """A handle to an existing durable wait."""
+    return client().waiter(waiter_ref)
 
 
-def clear_wall(
-    reason: str,
-    live_view_url: Optional[str] = None,
-    live_view_is_agent_browser: bool = False,
-    resume_url: Optional[str] = None,
-    resume_token: Optional[str] = None,
-    timeout_s: int = 600,
-    agent: str = "agent",
-    page: bool = True,
-    verbose: bool = True,
-) -> bool:
-    """Page a human to clear a wall your agent cannot pass. Blocks until they do.
+def resume(waiter_ref: str) -> Waiter:
+    """Reattach to a wait a previous process was holding (§8.5).
 
-    Returns True once a person says they cleared it. Raises HandoffTimeout if nobody came.
+    The only thing that had to survive is the ``waiter_ref``.
     """
-    h = create_request(
-        kind="clear_wall",
-        reason=reason,
-        agent=agent,
-        live_view_url=live_view_url,
-        live_view_is_agent_browser=live_view_is_agent_browser,
-        resume_url=resume_url,
-        resume_token=resume_token,
-        timeout_s=timeout_s,
-        page=page,
-    )
-    if verbose:
-        print(f"[handoff] blocked: {reason}\n[handoff] a human is being paged: {h.page_url}", flush=True)
-    h.wait(timeout_s=timeout_s)
-    if verbose:
-        print("[handoff] cleared by a human, resuming", flush=True)
-    return True
+    return client().resume(waiter_ref)
 
 
-def ask(
-    question: str,
-    timeout_s: int = 600,
-    agent: str = "agent",
-    live_view_url: Optional[str] = None,
-    default: Optional[str] = None,
-    page: bool = True,
-    verbose: bool = True,
-) -> str:
-    """Ask a person a question and block until they answer. Returns their text.
+def meta() -> Meta:
+    """What the configured deployment supports (§19)."""
+    return client().meta()
 
-    If `default` is given, a timeout returns it instead of raising.
+
+def redeem(authorization_id: str, effect_key: str, *, effect_digest: Optional[str] = None) -> RedeemResult:
+    """Spend one decision on exactly one effect, idempotently per ``effect_key`` (§10)."""
+    return client().redeem(authorization_id, effect_key, effect_digest=effect_digest)
+
+
+def clear_wall(*args: Any, **kwargs: Any) -> Any:
+    """Deprecated. Removed in 0.3.0.
+
+    In 0.1.x this took a ``live_view_url`` and blocked until somebody said the wall was cleared.
+    The protocol does not carry a resolvable address by value anywhere — not in a request, a
+    receipt, a signal, or a delivery (§11.1, I8) — so the old signature cannot be honoured. A
+    live surface is now declared as an opaque capability the person's own client resolves:
+
+        handoff.raise_request(
+            waiter_ref=...,
+            prompt=handoff.prompt("Finish the sign-in the agent cannot pass"),
+            requires=handoff.requires(
+                [handoff.fields.attestation("cleared", "I cleared it")],
+                capabilities=[handoff.capability("interactive_surface", scope="drive",
+                                                 provider=..., resource_ref=...)],
+                authority=handoff.authority("admin", "session"),
+            ),
+        )
     """
-    h = create_request(
-        kind="question",
-        reason=question,
-        question=question,
-        agent=agent,
-        live_view_url=live_view_url,
-        timeout_s=timeout_s,
-        page=page,
+    raise NotImplementedError(
+        "clear_wall() was removed when the SDK moved to the Handoff protocol: it took a "
+        "resolvable live-view URL, and the protocol carries capabilities as opaque handles the "
+        "answerer's own client resolves. Declare an 'interactive_surface' capability instead — "
+        "see the docstring for the equivalent raise."
     )
-    if verbose:
-        print(f"[handoff] asking a person: {question}\n[handoff] {h.page_url}", flush=True)
-    try:
-        state = h.wait(timeout_s=timeout_s)
-    except HandoffTimeout:
-        if default is not None:
-            if verbose:
-                print(f"[handoff] nobody answered, using default: {default}", flush=True)
-            return default
-        raise
-    answer = state.get("answer") or ""
-    if verbose:
-        print(f"[handoff] answered: {answer}", flush=True)
-    return answer
