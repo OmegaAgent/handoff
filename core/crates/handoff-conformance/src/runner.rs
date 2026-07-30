@@ -452,14 +452,19 @@ impl<'a> Runner<'a> {
         let mut corpus: Vec<(String, String)> = Vec::new();
         for source in &s.r#in {
             match source {
+                // Response bodies only, deliberately.
+                //
+                // The scan hunts for values a *Server* leaked into an artifact. A request body is
+                // the suite's own outbound bytes, and C-7 is required to send a secret to the sink
+                // endpoint, because §12.3 makes that the one path a value legitimately travels.
+                // Including request bodies therefore made C-7 find the secret it had just sent on
+                // purpose, and no conforming Server could ever pass it.
+                //
+                // The client-side placements that *are* forbidden — a URL, a query string, a path,
+                // a header (I18) — are covered by the `urls` and `headers` sources, which do read
+                // the request side. Nothing is lost by excluding the body here.
                 ScanSource::Traffic => {
                     for ex in self.client.traffic() {
-                        if let Some(body) = &ex.request_body {
-                            corpus.push((
-                                format!("request body of {} {}", ex.method, ex.url),
-                                body.clone(),
-                            ));
-                        }
                         corpus.push((
                             format!("response body of {} {}", ex.method, ex.url),
                             ex.response_body.clone(),
@@ -634,6 +639,17 @@ impl<'a> Runner<'a> {
             if !re.is_match(&output) {
                 return Err(format!(
                     "hook `{}` output does not match /{pattern}/\n      output: {}{because}",
+                    h.hook,
+                    first_line(&output)
+                ));
+            }
+        }
+        for pattern in &h.expect.output_not_matches {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| format!("case defect: `{pattern}` is not a valid regex ({e})"))?;
+            if re.is_match(&output) {
+                return Err(format!(
+                    "hook `{}` output matches /{pattern}/ and must not\n      output: {}{because}",
                     h.hook,
                     first_line(&output)
                 ));

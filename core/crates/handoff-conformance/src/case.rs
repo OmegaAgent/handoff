@@ -424,6 +424,13 @@ pub struct HookExpect {
     /// Regular expressions the combined stdout and stderr must match.
     #[serde(default)]
     pub output_matches: Vec<String>,
+    /// Regular expressions the combined stdout and stderr must **not** match.
+    ///
+    /// This exists because the runner's `regex` crate has no look-around, so "the output does not
+    /// contain X" cannot be written as a negative lookahead inside `output_matches`. Expressing the
+    /// negation as its own field is also plainer to read than a lookahead would have been.
+    #[serde(default)]
+    pub output_not_matches: Vec<String>,
     /// What the expectation proves.
     #[serde(default)]
     pub because: Option<String>,

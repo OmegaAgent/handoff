@@ -400,7 +400,7 @@ steps:
         request_id: "${cancelled}"
       expect:
         exit_code: 0
-        output_matches: ["^(?s)((?!request\\.answered).)*$"]
+        output_not_matches: ["request\\.answered"]
         because: >
           this request was cancelled and never answered, so an answered event here would be an
           event without its state change — the other direction of I12

@@ -133,7 +133,11 @@ steps:
           - path: data[0].acked_at
             is_null: true
           - path: data[0].attempts
-            length_at_least: 0
+            exists: true
+            because: >
+              `Signal.attempts` is an integer in the wire contract, not a collection. Asserting a
+              length on it could never hold for a conforming Server; presence is what this step
+              actually needs, and the redelivery counting is asserted below.
       capture:
         signal: data[0].id
         token: data[0].resume_token
