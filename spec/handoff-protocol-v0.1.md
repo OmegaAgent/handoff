@@ -40,7 +40,7 @@ Requirements are placed on three kinds of party, and each requirement names the 
 
 | Level | Requirement |
 |---|---|
-| **Level 1** | REQUIRED of every conforming Server. All of this document except §14 (`continuation`), and all 23 Level 1 conformance cases of §18: C-1 through C-16, plus C-6b and C-18 through C-23. |
+| **Level 1** | REQUIRED of every conforming Server. All of this document except §14 (`continuation`), and all 24 Level 1 conformance cases of §18: C-1 through C-16, plus C-6b and C-18 through C-24. |
 | **Level 2** | OPTIONAL. Level 1 plus the `continuation` extension of §14, and conformance case C-17. |
 
 A Server MUST declare its level at `GET /v1/meta`. A Server MUST NOT advertise Level 2 unless it
@@ -77,6 +77,29 @@ provides storage and verbatim return. It does not provide continuation.
 | Identifiers | `<prefix>_<26-character Crockford base32 ULID>`, lowercase prefix. |
 | Digests | `sha256:` followed by lowercase hex, e.g. `sha256:9f2c…`. |
 | Canonical JSON | RFC 8785 (JCS). Every digest defined in this document is taken over the RFC 8785 canonicalization of the named object, UTF-8 encoded. |
+
+#### Numbers in digest-covered values
+
+RFC 8785 serializes numbers with the ECMAScript `Number::toString` algorithm, which switches to
+exponential notation outside a bounded range. That switch is the single most common source of
+disagreement between independent canonicalizer implementations, and a disagreement there produces
+receipts that one implementation can verify and another cannot.
+
+This protocol therefore emits a **strict subset** of legal JCS output. In any object over which a
+digest defined by this specification is computed:
+
+1. Every JSON number MUST be finite, and MUST be either `0` or in the range `1e-6 ≤ |x| < 1e21` —
+   exactly the band in which `Number::toString` produces plain decimal notation.
+2. Every JSON number with no fractional part MUST be within ±(2^53 − 1), so that it round-trips
+   through an IEEE-754 double without loss.
+3. A Server MUST reject an answer carrying a number outside either bound with
+   `422 answer_validation_failed`, naming the offending field.
+
+Output meeting these constraints is valid JCS, so an implementation with a complete JCS
+canonicalizer is conforming and needs no change. An implementation that refuses to *emit* numbers
+outside the band is equally conforming, and cannot silently diverge from one that does. A Client
+SHOULD carry monetary amounts and other exact decimal quantities as `text` rather than `number`,
+which sidesteps binary floating point entirely.
 
 Identifier prefixes, all REQUIRED:
 
@@ -1378,8 +1401,8 @@ Additions take the next free number.
 
 ## 18. Conformance suite
 
-A Server is **Handoff v0.1 Level 1 compliant** when it passes all 23 Level 1 cases: C-1 through
-C-16, plus C-6b, C-18, C-19, C-20, C-21, C-22, and C-23. Level 2 adds C-17. Each test is black-box,
+A Server is **Handoff v0.1 Level 1 compliant** when it passes all 24 Level 1 cases: C-1 through
+C-16, plus C-6b and C-18 through C-24. Level 2 adds C-17. Each test is black-box,
 against the HTTP API.
 
 **Case identifiers are stable and MUST NOT be renumbered.** A case that is withdrawn keeps its
@@ -1417,6 +1440,7 @@ Level 1 invariant, and C-17 is the only such case.
 | C-21 | 1 | Channel content matching a decision format does not settle a request; a channel declaring `can_authenticate_person: false` produces a provisional answer only | I16, I6 |
 | C-22 | 1 | All eight interaction patterns in `fixtures/use-cases/` are accepted and answerable with **no request-kind field anywhere in the wire traffic**. A page-state change alone produces no clearance receipt | I14, I16 |
 | C-23 | 1 | Drive every transition in §6.2 and §8.2. For each one, the state change and its event are observable together: no state exists whose event is missing, and no event exists whose state change was rolled back. Kill the Server between the state write and the event write → after restart, either both are present or neither is | I12 |
+| C-24 | 1 | Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `1e20` → accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
 
 Four notes for implementers:
 

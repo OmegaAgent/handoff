@@ -1,0 +1,258 @@
+id: C-24
+title: Numbers outside the deterministic band are rejected, and canonicalization is reproducible
+level: 1
+invariants: [I2, I21]
+spec:
+  - "§1.4 — numbers in digest-covered objects MUST be 0 or within 1e-6 <= |x| < 1e21"
+  - "§1.4 — numbers with no fractional part MUST be within +/-(2^53 - 1)"
+  - "§1.4 — a Server MUST reject a number outside either bound with 422 answer_validation_failed"
+  - "§9.2 — the receipt records what the person saw, addressed by digest"
+  - "§19 — fail closed: nothing is created from input the Server cannot represent"
+  - "signing.md §2.2 — the receipt core hash and the chain digest"
+  - "signing.md §3 — canonical JSON is RFC 8785, and the published fixtures are the arbiter"
+  - "§18 C-24"
+rationale: >
+  RFC 8785 serializes numbers with the ECMAScript `Number::toString` algorithm, which switches to
+  exponential notation at |x| >= 1e21 and at 0 < |x| < 1e-6. That switch is where independent
+  canonicalizers disagree, and a disagreement there is not a cosmetic difference: two conforming
+  implementations compute different digests for the same receipt, so a receipt signed by one does
+  not verify under the other. In a protocol whose central claim is a verifiable receipt chain, that
+  is the whole product failing quietly. Nothing errors. The chain simply stops verifying for
+  somebody, later, with no way to establish which side was right.
+
+  §1.4 removes the disagreement by construction rather than by hoping three languages agree about
+  floating point: the protocol emits a strict subset of legal JCS, so a complete canonicalizer and
+  one that refuses to emit outside the band produce identical bytes for every object this protocol
+  digests. Both are conforming. This case is what stops that from being a paragraph nobody
+  implements.
+
+  ## The two bounds are different rules with different reasons
+
+  The band bound (1e-6 .. 1e21) is about **notation**: inside it, `Number::toString` produces plain
+  decimal and every implementation agrees on the bytes. The safe-integer bound (2^53 - 1) is about
+  **precision**: beyond it a value cannot be distinguished from its neighbours, so a person
+  approving 100000000000000000001 would get a receipt saying 100000000000000000000 — a record that
+  misstates what was approved, which is the one thing a receipt may never do.
+
+  Because every IEEE-754 double at or above 2^53 is integral, the safe-integer bound is the
+  operative upper limit for whole numbers, and it bites well below 1e21. So the accepted upper
+  boundary tested here is 9007199254740991, not 1e20. Both rules are stated because each carries a
+  reason the other does not, but an implementer only ever has to enforce the tighter one.
+
+  ## Why each rejection sends every other field valid
+
+  A 422 proves nothing if the request was malformed for an unrelated reason. Each rejection step
+  therefore sends all four declared fields, with only the field under test out of bounds, so the
+  failure is attributable to the numeric bound alone and the named field in the error body is
+  meaningful. The step after the rejections proves the request is still `pending` with no receipt:
+  it is easy to return a 422 and easy to have already settled something, and only reading the
+  request back proves nothing was created.
+
+  ## Why the numeric literals are written as `!json:`
+
+  YAML parsers disagree about whether `1e21` is a number or a string, which is the same class of
+  ambiguity this case exists to eliminate. Every numeric answer body is therefore written with the
+  `!json:` escape so the bytes on the wire are unambiguous, and spelled in plain decimal so the
+  value is legible without the reader evaluating an exponent.
+
+  ## What the deployment must supply
+
+  A `canonicalize` hook, which canonicalizes a document per RFC 8785 and prints three lines:
+  the canonical bytes, then `bytes=<n>`, then `sha256=<lowercase hex>`. It accepts either
+  `HANDOFF_ARG_PATH` (a repository-relative path) or `HANDOFF_ARG_JSON` (an inline document). The
+  canonicalizer is not reachable over HTTP, so like C-15's storage probe this reaches below the API;
+  a deployment that cannot supply it cannot demonstrate its canonicalization agrees with anyone
+  else's, and the case fails rather than passing quietly.
+
+  The two published signing fixtures are already canonical, so canonicalizing them must be a fixed
+  point. That single property catches member ordering, string escaping, and number formatting at
+  once, and it is checked against the byte lengths and digests published in `signing.md` — the same
+  constants the runner's own signature unit tests use, so the runner and the implementation are
+  measured against one arbiter rather than against each other.
+
+requires:
+  principals: [machine_a, human_editor]
+  hooks: [canonicalize]
+
+steps:
+  - name: raise a request declaring four number fields
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c24-raise-${run_id}"
+      body:
+        waiter_ref: "run:c24-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Record the reconciliation figures"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - {name: at_zero, label: "Zero", type: number, required: true}
+              - {name: at_lower_bound, label: "Smallest representable", type: number, required: true}
+              - {name: at_max_safe_integer, label: "Largest exact integer", type: number, required: true}
+              - {name: ordinary, label: "An ordinary figure", type: number, required: true}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+        body:
+          - path: state
+            equals: pending
+      capture:
+        req: id
+
+  - name: a number below the band is refused and names the field
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c24-below-band-${run_id}"
+      body:
+        values: '!json:{"at_zero":0,"at_lower_bound":0.0000001,"at_max_safe_integer":9007199254740991,"ordinary":1.5}'
+      expect:
+        status: 422
+        body:
+          - path: error.code
+            equals: answer_validation_failed
+            because: "§1.4 — a number outside the bound is a per-field validation failure, not a malformed body"
+          - path: error.fields[0].name
+            equals: at_lower_bound
+            because: "§1.4 — the Server names the offending field so the surface can mark the input"
+
+  - name: an integer at 2^53 is refused, because it can no longer round-trip
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c24-unsafe-integer-${run_id}"
+      body:
+        values: '!json:{"at_zero":0,"at_lower_bound":0.000001,"at_max_safe_integer":9007199254740992,"ordinary":1.5}'
+      expect:
+        status: 422
+        body:
+          - path: error.code
+            equals: answer_validation_failed
+          - path: error.fields[0].name
+            equals: at_max_safe_integer
+            because: >
+              §1.4 — beyond 2^53 - 1 a value is indistinguishable from its neighbours, so a receipt
+              would record a figure the person did not enter
+
+  - name: a number above the band is refused
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c24-above-band-${run_id}"
+      body:
+        values: '!json:{"at_zero":0,"at_lower_bound":0.000001,"at_max_safe_integer":9007199254740991,"ordinary":1000000000000000000000}'
+      expect:
+        status: 422
+        body:
+          - path: error.code
+            equals: answer_validation_failed
+          - path: error.fields[0].name
+            equals: ordinary
+
+  - name: none of the three refusals settled anything
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: "§19 — fail closed: a rejected answer creates nothing and settles nothing"
+          - path: receipt
+            is_null: true
+            because: "§9.1 — a receipt is minted only by an outcome, and no outcome occurred"
+
+  - name: zero and both boundary values are accepted
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c24-accept-${run_id}"
+      body:
+        values: '!json:{"at_zero":0,"at_lower_bound":0.000001,"at_max_safe_integer":9007199254740991,"ordinary":1.5}'
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+            because: "§1.4 — the bounds are inclusive at 0, at 1e-6, and at 2^53 - 1"
+          - path: receipt.id
+            matches: "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$"
+      capture:
+        receipt: receipt.id
+
+  - name: the receipt carries a well-formed chain digest over those values
+    http:
+      method: GET
+      path: /receipts/${receipt}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: decision.values.at_lower_bound
+            equals: 0.000001
+            because: "§9.2 — the receipt records the typed answer as the person gave it"
+          - path: decision.values.at_max_safe_integer
+            equals: 9007199254740991
+          - path: chain.digest
+            matches: "^sha256:[0-9a-f]{64}$"
+            because: "signing.md §2.2 — the chain digest is taken over the canonicalized receipt core"
+
+  - name: canonicalizing the published callback fixture is a fixed point
+    hook:
+      hook: canonicalize
+      args:
+        path: spec/fixtures/signing/callback-body.json
+      expect:
+        exit_code: 0
+        output_matches:
+          - "bytes=493"
+          - "sha256=fbd6ec4cacc7cb9c9371d2791f946535e3d391a0594a92b5a3a27dd34f5e94fa"
+        because: >
+          signing.md §1.6 — the fixture is already canonical, so canonicalizing it must reproduce it
+          byte for byte. Reproducing the published length and digest is what proves this
+          implementation's member ordering, escaping, and number formatting agree with everyone
+          else's
+
+  - name: canonicalizing the published receipt core is a fixed point
+    hook:
+      hook: canonicalize
+      args:
+        path: spec/fixtures/signing/receipt-core.json
+      expect:
+        exit_code: 0
+        output_matches:
+          - "bytes=1125"
+          - "sha256=2763f39ef8a61d493106d3db302ec36cae5c024ca3da3a019d483ccc29704ad1"
+        because: >
+          signing.md §2.5 — this is the exact byte sequence the worked receipt vector is computed
+          over, so an implementation that cannot reproduce it cannot verify any published receipt
+
+  - name: boundary numbers canonicalize to plain decimal, never to exponential notation
+    hook:
+      hook: canonicalize
+      args:
+        json: '{"lo":0.000001,"hi":9007199254740991,"zero":0}'
+      expect:
+        exit_code: 0
+        output_matches:
+          - '^\{"hi":9007199254740991,"lo":0\.000001,"zero":0\}$'
+        because: >
+          §1.4 — one exact match pins all three at once: members sorted by code point, no
+          insignificant whitespace, and both boundary values emitted in plain decimal. An
+          implementation that emits 1e-6 here would compute a different digest for the same receipt

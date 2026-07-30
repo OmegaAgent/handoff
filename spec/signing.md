@@ -423,6 +423,18 @@ across two:
 
 1. **Re-serializing a received body before hashing.** Callback verification hashes the bytes on the
    wire, never a re-encoding of the parsed object.
-2. **Non-integer numbers.** JCS specifies a number serialization; a naive `str(float)` does not match
-   it. This protocol's canonicalized objects avoid non-integer numbers, and an implementation SHOULD
-   keep it that way rather than relying on agreement about floating-point formatting.
+2. **Number serialization.** JCS inherits the ECMAScript `Number::toString` algorithm, which switches
+   to exponential notation at `|x| ≥ 1e21` and at `0 < |x| < 1e-6`. A naive `str(float)` does not
+   match it, and independent implementations disagree most often at exactly those boundaries.
+
+`handoff-protocol-v0.1.md` §1.4 constrains this away rather than relying on three languages agreeing
+about floating point: numbers in digest-covered objects MUST be `0` or within `1e-6 ≤ |x| < 1e21`,
+integers MUST be within ±(2^53 − 1), and a Server MUST reject anything outside with
+`422 answer_validation_failed`. Everything this protocol digests therefore falls in the plain-decimal
+band.
+
+The consequence for an implementer is worth stating plainly, because it is what makes the constraint
+worth having: **a complete JCS canonicalizer and one that refuses to emit numbers outside the band
+produce identical bytes for every object this protocol digests.** Both are conforming. They cannot
+diverge, so a receipt signed by one always verifies under the other — which is the only property that
+matters once receipts outlive the implementation that minted them.

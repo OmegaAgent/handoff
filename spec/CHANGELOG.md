@@ -24,7 +24,7 @@ implementation passing the suite.
 - Three state machines — REQUEST, DELIVERY, WAITER — plus two immutable records, RECEIPT and
   AUTHORIZATION (§2). A request has many deliveries and at most one receipt (**I1**).
 - Full state and transition tables for all three machines, with guards and atomic effects:
-  R1–R11 (§6.2), the delivery states (§7.1), W1–W8 (§8.2).
+  R1–R14 (§6.2), the delivery states and grade ladder (§7.1), W1–W9 (§8.2).
 - Request identity as **three distinct keys** — server-minted `request_id`, client `Idempotency-Key`,
   and `dedupe_key` — each with its own scope and lifetime (§3.1).
 - The **declared `requires` model**: `answer.fields`, `capabilities`, `authority`. There is no request
@@ -55,8 +55,8 @@ implementation passing the suite.
 
 ### Added — artifacts
 
-- `openapi.yaml` — OpenAPI 3.1, 30 operations across 28 paths, 86 schemas, three security schemes,
-  and the complete 31-code error taxonomy as a single `ErrorCode` enum.
+- `openapi.yaml` — OpenAPI 3.1, 30 operations across 28 paths, 87 schemas, three security schemes,
+  and the complete 32-code error taxonomy as a single `ErrorCode` enum.
 - `schemas/request.schema.json`, `receipt.schema.json`, `policy.schema.json`,
   `delivery-attempt.schema.json` — JSON Schema 2020-12.
 - `signing.md` — the callback (HMAC-SHA-256) and receipt (Ed25519) schemes with exact canonical
@@ -70,8 +70,8 @@ implementation passing the suite.
 ### Security
 
 The twelve protocol-level security requirements of §16 are normative, realized by invariants
-**I1–I21** (§17) and tested by the 23 Level 1 conformance cases of §18 (**C-1**–**C-16**, **C-6b**,
-**C-18**–**C-23**), with **C-17** at Level 2. Every invariant maps to at least one case and every
+**I1–I21** (§17) and tested by the 24 Level 1 conformance cases of §18 (**C-1**–**C-16**, **C-6b**,
+**C-18**–**C-24**), with **C-17** at Level 2. Every invariant maps to at least one case and every
 Level 1 case maps to at least one invariant; the mapping is duplicated machine-readably in
 `conformance-map.json`. The requirements that constrain implementations most
 sharply:
@@ -122,6 +122,13 @@ new error code are additive.
   February than in March. `Duration` now permits only exact units (weeks, days, hours, minutes,
   seconds); retention windows, where calendar semantics are what an operator means, use the new
   `CalendarDuration`.
+- **Canonical JSON did not pin number serialization**, leaving three implementations free to diverge
+  at exactly the boundary where RFC 8785 inherits ECMAScript's switch to exponential notation. §1.4
+  now constrains digest-covered numbers to `0` or `1e-6 ≤ |x| < 1e21`, requires integers within
+  ±(2^53 − 1), and rejects the rest with `422 answer_validation_failed`. The emitted output is a
+  strict subset of legal JCS, so a full canonicalizer and one that refuses to emit outside the band
+  produce identical bytes and neither can silently diverge. Added **C-24**, which also pins the two
+  signing fixtures' byte lengths and digests as the cross-implementation check.
 - **Two diagrams were ambiguous.** Delivery grades are now stated as an ordered ladder with monotone
   advancement that MAY skip a rung, bounded by the channel's `max_grade`, and a Server MUST NOT
   synthesize a grade it did not observe. In the waiter machine, W2 and W8 now partition the terminal

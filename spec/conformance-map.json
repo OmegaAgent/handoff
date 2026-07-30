@@ -26,7 +26,8 @@
       "C-20",
       "C-21",
       "C-22",
-      "C-23"
+      "C-23",
+      "C-24"
     ],
     "2": [
       "C-17"
@@ -232,6 +233,15 @@
       "invariants": [
         "I12"
       ]
+    },
+    {
+      "id": "C-24",
+      "level": 1,
+      "title": "Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `1e20` → accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md`",
+      "invariants": [
+        "I2",
+        "I21"
+      ]
     }
   ],
   "invariants": [
@@ -248,7 +258,8 @@
       "statement": "A receipt is immutable and records what the person saw, not what the request later became.",
       "cases": [
         "C-6b",
-        "C-15"
+        "C-15",
+        "C-24"
       ]
     },
     {
@@ -391,7 +402,8 @@
       "id": "I21",
       "statement": "Unknown protocol versions, field types, and capability types fail closed. Nothing is created, and nothing degrades silently.",
       "cases": [
-        "C-16"
+        "C-16",
+        "C-24"
       ]
     }
   ]
