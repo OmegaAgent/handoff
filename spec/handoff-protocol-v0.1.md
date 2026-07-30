@@ -1001,6 +1001,19 @@ Altering any historical receipt MUST invalidate the chain head. This gives tampe
 key management at all. Detached signatures and external anchoring are OPTIONAL additions (§15,
 `signing.md`) and MUST NOT replace the chain.
 
+**What the chain does not detect, stated so that nobody has to discover it.** Height contiguity
+catches an alteration anywhere and an excision from the middle, but **truncation of the tail is
+undetectable from the chain alone**: removing the most recent receipts leaves a shorter chain that
+verifies perfectly, because there is nothing left to point at what was removed. This is inherent to
+an unanchored hash chain rather than a defect in it, and it is why the head MUST be exportable —
+an exported head is the external anchor that makes truncation visible, and it is the only thing
+that does.
+
+A deployment that never records its head anywhere outside its own database has tamper-evidence
+against alteration and against excision, and **no** evidence against a party who can delete the
+newest rows. An implementation MUST NOT describe its chain as detecting truncation unless it also
+anchors the head somewhere the same party cannot rewrite.
+
 Note for implementers: once storage-level immutability is in place, a backfilling update is also
 rejected. New receipt columns must therefore arrive as additive, defaulted columns.
 

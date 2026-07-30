@@ -180,6 +180,73 @@ jobs:
           print("zero runtime dependencies")
           PY
 
+      # `sdk/types/README.md` tells the reader to treat this check, and not good intentions, as the
+      # mechanism keeping the hand-written declarations honest against the spec. It ran in no job
+      # until a review pointed that out, which made the sentence the thing it warned against.
+      - name: Declared types still cover the spec
+        run: node sdk/types/scripts/check-drift.mjs
+
+  fixtures-validate:
+    name: spec — fixtures validate against the schemas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # `spec/fixtures/README.md` says the fixtures are asserted mechanically against
+      # `spec/schemas/`. The SDKs' byte-identity tests are real, but nothing was reading the
+      # schemas, so that sentence described an intention rather than the repository.
+      #
+      # The schemas cross-reference each other by absolute `$id`, so they are loaded into a local
+      # registry first. Without it a validator reaches for the network, and a CI job that silently
+      # depends on a domain resolving is not a check.
+      - name: Validate
+        run: |
+          python -m pip install --quiet jsonschema referencing
+          python - <<'PY'
+          import json, pathlib, sys
+          from jsonschema import Draft202012Validator
+          from referencing import Registry, Resource
+
+          root = pathlib.Path("spec")
+          files = {p.name.split(".")[0]: json.loads(p.read_text())
+                   for p in (root / "schemas").glob("*.json")}
+          resources = []
+          for name, doc in files.items():
+              resource = Resource.from_contents(doc)
+              resources.append((doc.get("$id", f"{name}.schema.json"), resource))
+              resources.append((f"{name}.schema.json", resource))
+          registry = Registry().with_resources(resources)
+
+          bound = [
+              ("02-request-created", "request.schema.json"),
+              ("08-receipt-decision", "receipt.schema.json"),
+              ("09-receipt-policy", "receipt.schema.json"),
+              ("11-delivery", "delivery-attempt.schema.json#/$defs/Delivery"),
+              ("19-tenant-policy", "policy.schema.json"),
+          ]
+          failed = 0
+          for stem, ref in bound:
+              path = root / "fixtures" / f"{stem}.json"
+              if not path.exists():
+                  print(f"MISSING fixture {path}")
+                  failed += 1
+                  continue
+              validator = Draft202012Validator({"$ref": ref}, registry=registry)
+              errors = sorted(validator.iter_errors(json.loads(path.read_text())),
+                              key=lambda e: list(e.path))
+              if errors:
+                  failed += 1
+                  for e in errors:
+                      where = "/".join(map(str, e.path)) or "<root>"
+                      print(f"{stem} -> {ref}: {where}: {e.message}")
+              else:
+                  print(f"ok  {stem} -> {ref}")
+          sys.exit(1 if failed else 0)
+          PY
+
   conformance:
     name: conformance suite
     runs-on: ubuntu-latest
