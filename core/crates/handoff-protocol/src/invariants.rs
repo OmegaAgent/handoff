@@ -233,7 +233,11 @@ mod coverage {
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
             cases.push(parse_case(&text, &path));
         }
-        assert!(!cases.is_empty(), "no case files found in {}", dir.display());
+        assert!(
+            !cases.is_empty(),
+            "no case files found in {}",
+            dir.display()
+        );
         cases.sort_by(|a, b| a.id.cmp(&b.id));
         cases
     }
@@ -339,7 +343,10 @@ mod coverage {
                     .strip_prefix('I')
                     .and_then(|n| n.parse().ok())
                     .unwrap_or_else(|| {
-                        panic!("case {} names `{name}`, which is not an invariant id", case.id)
+                        panic!(
+                            "case {} names `{name}`, which is not an invariant id",
+                            case.id
+                        )
                     });
                 assert!(
                     get(number).is_some(),
@@ -394,7 +401,10 @@ mod coverage {
     #[test]
     fn the_meta_test_fails_when_an_invariant_loses_its_only_case() {
         let mut cases = cases_from_files();
-        assert!(uncovered(&coverage_of(&cases)).is_empty(), "precondition: all covered");
+        assert!(
+            uncovered(&coverage_of(&cases)).is_empty(),
+            "precondition: all covered"
+        );
 
         // I12 is proved by exactly one case today, so removing it from that case removes the
         // invariant's entire coverage.
@@ -469,7 +479,8 @@ mod coverage {
             "  id: C-1\n  level: 1\n  invariants: []\n", // indented: belongs to a step
         ] {
             assert!(
-                std::panic::catch_unwind(|| parse_case(incomplete, Path::new("test.yaml"))).is_err(),
+                std::panic::catch_unwind(|| parse_case(incomplete, Path::new("test.yaml")))
+                    .is_err(),
                 "must refuse to parse:\n{incomplete}"
             );
         }
