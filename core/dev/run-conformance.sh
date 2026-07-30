@@ -12,12 +12,34 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+
+# One token per run, and every resource this script owns is derived from it.
+#
+# This is the fix for a whole class of failure rather than a convenience. The database name was
+# already per-run, but the port, the crash port and the scratch directory were fixed defaults. Two
+# runs therefore did not fail cleanly against each other — they interleaved. One run's exit trap
+# dropped the database out from under the other's running server, and the suite reported plausible
+# partial failures that read exactly like protocol regressions. The same tree scored 17/24, 19/24,
+# 22/24, 23/24 and 24/24 in one evening, and not one of the failures was an assertion about the
+# protocol.
+#
+# Defaults must be safe, because the alternative is every caller remembering to pass three
+# variables and the one who forgets silently corrupting somebody else's measurement.
+TOKEN="${HANDOFF_RUN_TOKEN:-$(date +%s)_$$}"
+
 # Scratch for this run: the server log, and the private copy of the binaries the hooks exec.
-# Overridable because two runs sharing one directory overwrite each other's `handoffd` mid-suite,
-# and a hook that execs a half-written binary reports a conformance failure that is really a race.
-RUN_DIR="${HANDOFF_RUN_DIR:-$HERE/.run}"
+# Two runs sharing one directory overwrite each other's `handoffd` mid-suite, and a hook that
+# execs a half-written binary reports a conformance failure that is really a race.
+RUN_DIR="${HANDOFF_RUN_DIR:-$HERE/.run/$TOKEN}"
 mkdir -p "$RUN_DIR"
 export HANDOFF_RUN_DIR="$RUN_DIR"
+
+# Ask the kernel for two free ports rather than guessing. A hardcoded default is what made
+# concurrent runs collide in the first place, and an arithmetic offset from a timestamp only makes
+# the collision rarer, not impossible.
+free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+}
 
 PG_HOST="${PGHOST:-localhost}"
 PG_PORT="${PGPORT:-5432}"
@@ -25,16 +47,16 @@ PG_USER="${PGUSER:-omega}"
 PG_PASSWORD="${PGPASSWORD:-omega}"
 export PGPASSWORD="$PG_PASSWORD"
 
-DB="${HANDOFF_DB:-handoff_conf_$(date +%s)}"
+DB="${HANDOFF_DB:-handoff_conf_$TOKEN}"
 export PG_ADMIN_URL="postgres://$PG_USER@$PG_HOST:$PG_PORT/postgres"
 export HANDOFF_DATABASE_URL="postgres://$PG_USER@$PG_HOST:$PG_PORT/$DB"
 export HANDOFF_BOOTSTRAP="$HERE/bootstrap.json"
-export HANDOFF_BIND="${HANDOFF_BIND:-127.0.0.1:8130}"
+export HANDOFF_BIND="${HANDOFF_BIND:-127.0.0.1:$(free_port)}"
 export HANDOFF_PUBLIC_BASE="http://$HANDOFF_BIND"
 export HANDOFF_LINK_ONLY_PERMITTED=false
 export HANDOFF_CALLBACK_SECRETS="whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05,whsec_9d41c07be5a2f36819b4d0e7c5a81f62"
 export HANDOFF_SWEEP_INTERVAL_MS=250
-export HANDOFF_CRASH_PORT="${HANDOFF_CRASH_PORT:-8131}"
+export HANDOFF_CRASH_PORT="${HANDOFF_CRASH_PORT:-$(free_port)}"
 export CARGO_INCREMENTAL=0
 
 # A guard, not a courtesy: these are somebody else's databases and this script creates and drops.
