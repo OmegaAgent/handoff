@@ -90,8 +90,13 @@
     "Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "Duration": {
       "type": "string",
+      "pattern": "^P(?!$)(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$",
+      "description": "ISO 8601 duration of exact length, e.g. PT15M, PT4H, P1D, P2W. Years and months are not permitted: P1M is 28 to 31 days depending on when the clock starts, so a TTL or lease expressed in them is not a fixed length. For retention windows see CalendarDuration."
+    },
+    "CalendarDuration": {
+      "type": "string",
       "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$",
-      "description": "ISO 8601 duration, e.g. PT15M, PT4H, P1D."
+      "description": "ISO 8601 duration that may use years and months, resolved against a calendar. Used ONLY for retention windows. It MUST NOT be used for a TTL, an attempt window, a grant expiry, a session lease, or a ladder delay."
     },
 
     "WaiterRef": {

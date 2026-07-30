@@ -184,9 +184,9 @@
       "additionalProperties": false,
       "description": "Receipts are append-only; retention governs how long they are served, never whether they may be altered.",
       "properties": {
-        "receipts": { "$ref": "request.schema.json#/$defs/Duration" },
-        "rendered_copies": { "$ref": "request.schema.json#/$defs/Duration" },
-        "delivery_attempts": { "$ref": "request.schema.json#/$defs/Duration" }
+        "receipts": { "$ref": "request.schema.json#/$defs/CalendarDuration" },
+        "rendered_copies": { "$ref": "request.schema.json#/$defs/CalendarDuration" },
+        "delivery_attempts": { "$ref": "request.schema.json#/$defs/CalendarDuration" }
       }
     },
 

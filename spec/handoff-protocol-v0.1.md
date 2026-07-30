@@ -73,7 +73,7 @@ provides storage and verbatim return. It does not provide continuation.
 | Type | Rule |
 |---|---|
 | Timestamps | RFC 3339, UTC, e.g. `2026-07-30T14:02:11Z`. Servers MUST use their own clock for all recorded times and MUST NOT accept a client-supplied `decided_at`. |
-| Durations | ISO 8601, e.g. `PT15M`, `PT4H`, `P1D`. |
+| Durations | ISO 8601 of **exact** length, e.g. `PT15M`, `PT4H`, `P1D`, `P2W`. Years and months MUST NOT be used for any TTL, attempt window, grant expiry, session lease, or ladder delay: `P1M` is 28 to 31 days depending on when the clock starts, so it is not a fixed length. Weeks are exactly seven days and are permitted. Retention windows are the sole exception and use a calendar-resolved duration, because "keep this for one year" is what an operator means. |
 | Identifiers | `<prefix>_<26-character Crockford base32 ULID>`, lowercase prefix. |
 | Digests | `sha256:` followed by lowercase hex, e.g. `sha256:9f2c…`. |
 | Canonical JSON | RFC 8785 (JCS). Every digest defined in this document is taken over the RFC 8785 canonicalization of the named object, UTF-8 encoded. |
@@ -552,6 +552,9 @@ Every terminal transition MUST produce a typed terminal signal to the waiter (I1
 | **R9** | `answered` | `answered` | duplicate answer, same `Idempotency-Key` | — | **No state change.** `200` with the original receipt |
 | **R10** | `answered` | `answered` | conflicting answer | — | **No state change.** `409 already_answered`, with the existing `receipt_id` attached |
 | **R11** | terminal | terminal | cancel or expiry racing a landed answer | — | **The person's answer wins.** The cancel returns `409 already_answered` |
+| **R12** | `pending` | `pending` | answer with `partial: true` (§5.5) | Answerer satisfies the declared authority; submitted values validate against the **current** field set | Route `secret` values to the sink; amend `requires.answer.fields` to the next set; increment `version`; re-arm the attempt clock **fresh**; append a step to the eventual receipt; **do not signal the waiter**; emit `request.step_recorded` |
+| **R13** | `pending` | `pending` | answer with `disposition` of `delegate` or `unable` (§6.6) | Answerer satisfies the declared authority | Record the disposition, the actor, and any `delegate_to` on the request; for `delegate`, mint deliveries to the new target; for `unable`, MAY advance the ladder per policy; **mint no receipt**; **do not signal the waiter**; emit `request.disposition_recorded` |
+| **R14** | `pending` | `pending` | answer that endorses but does not meet quorum (§4.5) | `quorum > 1`; answerer satisfies the declared authority; recorded endorsements remain below `quorum` | Record the endorsement with its principal and timestamp; **mint no receipt**; **do not signal the waiter**; emit `request.endorsed`. When the endorsement brings the count **to** `quorum`, R5 fires instead and mints the single receipt |
 
 **R5 is a conditional write.** A Server MUST implement the answer as a state-conditional update
 (`… WHERE state = 'pending'`) or an equivalent atomic compare-and-set, and MUST NOT implement it as a
@@ -559,6 +562,13 @@ read-then-write. Conformance: C-3.
 
 **R11 is a product rule, not an edge case.** A machine changing its mind a millisecond after a person
 acted MUST NOT discard that person's work.
+
+**R12, R13, and R14 share one property, and it is the reason they are numbered.** All three are
+things a *person* does to a `pending` request that leave it `pending`, and none of them may signal the
+waiter. A runtime MUST NOT be able to observe that an intermediate step, a delegation, or a partial
+endorsement occurred; it learns only the single outcome. An implementation that wakes the waiter on
+any of the three has turned one intervention into several, and violates I1 as soon as a receipt is
+minted for each.
 
 **R2's guard is strict.** Once a person has begun answering — any delivery has reached `acted` — an
 amendment MUST be refused with `409 request_in_progress` and the caller MUST supersede instead
@@ -675,19 +685,29 @@ Delivery is a first-class tracked entity, not a side effect of a notification sw
 ### 7.1 States
 
 ```
-  ∅ ─rung fires─▶ queued ──▶ suppressed            (policy: quiet hours, dedupe, consent missing)
+  ∅ ─rung fires─▶ queued ──▶ suppressed        (policy: quiet hours, dedupe, consent missing)
                      │
                      └──▶ sending ──▶ dispatched ──▶ delivered ──▶ seen ──▶ acted
-                             │  ▲          │              │          │
-                             │  │          └──▶ bounced   │          │
-                             ▼  │                         │          │
-                          retrying ──▶ failed             └── seen ──┘
+                             │  ▲          │   │                     ▲
+                             │  │          │   └─────────────────────┘
+                             ▼  │          │      (channel reports no delivery confirmation)
+                          retrying         └──▶ bounced
+                             │
+                             └──▶ failed
 ```
 
 Plus, at any point before `acted`: → `cancelled` when the request settles before dispatch, and →
 `stale` when the request settles elsewhere after dispatch.
 
 Terminal delivery states: `suppressed`, `failed`, `bounced`, `acted`, `stale`, `cancelled`.
+
+**Grades are an ordered ladder, and advancement is monotone but MAY skip.** The order is
+`dispatched < delivered < seen < acted`. A delivery MUST NOT move backwards down the ladder, and MUST
+NOT exceed its channel's declared `max_grade`. It MAY skip a rung: a channel that never reports
+delivery confirmation goes `dispatched → seen` the moment the person opens the surface, and that is a
+higher grade honestly earned, not a gap to be filled in. A Server MUST NOT synthesize an intermediate
+grade it did not observe — inferring `delivered` from a later `seen` would record evidence the channel
+never produced.
 
 ### 7.2 Delivery grades — what a delivery actually proves
 
@@ -773,27 +793,46 @@ durable server-side row, not a loop inside the client's process.**
 ### 8.1 States
 
 ```
-  ∅ ─raise─▶ armed ⇄ signalled ──▶ delivering ──▶ acked
-                │         │              │
-                │         │              └── transport failed ──▶ signalled (backoff)
-                │         │
-                │         └──▶ released      (request cancelled or superseded)
-                │
-                └──▶ orphaned ──reattach──▶ armed
+  ∅ ─raise─▶ armed ──▶ signalled ──▶ delivering ──▶ acked
+               ▲   W2       │  ▲   W3        │  W4     │
+               │            │  └─ transport ─┘         │
+               │            │      failed (W5)         │
+               │            │                          │
+               │            └──────────────────────────┘
+               │              W9: last signal acked while
+               │              the request is still pending
+               │
+               ├──▶ released   (W8: request cancelled or superseded)
+               │
+               └──▶ orphaned ──reattach (W7)──▶ armed
 ```
+
+`released` is reachable from `armed` and from `signalled`; `orphaned` from both as well. The
+`signalled → armed` return edge is **W9** and exists only for the non-terminal nudge.
 
 ### 8.2 Transition table
 
 | # | From | To | Trigger | Guard | Effect |
 |---|---|---|---|---|---|
 | **W1** | ∅ | `armed` | raise | — | Create a durable waiter keyed `(request_id, waiter_ref)`; store `resume_ref` / `resume_payload` verbatim if present |
-| **W2** | `armed` | `signalled` | the request reached a terminal state, or R3 attempt lapse | — | Enqueue exactly one signal. **Signals are a queue, not a flag** |
+| **W2** | `armed` | `signalled` | the request reached `answered` or `expired` (R5 / R6), or an attempt lapsed (R3) | — | Enqueue exactly one signal. **Signals are a queue, not a flag** |
 | **W3** | `signalled` | `delivering` | a long poll attaches, or a callback relay claims the signal | Exclusive claim with a lease | — |
 | **W4** | `delivering` | `acked` | ack with a valid `resume_token` | Token matches; signal not already acked | Stop redelivery; record `applied` and any `reason` |
 | **W5** | `delivering` | `signalled` | transport failure or lease expiry | attempts below the maximum | Exponential backoff; re-queue |
 | **W6** | `armed` or `signalled` | `orphaned` | the `waiter_ref` was reported terminal, or a leased waiter's heartbeat lapsed | — | Apply `on_waiter_terminal` |
 | **W7** | `orphaned` | `armed` | reattach | `resume_token` or authenticated `waiter_ref` ownership | Return every unacked signal; re-arm the lease |
-| **W8** | `armed` or `signalled` | `released` | R7 / R8 | — | Terminal signal delivered; no ack required |
+| **W8** | `armed` or `signalled` | `released` | the request was cancelled or superseded (R7 / R8) | — | Terminal signal delivered; no ack required |
+| **W9** | `acked` | `armed` | the acked signal was non-terminal and no further signal is queued | The request is still `pending` | Re-arm the waiter to await the eventual terminal signal |
+
+**W2 and W8 partition the terminal transitions and MUST NOT both fire for one request.** R5 and R6
+(answered, expired) route through W2, because the runtime is expected to consume the outcome and ack
+it. R7 and R8 (cancelled, superseded) route through W8, because the request was withdrawn by the side
+that raised it and there is nothing for the runtime to acknowledge. A Server MUST NOT signal a waiter
+twice for a single terminal transition.
+
+**W9 is why `acked` is not a terminal waiter state.** `attempt_lapsed` is a nudge: once it is acked
+and the request is still `pending`, the waiter returns to `armed` to await the real outcome. A Server
+that retires the waiter on the first ack will silently drop the answer that arrives afterwards.
 
 **W2 is why signals are a queue.** A non-terminal `attempt_lapsed` nudge MUST NOT be able to
 overwrite, replace, or mask a subsequent terminal signal. A Server that models the waiter's pending
@@ -994,7 +1033,11 @@ Rules:
    `200` with `first_redemption: false`. A retried turn MUST NOT be able to double-spend.
 3. A `single_use` authorization redeemed with a **different** `effect_key` MUST be rejected with
    `409 authorization_spent`.
-4. `expires_at` bounds how long a decision remains spendable. The RECOMMENDED default is 24 h.
+4. `expires_at` bounds how long a decision remains spendable. The RECOMMENDED default is 24 h. A
+   redemption after it MUST be rejected with `409 authorization_expired`, which a Server MUST NOT
+   conflate with `authorization_spent` or `authorization_not_found`: the decision was real and is on
+   the record, it simply can no longer be spent, and an operator debugging a stalled runtime needs to
+   be told which of the three happened.
 5. `effect_digest` OPTIONALLY binds the authorization to the **shape** of the effect. When present, a
    redemption whose digest disagrees MUST be rejected with `409 effect_digest_mismatch`. An approval
    of "refund $2,400" cannot then be spent on "refund $24,000".

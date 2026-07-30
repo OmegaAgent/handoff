@@ -97,6 +97,38 @@ sharply:
 - **Input content is never recorded.** Capability use records presence and effect — held duration,
   input event counts, navigation origins — and never keystrokes or payloads (§11.6).
 
+### Fixed — pre-release corrections
+
+Found by the first implementer building against the draft, and corrected before any release. None
+renumbers an existing invariant, state, or transition; the three new transition numbers and the one
+new error code are additive.
+
+- **Two invariants had no conformance case.** I12 (transactional event emission) and I19 (blast
+  radius) were stated normatively and tested nowhere. Added **C-23** for I12; extended C-8 to assert
+  `409 blast_radius_mismatch` and pre-resolve blast-radius disclosure for I19; extended C-18 and C-20
+  to cover I13. §18 now carries an explicit `Invariants` column and a stable-id rule.
+- **Three `pending` → `pending` transitions had normative prose but no number**, so implementers had
+  no shared vocabulary for them: **R12** (progressive-disclosure partial answer), **R13** (a
+  `delegate` or `unable` disposition), **R14** (a quorum endorsement below quorum). All three are
+  things a person does that leave the request `pending`, and none of them may signal the waiter.
+- **`value_sink.ref` contradicted its own normative fixture.** It was typed as a `snk_` identifier
+  while §5.6.1 and `fixtures/use-cases/03-login-assistance.json` carried an opaque provider
+  coordinate. Since §12 rule 4 makes the sink runtime-owned, the opaque reading is correct:
+  `ValueSink.ref` is now a bounded opaque string and `Field.sink_ref` remains the typed handle.
+- **No error code existed for redeeming an expired authorization**, though `Authorization.state`
+  already had an `expired` member. Added `authorization_expired` (409). The three codes it would
+  otherwise collapse into each state something false: spent, non-existent, or malformed.
+- **The duration type admitted years and months**, so a `ttl` of `P1M` meant a different length in
+  February than in March. `Duration` now permits only exact units (weeks, days, hours, minutes,
+  seconds); retention windows, where calendar semantics are what an operator means, use the new
+  `CalendarDuration`.
+- **Two diagrams were ambiguous.** Delivery grades are now stated as an ordered ladder with monotone
+  advancement that MAY skip a rung, bounded by the channel's `max_grade`, and a Server MUST NOT
+  synthesize a grade it did not observe. In the waiter machine, W2 and W8 now partition the terminal
+  transitions rather than both claiming R7/R8, and the previously undrawn `signalled → armed` return
+  edge is numbered **W9** — without it, a Server retires the waiter on the first `attempt_lapsed` ack
+  and silently drops the answer that arrives afterwards.
+
 ### Explicitly not claimed
 
 - **Exact execution resumption.** This specification guarantees typed answer delivery, effectively-once

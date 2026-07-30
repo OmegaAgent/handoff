@@ -941,6 +941,9 @@ paths:
         `409 authorization_spent` when a `single_use` authorization is redeemed with a *different*
         `effect_key`. `409 effect_digest_mismatch` when `bound_to.effect_digest` disagrees with the
         supplied `effect_digest` — an approval of "refund $2,400" cannot be spent on "refund $24,000".
+        `409 authorization_expired` when `expires_at` has passed: the decision was real and is on the
+        record, but it is no longer spendable, and saying so is different from saying it was spent or
+        that it never existed.
       security:
         - machineKey: []
       x-required-scopes: [handoff:authorizations:redeem]
@@ -1681,6 +1684,11 @@ components:
                 error:
                   code: authorization_spent
                   message: "single-use authorization already redeemed for effect_key stripe:refund:ch_1B"
+            authorization_expired:
+              value:
+                error:
+                  code: authorization_expired
+                  message: "the authorization expired at 2026-07-31T14:07:44Z and can no longer be spent"
             effect_digest_mismatch:
               value:
                 error:
@@ -1885,13 +1893,30 @@ components:
     Duration:
       type: string
       description: |
-        An ISO-8601 duration — `PT15M`, `PT4H`, `P1D`. Durations rather than absolute deadlines, so a
-        declaration means the same thing whenever it is evaluated.
-      pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+        An ISO-8601 duration of **exact** length — `PT15M`, `PT4H`, `P1D`, `P2W`. Durations rather
+        than absolute deadlines, so a declaration means the same thing whenever it is evaluated.
+
+        Years and months are **not permitted**: `P1M` is 28, 29, 30, or 31 days depending on when the
+        clock starts, so a TTL or a lease expressed in them is not a fixed length. Weeks are exactly
+        seven days and are allowed. For retention windows, where calendar semantics are what an
+        operator actually means, see `CalendarDuration`.
+      pattern: '^P(?!$)(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
       examples:
         - PT15M
         - PT4H
         - P1D
+
+    CalendarDuration:
+      type: string
+      description: |
+        An ISO-8601 duration that MAY use years and months, resolved against a calendar rather than as
+        a fixed number of seconds. Used **only** for retention windows, where "keep this for one year"
+        is what an operator means and the few hours of drift are immaterial. It MUST NOT be used for a
+        TTL, an attempt window, a grant expiry, a session lease, or a ladder delay — see `Duration`.
+      pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+      examples:
+        - P1Y
+        - P90D
 
     Digest:
       type: string
@@ -2187,7 +2212,17 @@ components:
           description: Opaque operation name meaningful to the provider only.
           maxLength: 128
         ref:
-          $ref: '#/components/schemas/SinkRef'
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: >
+            An opaque provider resource reference, **not** a Handoff `snk_` identifier. The sink is
+            supplied by the runtime, not by this protocol (§12 rule 4), so this string is whatever the
+            provider needs in order to route values to the right place, and the core never parses it.
+            It MUST NOT be a URL and MUST NOT embed a credential. `Field.sink_ref` is the typed
+            `snk_…` handle; this is the runtime's own coordinate.
+          examples:
+            - 'opaque:bs_4KpQ'
 
     Field:
       type: object
@@ -4127,6 +4162,7 @@ components:
         - request_in_progress
         - idempotency_key_reused
         - authorization_spent
+        - authorization_expired
         - effect_digest_mismatch
         - blast_radius_mismatch
         - grant_already_held

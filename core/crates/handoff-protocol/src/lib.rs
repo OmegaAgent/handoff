@@ -81,11 +81,11 @@
 //!
 //! Reported, not fixed: this crate does not own `spec/`.
 //!
-//! * **D-1 — two invariants have no conformance case.** §18's table maps a case to every invariant
-//!   except **I12** (every transition emits its event in the same transaction) and **I19** (blast
-//!   radius is declared, shown, digest-bound, and recorded). C-8 covers grant opacity and replay,
-//!   not blast radius. See [`invariants::INVARIANTS_WITH_NO_SPECIFIED_CASE`]. I13 is covered, but
-//!   only by the `Conformance: C-21` line in §4.7, not by the §18 table.
+//! * **D-1 — withdrawn, no longer true.** Raised against an earlier draft of §18 in which I12 and
+//!   I19 had no conformance case. The current §18 covers both — I12 → C-23, I19 → C-8 — and every
+//!   other invariant, and all 24 case files exist. The entry is kept numbered but empty because
+//!   identifiers are stable here for the same reason §18 keeps a withdrawn case's id: renumbering
+//!   D-2..D-5 would silently invalidate every reference already made to them.
 //! * **D-2 — `value_sink.ref` contradicts its own fixture.** `openapi.yaml` types it as `SinkRef`
 //!   (`^snk_[0-9A-HJKMNP-TV-Z]{26}$`), while spec §5.6.1 and the normative fixture
 //!   `use-cases/03-login-assistance.json` both carry `"ref": "opaque:bs_4KpQ"`, which that pattern
