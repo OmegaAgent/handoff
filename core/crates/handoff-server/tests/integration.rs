@@ -8,6 +8,9 @@
 #[path = "suite/harness/mod.rs"]
 mod harness;
 
+#[path = "suite/callbacks.rs"]
+mod callbacks;
+
 #[path = "suite/durability.rs"]
 mod durability;
 

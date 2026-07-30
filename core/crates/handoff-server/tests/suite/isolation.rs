@@ -241,7 +241,6 @@ async fn row_level_security_holds_on_every_tenant_scoped_table() {
     );
 
     drop(restricted);
-    least_privilege.drop_role().await;
 }
 
 /// A database role with no more than `handoffd` needs, created for the life of one test.
@@ -249,11 +248,22 @@ struct LeastPrivilegeRole {
     name: String,
     url: String,
     admin: String,
+    /// The deployment's own database, as its owner. Needed to release the role's grants before it
+    /// can be dropped.
+    database: String,
 }
 
 impl LeastPrivilegeRole {
     async fn create(deployment: &Deployment) -> Self {
-        let name = format!("handoff_app_{}", std::process::id());
+        // Unique per test run, so two runs in parallel do not fight over one role.
+        let name = format!(
+            "handoff_app_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or_default()
+        );
         let admin = admin_url();
         let owner = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
@@ -284,6 +294,7 @@ impl LeastPrivilegeRole {
             url: format!("{scheme}://{name}:least-privilege@{host}/{database}"),
             name,
             admin,
+            database: deployment.url.clone(),
         }
     }
 
@@ -294,15 +305,33 @@ impl LeastPrivilegeRole {
             .await
             .expect("connect as the least-privilege role")
     }
+}
 
-    async fn drop_role(self) {
-        let admin = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.admin)
-            .await
-            .expect("connect as the administrator");
-        let _ = sqlx::query(&format!("drop role if exists \"{}\"", self.name))
-            .execute(&admin)
-            .await;
+/// Roles are cluster-wide, so dropping the disposable database does not take them with it.
+///
+/// The drop therefore lives here rather than at the end of the test body: a failing assertion
+/// panics, and a cleanup that only runs on the happy path leaves a role behind on every red run —
+/// which is exactly when tests are run most.
+impl Drop for LeastPrivilegeRole {
+    fn drop(&mut self) {
+        let name = self.name.clone();
+        // A role cannot be dropped while it still holds privileges on objects, so the grants go
+        // first — in the database that issued them, as its owner.
+        let _ = std::process::Command::new("psql")
+            .args([
+                &self.database,
+                "-q",
+                "-c",
+                &format!("drop owned by \"{name}\" cascade"),
+            ])
+            .output();
+        let _ = std::process::Command::new("psql")
+            .args([
+                &self.admin,
+                "-q",
+                "-c",
+                &format!("drop role if exists \"{name}\""),
+            ])
+            .output();
     }
 }

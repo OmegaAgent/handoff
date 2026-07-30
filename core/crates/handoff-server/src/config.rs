@@ -7,7 +7,7 @@
 
 use handoff_core::auth::AuthPolicy;
 use handoff_core::capability::{CapabilityRegistry, EphemeralProvider};
-use handoff_core::channel::{starter_channels, starter_ladder, ChannelRegistry};
+use handoff_core::channel::{starter_ladder, ChannelRegistry};
 use handoff_protocol::error::{ErrorCode, ProtocolError, Result};
 use handoff_protocol::requires::DeploymentProfile;
 use serde::Deserialize;
@@ -35,6 +35,12 @@ pub struct Config {
     pub bootstrap_file: Option<String>,
     /// How often the sweep runs.
     pub sweep_interval_ms: u64,
+    /// Size of the store's connection pool.
+    ///
+    /// A serving process wants a real pool; a one-shot subcommand wants one or two connections and
+    /// no more. Postgres budgets connections globally, so a CLI tool that reserves a serving pool
+    /// is a CLI tool that takes the database down when a few of them run at once.
+    pub max_connections: u32,
 }
 
 fn env(key: &str) -> Option<String> {
@@ -72,6 +78,9 @@ impl Config {
             sweep_interval_ms: env("HANDOFF_SWEEP_INTERVAL_MS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
+            max_connections: env("HANDOFF_MAX_CONNECTIONS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16),
         })
     }
 
@@ -96,8 +105,15 @@ impl Config {
     }
 
     /// Channels and the default ladder.
+    ///
+    /// The descriptors come from the adapters this build compiled in, rather than from a list kept
+    /// alongside them: what a ladder may name and what the process can actually do is then one
+    /// fact, and a channel cannot declare a grade its adapter never implements.
     pub fn channels(&self) -> ChannelRegistry {
-        ChannelRegistry::new(starter_channels(), starter_ladder())
+        ChannelRegistry::new(
+            crate::delivery::Adapters::new(crate::delivery::shipped_adapters()).descriptors(),
+            starter_ladder(),
+        )
     }
 
     /// Capability providers.

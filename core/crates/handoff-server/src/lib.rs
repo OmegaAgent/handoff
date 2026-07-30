@@ -15,8 +15,9 @@
 //!   `handoff-core`, anything that writes lives in the store inside a transaction.
 //! - [`wire`] builds every response body by hand, so that `null` and absent stay different answers
 //!   to different questions.
-//! - [`workers`] runs the sweep and the callback pusher. Neither decides anything; both call store
-//!   methods that commit a state and its event together (I12).
+//! - [`workers`] runs the sweep and the callback pusher, and [`delivery`] runs the delivery
+//!   worker. None of them decides anything; all of them call store methods that commit a state and
+//!   its event together (I12).
 //! - [`cli`] holds the maintenance subcommands, including the open chain verifier.
 
 #![forbid(unsafe_code)]
@@ -25,6 +26,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod delivery;
 pub mod http;
 pub mod routes;
 pub mod state;
@@ -50,10 +52,24 @@ pub fn version_line() -> String {
     )
 }
 
-/// Build the store and the shared state from configuration.
+/// Build the store and the shared state from configuration, with no seam ports supplied.
 pub async fn build(config: config::Config) -> Result<Arc<state::AppState>> {
-    let store = handoff_store_postgres::PgStore::connect(
+    build_with(config, state::Deployment::default()).await
+}
+
+/// Build the same server with a deployment's own seam ports.
+///
+/// This is the supported way to build a hosted deployment on top of the reference server: depend on
+/// this crate at a published version, supply implementations of the ports you need, and start the
+/// same binary. Anything that cannot be expressed this way belongs upstream as a new port, never in
+/// a private copy of this crate.
+pub async fn build_with(
+    config: config::Config,
+    deployment: state::Deployment,
+) -> Result<Arc<state::AppState>> {
+    let store = handoff_store_postgres::PgStore::connect_with(
         &config.database_url,
+        config.max_connections,
         config.deployment_profile(),
         config.auth_policy(),
         config.channels(),
@@ -72,6 +88,7 @@ pub async fn build(config: config::Config) -> Result<Arc<state::AppState>> {
         capabilities: config.capabilities(),
         store: Arc::new(store),
         config,
+        deployment,
     }))
 }
 
@@ -80,6 +97,10 @@ pub async fn serve(state: Arc<state::AppState>) -> Result<()> {
     let bind = state.config.bind.clone();
     tokio::spawn(workers::sweep_loop(Arc::clone(&state)));
     tokio::spawn(workers::callback_loop(Arc::clone(&state)));
+    tokio::spawn(delivery::delivery_loop(
+        Arc::clone(&state),
+        delivery::Adapters::new(delivery::shipped_adapters()),
+    ));
 
     let app = routes::router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| {

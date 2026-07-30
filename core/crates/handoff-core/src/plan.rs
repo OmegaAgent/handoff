@@ -252,11 +252,16 @@ pub fn plan_answer(input: AnswerInput<'_>) -> Result<AnswerPlan> {
             delivery_id: Some(d.id),
             channel: Some(d.channel.clone()),
             target: Some(d.target.clone()),
-            // Never above the channel's declared ceiling (§7.2).
-            grade_reached: Some(
-                d.max_grade
-                    .min(handoff_protocol::delivery::DeliveryGrade::Acted),
-            ),
+            // What this delivery **reached**, never what its channel could have proved. §7.2
+            // forbids synthesizing a grade that was not observed, and a ceiling is a statement
+            // about the channel rather than about this delivery: recording `delivered` because
+            // voice can prove `delivered` would put evidence on a receipt that no phone call ever
+            // produced.
+            //
+            // Answering through a delivery is itself the observation that earns `acted` — but only
+            // where the channel can say who the person was (§4.7). Everywhere else the strongest
+            // honest claim is whatever the channel actually reported.
+            grade_reached: Some(grade_of(d)),
         }),
         authority: ReceiptAuthority {
             required,
@@ -569,6 +574,19 @@ pub fn rendered_digest(request_prompt: &Value, requires: &Value, version: u64) -
         "requires": requires,
         "version": version,
     }))
+}
+
+/// The grade the answering delivery reached (§9.2, §7.2).
+fn grade_of(delivery: &DeliveryView) -> handoff_protocol::delivery::DeliveryGrade {
+    use handoff_protocol::delivery::DeliveryGrade;
+    if delivery.can_authenticate_person && delivery.max_grade >= DeliveryGrade::Acted {
+        DeliveryGrade::Acted
+    } else {
+        delivery
+            .grade_reached
+            .unwrap_or(DeliveryGrade::Dispatched)
+            .min(delivery.max_grade)
+    }
 }
 
 #[cfg(test)]

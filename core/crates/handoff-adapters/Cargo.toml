@@ -1,6 +1,6 @@
 [package]
 name = "handoff-adapters"
-description = "Delivery channel adapters for Handoff — slack, email, webhook, voice — feature-gated, one crate."
+description = "Delivery channel adapters for Handoff — in-app, webhook, email, slack, voice — feature-gated, one crate."
 license = "Apache-2.0"
 publish = true
 version.workspace = true
@@ -13,13 +13,22 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
+# `inapp` is not a feature: it is this deployment's own request surface, always compiled in, so a
+# build can always reach somebody. The rest are opt-in, because compiling in a channel that cannot
+# send only fills a delivery log with `channel_not_configured` nobody asked for.
 default = ["webhook"]
-webhook = []
+webhook = ["dep:reqwest", "dep:serde_json"]
+memory = []
 email = []
 slack = []
 voice = []
-all-channels = ["webhook", "email", "slack", "voice"]
+all-channels = ["webhook", "memory", "email", "slack", "voice"]
 
 [dependencies]
 handoff-core.workspace = true
 handoff-protocol.workspace = true
+reqwest = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

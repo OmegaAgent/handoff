@@ -16,8 +16,10 @@ deliverable. These are the things a reader might reasonably expect to find and w
   generator, or extending the drift check to compare members, is still open.
 - **No case exists for a Level 2 deployment that declines the continuation extension.** C-17 covers
   the positive path only.
-- **The conformance CI job is still `continue-on-error`.** It must be turned off now that cases
-  exist; see the H0 list below.
+- ~~The conformance CI job is still `continue-on-error`.~~ **Done.** Removed when the first cases
+  landed. Until the reference server was green the job asserted the inverse property — that the
+  suite reports red against a stub implementing nothing — and it fails the build if the suite ever
+  reports conformance against that stub.
 
 ## Open now — H0, publish the contract
 
@@ -44,6 +46,66 @@ Still open before the first public push, in order:
 4. **Decide whether the conformance suite gates a managed deploy from day one or from v1.0.**
    Day one is stronger and slower. A gate added later is a gate that never gets added.
 5. **Turn off `continue-on-error` on the conformance CI job** the moment the first case lands.
+
+## H5 — the managed adapter and the cutover
+
+Landed in `managed/` (closed, `UNLICENSED`, `publish = false`) and `docs/cutover-plan.md`. Eight seam
+ports implemented against the Ωmegas control plane over HTTP; 75 tests; the outbox and reconciler are
+tested against a real Postgres because durability is not a property a fake can demonstrate.
+
+**Blocking, and needing an owner decision rather than a schedule:**
+
+1. **Machine auth as specified cannot serve an out-of-repo Handoff.** It is an Axum extractor doing
+   an indexed fetch against `api_keys` inside the omega repo, and `handoff.omegas.dev` has neither.
+   `managed/…/auth.rs` implements the recommended client-credentials exchange, but until an owner
+   rules, **Handoff's public API has no mechanism** — not merely no date. Everything else in the
+   managed tier is downstream of this.
+2. **Attestation is unbuilt in both tiers.** No key, no custody decision, no verification endpoint,
+   no owner. `signer.rs` refuses rather than signing with something convenient. **Do not market
+   independent attestation before it exists** — it is the strongest item on the upgrade list and the
+   one we currently cannot deliver.
+3. **The revocable viewer token is unbuilt**, so browser takeover cannot be offered. `takeover.rs`
+   refuses and deliberately does **not** fall back to today's broadcast URL (defect B-2).
+
+**Ordered follow-ups:**
+
+4. **`Store::chain` is the wrong read for a reconciler.** It returns a tenant's whole chain, because
+   it exists to serve the open verifier. Reconciling from it is O(chain) per pass rather than O(new),
+   and it will not stay acceptable on a large tenant. The fix is a cursored read on the open store —
+   an upstream port change, in the open repo.
+5. **Tenant discovery has no home.** `Reconciler::run_for` takes one tenant; nothing enumerates them.
+   Querying the open store's tables from the managed crate would couple the adapter to the core's
+   schema, which is the coupling the whole arrangement exists to avoid. `Store::tenants()` upstream,
+   or the deployment drives it from the set it already knows.
+6. **The managed delivery fleet has no transports.** `delivery.rs` declares what the fleet should be
+   and refuses the two shapes that must never ship; the reviewed Slack app, the warmed SES identity,
+   and the numbers are operational assets, not code.
+7. **Wiring attestation needs an open port.** The receipt is sealed inside the answer transaction and
+   nothing in `Store` takes a signer. It must be an upstream change, or the hosted tier produces
+   receipts the open verifier cannot check — which is a vendor claim rather than evidence.
+8. **`usage_events.idempotency_key` is globally unique, not per-org (B-10).** The adapter mints
+   org-scoped keys and refuses any that are not, but a server assuming global uniqueness still
+   collides across products. Fix on the ingest endpoint.
+9. **`events` is not append-only at the database**, and two live `UPDATE events SET instance_id`
+   statements must go before the audit mirror can be trusted. The API also drops `payload`, which is
+   exactly the field a receipt summary lives in.
+
+**A defect in our own tooling, found while verifying H5:**
+
+10. ~~`core/dev/run-conformance.sh` is unsafe to run concurrently.~~ **Fixed (`baba8fe`).** Every
+    resource the script owns now derives from one per-run token, and both ports are obtained by
+    asking the kernel for a free one rather than derived arithmetically — an offset only makes a
+    collision rarer. Proof: two suites started concurrently with **no environment variables at
+    all**, both 24/24 exit 0, from the identical invocation that had produced 17/24, 19/24, 22/24
+    and 23/24.
+
+    Worth keeping the diagnosis, because the failure shape recurs: the harness had also been
+    *measuring a server it did not start*. An orphan held the port, the newly launched server
+    failed to bind and exited, and the readiness probe checked `curl` before checking whether its
+    own process was alive — so a stranger's 200 read as a healthy start, and the suite then
+    measured an older build against a stale database. **Not one of those failures was an assertion
+    about the protocol.** A measurement tool that corrupts a peer does not look broken; it looks
+    like a finding.
 
 ## Prior art — the hackathon build (Night Hack, 2026-07-24)
 

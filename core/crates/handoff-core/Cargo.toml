@@ -17,5 +17,8 @@ handoff-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# The callback signature scheme of `signing.md` lives in this crate so the server's pusher and any
+# webhook adapter sign identically; a receiver cannot verify two different implementations.
+hmac.workspace = true
 chrono.workspace = true
 getrandom.workspace = true

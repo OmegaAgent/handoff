@@ -59,7 +59,10 @@ async fn a_partial_answer_records_a_step_and_never_wakes_the_waiter() {
     );
 
     let (_, request) = get(&deployment.base, &format!("/requests/{id}"), MACHINE_A).await;
-    assert_eq!(request["state"], "pending", "R12 leaves the request pending");
+    assert_eq!(
+        request["state"], "pending",
+        "R12 leaves the request pending"
+    );
     assert!(request["receipt"].is_null());
 
     // The load-bearing assertion. The runtime must not be able to tell that a step happened.
@@ -79,7 +82,9 @@ async fn a_partial_answer_records_a_step_and_never_wakes_the_waiter() {
 
     let pool = deployment.pool().await;
     assert!(
-        events_for(&pool, &id).await.contains(&"request.step_recorded".to_string()),
+        events_for(&pool, &id)
+            .await
+            .contains(&"request.step_recorded".to_string()),
         "R12 emits request.step_recorded, not request.amended: an amendment is a third party \
          improving the wording, and this is the answerer at work"
     );
@@ -130,7 +135,10 @@ async fn a_delegation_is_recorded_mints_deliveries_and_never_wakes_the_waiter() 
     );
 
     let (_, request) = get(&deployment.base, &format!("/requests/{id}"), MACHINE_A).await;
-    assert_eq!(request["state"], "pending", "it stays pending until somebody decides");
+    assert_eq!(
+        request["state"], "pending",
+        "it stays pending until somebody decides"
+    );
     assert!(request["receipt"].is_null());
 
     let (status, signals) = get(
@@ -160,7 +168,9 @@ async fn a_delegation_is_recorded_mints_deliveries_and_never_wakes_the_waiter() 
 
     let pool = deployment.pool().await;
     assert!(
-        events_for(&pool, &id).await.contains(&"request.disposition_recorded".to_string()),
+        events_for(&pool, &id)
+            .await
+            .contains(&"request.disposition_recorded".to_string()),
         "R13 emits request.disposition_recorded"
     );
 
@@ -224,16 +234,21 @@ async fn redeeming_an_expired_authorization_says_expired_and_not_spent() {
     )
     .await;
     assert_eq!(status, 200, "{answered}");
-    let authorization = answered["authorization"]["id"].as_str().unwrap().to_string();
+    let authorization = answered["authorization"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Move its expiry into the past. An authorization is not a receipt: it has no immutability
     // trigger, because `expires_at` is exactly the kind of thing an operator may need to move.
     let pool = deployment.pool().await;
-    sqlx::query("update handoff_authorizations set expires_at = now() - interval '1 hour' where id = $1")
-        .bind(&authorization)
-        .execute(&pool)
-        .await
-        .expect("expire the authorization");
+    sqlx::query(
+        "update handoff_authorizations set expires_at = now() - interval '1 hour' where id = $1",
+    )
+    .bind(&authorization)
+    .execute(&pool)
+    .await
+    .expect("expire the authorization");
 
     let (status, error) = post(
         &deployment.base,
@@ -281,7 +296,10 @@ async fn a_ttl_measured_in_months_is_rejected_rather_than_guessed() {
     body["ttl"] = serde_json::json!("P2W");
     let (status, raised) = post(&deployment.base, "/requests", MACHINE_A, "dur-week", body).await;
     assert_eq!(status, 201, "{raised}");
-    assert!(!raised["expires_at"].is_null(), "a fixed-length TTL produces a deadline");
+    assert!(
+        !raised["expires_at"].is_null(),
+        "a fixed-length TTL produces a deadline"
+    );
 }
 
 async fn events_for(pool: &sqlx::PgPool, request_id: &str) -> Vec<String> {

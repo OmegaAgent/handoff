@@ -26,6 +26,7 @@ ENVIRONMENT:
     HANDOFF_CAPABILITY_TRANSPORT_BASE Scheme and authority for resolved surfaces.
     HANDOFF_BOOTSTRAP                 A JSON file of credentials to seed.
     HANDOFF_SWEEP_INTERVAL_MS         How often deadlines are swept. Default 500.
+    HANDOFF_MAX_CONNECTIONS           Store pool size. Default 16 serving, 2 for a subcommand.
 ";
 
 #[tokio::main]
@@ -74,8 +75,14 @@ async fn run(args: &[String]) -> handoff_protocol::error::Result<bool> {
         return Ok(true);
     }
 
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
     let command = args.first().map(String::as_str).unwrap_or("serve");
+
+    // A subcommand runs a handful of queries and exits. Holding a serving pool open for that is
+    // how a few concurrent invocations exhaust the database's connection budget.
+    if command != "serve" {
+        config.max_connections = 2;
+    }
 
     match command {
         "serve" => {

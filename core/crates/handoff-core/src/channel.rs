@@ -107,36 +107,11 @@ pub fn starter_ladder() -> Routing {
             },
             RoutingRung {
                 after: IsoDuration::from_secs(15 * 60),
-                channels: vec!["chat".into()],
+                channels: vec!["slack".into()],
                 to: None,
             },
         ],
     }
-}
-
-/// The channels the reference server ships with.
-///
-/// None of them sends anything: this crate has no credentials, no sender reputation, and no
-/// carrier history, and pretending otherwise in the open core would misrepresent what a fresh
-/// deployment can actually do. What they carry is the **declaration** §7.2 requires, so the engine
-/// can route and grade honestly before any adapter is wired.
-pub fn starter_channels() -> Vec<ChannelDescriptor> {
-    let describe = |name: &str, max_grade, can_authenticate_person| ChannelDescriptor {
-        name: name.to_string(),
-        capabilities: ChannelCapabilities {
-            max_grade,
-            can_authenticate_person,
-        },
-    };
-    vec![
-        // The person opens the request surface and authenticates there, so this is the only
-        // starter channel that can carry an answer.
-        describe("inapp", DeliveryGrade::Acted, true),
-        describe("push", DeliveryGrade::Delivered, false),
-        describe("email", DeliveryGrade::Delivered, false),
-        describe("chat", DeliveryGrade::Delivered, false),
-        describe("voice", DeliveryGrade::Delivered, false),
-    ]
 }
 
 /// Which rungs are due at an elapsed time since the raise.
@@ -166,17 +141,36 @@ pub fn rung_targets<'a>(routing: &'a Routing, rung: &'a RoutingRung) -> Vec<Targ
 mod tests {
     use super::*;
 
+    /// A registry standing in for whatever adapters a build compiled in.
+    fn registry() -> ChannelRegistry {
+        ChannelRegistry::new(
+            vec![
+                ChannelDescriptor {
+                    name: "inapp".into(),
+                    capabilities: ChannelCapabilities::IN_APP,
+                },
+                ChannelDescriptor {
+                    name: "voice".into(),
+                    capabilities: ChannelCapabilities {
+                        max_grade: DeliveryGrade::Delivered,
+                        can_authenticate_person: false,
+                    },
+                },
+            ],
+            starter_ladder(),
+        )
+    }
+
     #[test]
     fn an_unregistered_channel_proves_the_least_not_the_most() {
-        let registry = ChannelRegistry::new(starter_channels(), starter_ladder());
-        let unknown = registry.capabilities("carrier-pigeon");
+        let unknown = registry().capabilities("carrier-pigeon");
         assert_eq!(unknown.max_grade, DeliveryGrade::Dispatched);
         assert!(!unknown.can_authenticate_person);
     }
 
     #[test]
     fn only_a_channel_that_authenticates_a_person_tops_out_at_acted() {
-        let registry = ChannelRegistry::new(starter_channels(), starter_ladder());
+        let registry = registry();
         assert_eq!(
             registry.capabilities("inapp").max_grade,
             DeliveryGrade::Acted
@@ -190,7 +184,7 @@ mod tests {
 
     #[test]
     fn a_declared_ladder_wins_and_an_empty_one_falls_back() {
-        let registry = ChannelRegistry::new(starter_channels(), starter_ladder());
+        let registry = registry();
         let declared = Routing {
             targets: vec![Target {
                 kind: TargetKind::Role,

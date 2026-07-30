@@ -109,11 +109,15 @@ async fn caller(state: &AppState, headers: &HeaderMap) -> Result<Principal> {
             "this operation requires an authenticated caller",
         ));
     };
-    state
-        .store
-        .authenticate(secret)
-        .await?
-        .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidApiKey, "the credential is not valid"))
+    // Where the credential is verified is a deployment's own business; what it resolves to is not.
+    // Both paths return the same `Principal`, so nothing downstream can tell which one ran — that
+    // sameness is the point, and it is what stops a hosted deployment acquiring an authorization
+    // path the open core does not have.
+    match &state.deployment.authenticator {
+        Some(authenticator) => authenticator.authenticate(secret).await,
+        None => state.store.authenticate(secret).await,
+    }?
+    .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidApiKey, "the credential is not valid"))
 }
 
 /// A caller who must be a person: answering, resolving a grant, submitting to a sink.
@@ -936,11 +940,11 @@ async fn redeem(
         .await?
     {
         if authorization.state_at(now) == AuthorizationState::Expired {
-            return Err(ApiError::Raw {
-                status: StatusCode::CONFLICT,
-                code: "authorization_expired",
-                message: "this authorization is past its expiry and can no longer be spent".into(),
-            });
+            return Err(ProtocolError::new(
+                ErrorCode::AuthorizationExpired,
+                "this authorization is past its expiry and can no longer be spent",
+            )
+            .into());
         }
     }
 
@@ -1207,12 +1211,19 @@ async fn get_delivery(
 ) -> ApiResult {
     let principal = caller(&state, &headers).await?;
     principal.require_scope("handoff:requests:read")?;
-    let _ = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
-    Err(ProtocolError::new(
-        ErrorCode::RequestNotFound,
-        "no such delivery in this tenant",
-    )
-    .into())
+    let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
+    // §7.3 gives a delivery an ordered list of attempts, and §15.5 requires every attempt to be
+    // inspectable by the tenant. A delivery you cannot inspect is one you cannot debug at 3 a.m.
+    match state.store.delivery(&principal.tenant_ref, id).await? {
+        Some(view) => Ok(Api::ok(wire::delivery(&view))),
+        // §13: `404 …_not_found` rather than `403` wherever existence is itself sensitive. A
+        // delivery in another tenant is indistinguishable from one that never existed.
+        None => Err(ProtocolError::new(
+            ErrorCode::RequestNotFound,
+            "no such delivery in this tenant",
+        )
+        .into()),
+    }
 }
 
 async fn redeliver(
@@ -1221,13 +1232,30 @@ async fn redeliver(
     Path(delivery_id): Path<String>,
 ) -> ApiResult {
     let principal = caller(&state, &headers).await?;
+    // Routing scope, not raise scope. §7.4: a key that can ask a question and a key that can page
+    // the on-call at 3 a.m. are different blast radiuses.
     principal.require_scope("handoff:requests:route")?;
     let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
+    let now = state.now();
+    // `signing.md` §1.5 requires manual redelivery to be available to the tenant. It re-arms the
+    // schedule and nothing else: a terminal delivery stays terminal, because re-delivering an
+    // `acted` one would ask a person again for a decision that is already on a receipt.
+    if !state
+        .store
+        .redeliver(&principal.tenant_ref, id, now)
+        .await?
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::RequestNotFound,
+            "no such delivery in this tenant, or it has already settled",
+        )
+        .into());
+    }
     Ok(Api(
         StatusCode::ACCEPTED,
         json!({
             "delivery_id": id.to_string(),
-            "queued_at": state.now().to_string(),
+            "queued_at": now.to_string(),
         }),
     ))
 }

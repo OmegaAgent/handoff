@@ -34,6 +34,7 @@ pub struct Deployment {
     pub bootstrap: std::path::PathBuf,
     port: u16,
     server: Option<Child>,
+    env: Vec<(String, String)>,
 }
 
 /// The machine credential for tenant A.
@@ -52,6 +53,14 @@ pub const ORG_B: &str = "org_01K3M7QW8ZC4YRXB2N6VD9FTHB";
 impl Deployment {
     /// Create a database, seed credentials, and start `handoffd`.
     pub async fn start(label: &str, port: u16) -> Deployment {
+        Self::start_with(label, port, &[]).await
+    }
+
+    /// The same, with extra environment for the server process.
+    ///
+    /// Callback signing is the case this exists for: `HANDOFF_CALLBACK_SECRETS` is deployment
+    /// configuration, and a test about rotation needs two of them, which no default can supply.
+    pub async fn start_with(label: &str, port: u16, env: &[(&str, &str)]) -> Deployment {
         let database = format!(
             "handoff_test_{label}_{}",
             std::time::SystemTime::now()
@@ -91,6 +100,10 @@ impl Deployment {
             bootstrap,
             port,
             server: None,
+            env: env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
         };
         deployment.spawn().await;
         deployment
@@ -100,10 +113,18 @@ impl Deployment {
     pub async fn spawn(&mut self) {
         let child = Command::new(env!("CARGO_BIN_EXE_handoffd"))
             .arg("serve")
+            .envs(
+                self.env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            )
             .env("HANDOFF_DATABASE_URL", &self.url)
             .env("HANDOFF_BOOTSTRAP", &self.bootstrap)
             .env("HANDOFF_BIND", format!("127.0.0.1:{}", self.port))
             .env("HANDOFF_SWEEP_INTERVAL_MS", "250")
+            // Several deployments run at once in this binary, and Postgres budgets connections
+            // globally. Four each is ample for a test and leaves room for everything else.
+            .env("HANDOFF_MAX_CONNECTIONS", "4")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

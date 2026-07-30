@@ -7,8 +7,6 @@
 use handoff_core::model::CallbackAttemptView;
 use handoff_core::ports::{CallbackJob, Store};
 use handoff_protocol::clock::{IsoDuration, Timestamp};
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::state::AppState;
@@ -143,31 +141,18 @@ async fn deliver(
         .await
 }
 
-/// The canonical string of `signing.md` §1.2, signed under every active secret.
+/// Sign a callback under every active secret.
 ///
-/// `delivery_id` is inside the signed string so that a valid signature cannot be lifted onto a
-/// different delivery of the same payload, and the **body hash** rather than the body is signed so
-/// a receiver can verify before buffering.
+/// Delegates to [`handoff_core::signing`] rather than repeating the scheme. Two implementations of
+/// one signature scheme is how a receiver ends up able to verify the server's callbacks but not a
+/// webhook adapter's, or the other way round — and the failure shows up at a receiver we do not
+/// own, as a rejected signature nobody can reproduce.
 ///
-/// While two secrets are active the header carries both as separate `v1=` elements (§1.4.2), so
-/// there is no window in which a valid callback fails verification during a rotation.
+/// While two secrets are active the header carries both as separate `v1=` elements
+/// (`signing.md` §1.4.2), so there is no window in which a valid callback fails verification during
+/// a rotation.
 pub fn sign(secrets: &[String], timestamp: i64, delivery_id: &str, body: &[u8]) -> String {
-    let canonical = format!(
-        "1\n{timestamp}\n{delivery_id}\n{}",
-        hex(&Sha256::digest(body))
-    );
-    let mut header = format!("t={timestamp}");
-    for secret in secrets {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
-            .expect("HMAC accepts a key of any length");
-        mac.update(canonical.as_bytes());
-        header.push_str(&format!(",v1={}", hex(&mac.finalize().into_bytes())));
-    }
-    header
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    handoff_core::signing::sign(secrets, timestamp, delivery_id, body)
 }
 
 #[cfg(test)]

@@ -54,6 +54,21 @@ pub const CHANNEL_MESSAGE_RECEIVED: &str = "channel.message_received";
 /// (§9.7).
 pub const RUNTIME_OBSERVATION: &str = "runtime.observation";
 
+/// One delivery moved (§7.1).
+///
+/// One event for every delivery transition rather than one per state, for the same reason
+/// [`DeliveryEvent::AdvanceGrade`](handoff_protocol::delivery::DeliveryEvent::AdvanceGrade) covers
+/// all four grades: the rule being recorded is a property of the machine, and writing it once is
+/// what stops a per-state branch appearing. The payload names the states, the grade, and — when it
+/// was withheld — the reason.
+pub const DELIVERY_TRANSITIONED: &str = "delivery.transitioned";
+
+/// A callback endpoint spent its retry budget and was disabled (§15.5).
+///
+/// The notification the specification requires. The signal itself stays unacked and readable, so
+/// disabling the push loses nothing: a runtime that comes back and polls still finds its outcome.
+pub const CALLBACK_ENDPOINT_DISABLED: &str = "callback.endpoint_disabled";
+
 /// Every event name this implementation emits, so a reader can check the set against §6.2.
 pub const ALL: &[&str] = &[
     REQUEST_RAISED,
@@ -73,6 +88,8 @@ pub const ALL: &[&str] = &[
     GRANT_REVOKED,
     CHANNEL_MESSAGE_RECEIVED,
     RUNTIME_OBSERVATION,
+    DELIVERY_TRANSITIONED,
+    CALLBACK_ENDPOINT_DISABLED,
 ];
 
 #[cfg(test)]

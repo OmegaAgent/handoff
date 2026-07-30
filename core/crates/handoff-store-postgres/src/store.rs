@@ -80,15 +80,22 @@ pub const CRASH_AFTER_ANSWER_STATE_WRITE: &str = "answer_after_state_write";
 
 impl PgStore {
     /// Connect, run the migrations, and return a ready store.
-    pub async fn connect(
+    ///
+    /// `max_connections` is explicit rather than fixed because the same store backs two very
+    /// different processes: a server that holds long polls and wants a real pool, and a one-shot
+    /// subcommand that runs a single query and exits. A `handoffd verify-chain` that reserves
+    /// sixteen backends is how a handful of concurrent invocations exhaust a database's connection
+    /// budget and produce failures that look like anything except what they are.
+    pub async fn connect_with(
         database_url: &str,
+        max_connections: u32,
         profile: DeploymentProfile,
         policy: AuthPolicy,
         channels: ChannelRegistry,
         capabilities: CapabilityRegistry,
     ) -> Result<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(16)
+            .max_connections(max_connections.max(1))
             .connect(database_url)
             .await
             .map_err(db)?;
@@ -162,7 +169,7 @@ impl PgStore {
     ///
     /// The `set_config` is what makes row-level security bite: from here on the connection can only
     /// see this tenant's rows, whatever the statements forget to say.
-    async fn tenant_tx(&self, tenant: &str) -> Result<Transaction<'_, Postgres>> {
+    pub(crate) async fn tenant_tx(&self, tenant: &str) -> Result<Transaction<'_, Postgres>> {
         let mut tx = self.pool.begin().await.map_err(db)?;
         sqlx::query("select set_config('handoff.tenant_ref', $1, true)")
             .bind(tenant)
@@ -194,11 +201,11 @@ fn db(e: sqlx::Error) -> ProtocolError {
     )
 }
 
-fn to_chrono(ts: Timestamp) -> DateTime<Utc> {
+pub(crate) fn to_chrono(ts: Timestamp) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ts.to_millis()).unwrap_or_else(Utc::now)
 }
 
-fn from_chrono(dt: DateTime<Utc>) -> Timestamp {
+pub(crate) fn from_chrono(dt: DateTime<Utc>) -> Timestamp {
     Timestamp::from_millis(dt.timestamp_millis())
         .unwrap_or_else(|| Timestamp::from_millis(0).expect("epoch is representable"))
 }
@@ -268,7 +275,7 @@ fn parse_state(text: &str) -> RequestState {
     }
 }
 
-fn grade_name(grade: DeliveryGrade) -> &'static str {
+pub(crate) fn grade_name(grade: DeliveryGrade) -> &'static str {
     match grade {
         DeliveryGrade::Dispatched => "dispatched",
         DeliveryGrade::Delivered => "delivered",
@@ -277,7 +284,7 @@ fn grade_name(grade: DeliveryGrade) -> &'static str {
     }
 }
 
-fn parse_grade(text: &str) -> DeliveryGrade {
+pub(crate) fn parse_grade(text: &str) -> DeliveryGrade {
     match text {
         "delivered" => DeliveryGrade::Delivered,
         "seen" => DeliveryGrade::Seen,
@@ -286,14 +293,14 @@ fn parse_grade(text: &str) -> DeliveryGrade {
     }
 }
 
-fn delivery_state_name(state: DeliveryState) -> String {
+pub(crate) fn delivery_state_name(state: DeliveryState) -> String {
     serde_json::to_value(state)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "queued".into())
 }
 
-fn parse_delivery_state(text: &str) -> DeliveryState {
+pub(crate) fn parse_delivery_state(text: &str) -> DeliveryState {
     serde_json::from_value(Value::String(text.to_string())).unwrap_or(DeliveryState::Queued)
 }
 
@@ -308,6 +315,11 @@ fn parse_enum<T: serde::de::DeserializeOwned>(text: &str, fallback: T) -> T {
     serde_json::from_value(Value::String(text.to_string())).unwrap_or(fallback)
 }
 
+/// How many times one signal is pushed before its endpoint is disabled.
+///
+/// `signing.md` §1.5 RECOMMENDS 12, "spanning roughly 24 hours" against the `2^n` backoff below.
+pub const MAX_CALLBACK_ATTEMPTS: u32 = 12;
+
 /// Exponential backoff with jitter, `2^n` seconds capped at 300 (§7.3, `signing.md` §1.5).
 ///
 /// Flat retries synchronize: every worker wakes at the same instant and hits an endpoint that is
@@ -320,7 +332,7 @@ pub fn backoff_seconds(attempt: u32) -> i64 {
 
 // -------------------------------------------------------------------------------- row mapping
 
-fn row_to_delivery(row: &PgRow) -> Result<DeliveryView> {
+pub(crate) fn row_to_delivery(row: &PgRow) -> Result<DeliveryView> {
     Ok(DeliveryView {
         id: DeliveryId::parse(row.get::<String, _>("id").as_str())?,
         request_id: RequestId::parse(row.get::<String, _>("request_id").as_str())?,
@@ -342,7 +354,7 @@ fn row_to_delivery(row: &PgRow) -> Result<DeliveryView> {
     })
 }
 
-fn parse_target_kind(text: &str) -> TargetKind {
+pub(crate) fn parse_target_kind(text: &str) -> TargetKind {
     match text {
         "principal" => TargetKind::Principal,
         "role" => TargetKind::Role,
@@ -352,7 +364,7 @@ fn parse_target_kind(text: &str) -> TargetKind {
     }
 }
 
-fn target_kind_name(kind: TargetKind) -> &'static str {
+pub(crate) fn target_kind_name(kind: TargetKind) -> &'static str {
     match kind {
         TargetKind::Principal => "principal",
         TargetKind::Role => "role",
@@ -657,7 +669,7 @@ impl PgStore {
     }
 
     /// Write an event. Only ever called from inside the transaction that wrote the state (I12).
-    async fn emit(
+    pub(crate) async fn emit(
         tx: &mut Transaction<'_, Postgres>,
         tenant: &str,
         request_id: Option<&str>,
@@ -875,8 +887,9 @@ impl PgStore {
                 sqlx::query(
                     "insert into handoff_deliveries \
                      (id, tenant_ref, request_id, channel, target_kind, target_value, rung, state, \
-                      grade_reached, max_grade, can_authenticate_person, created_at, updated_at) \
-                     values ($1,$2,$3,$4,$5,$6,$7,'queued',null,$8,$9,$10,$10)",
+                      grade_reached, max_grade, can_authenticate_person, created_at, updated_at, \
+                      next_attempt_at) \
+                     values ($1,$2,$3,$4,$5,$6,$7,'queued',null,$8,$9,$10,$10,$10)",
                 )
                 .bind(id.to_string())
                 .bind(tenant)
@@ -1841,7 +1854,12 @@ impl Store for PgStore {
                     .bind(request.id.to_string())
                     .bind(enum_name(&command.disposition))
                     .bind(&answerer)
-                    .bind(command.delegate_to.as_ref().map(|t| target_kind_name(t.kind)))
+                    .bind(
+                        command
+                            .delegate_to
+                            .as_ref()
+                            .map(|t| target_kind_name(t.kind)),
+                    )
                     .bind(command.delegate_to.as_ref().map(|t| t.value.clone()))
                     .bind(command.note.as_deref())
                     .bind(to_chrono(now))
@@ -2774,9 +2792,12 @@ impl Store for PgStore {
         Box::pin(async move {
             let mut tx = self.pool.begin().await.map_err(db)?;
             let row = sqlx::query(
-                "update handoff_signals set callback_lease_until = $1, attempts = attempts + 1 \
+                "update handoff_signals \
+                 set callback_lease_until = $1, attempts = attempts + 1, \
+                     callback_delivery_id = coalesce(callback_delivery_id, $3) \
                  where id = (select id from handoff_signals \
                              where acked_at is null and callback_url is not null \
+                               and callback_disabled_at is null \
                                and next_callback_at is not null and next_callback_at <= $2 \
                                and (callback_lease_until is null or callback_lease_until <= $2) \
                              order by next_callback_at limit 1 for update skip locked) \
@@ -2784,6 +2805,7 @@ impl Store for PgStore {
             )
             .bind(to_chrono(now.saturating_add(IsoDuration::from_secs(30))))
             .bind(to_chrono(now))
+            .bind(ids::mint::<handoff_protocol::id::Delivery>(now.to_millis() as u64)?.to_string())
             .fetch_optional(&mut *tx)
             .await
             .map_err(db)?;
@@ -2799,9 +2821,17 @@ impl Store for PgStore {
             let attempt = row.get::<i32, _>("attempts") as u32;
             tx.commit().await.map_err(db)?;
 
-            // A fresh delivery identity per attempt, so a signature cannot be lifted from one
-            // delivery onto another (`signing.md` §1.2).
-            let delivery_id = ids::mint::<handoff_protocol::id::Delivery>(now.to_millis() as u64)?;
+            // One delivery identity for this push, minted on the first claim and reused by every
+            // retry of it. `signing.md` §1.2 puts the id inside the signed string so a signature
+            // cannot be lifted onto a *different* delivery — and §1.3 rule 7 has the receiver
+            // dedupe on that same id, which only works if a retry carries the id it is retrying.
+            // Minting a new one per attempt satisfies the first rule and quietly breaks the
+            // second, leaving a conforming receiver applying one decision once per retry.
+            let delivery_id = DeliveryId::parse(
+                row.get::<Option<String>, _>("callback_delivery_id")
+                    .unwrap_or_default()
+                    .as_str(),
+            )?;
             Ok(Some(CallbackJob {
                 signal_id: signal.id,
                 tenant_ref: tenant,
@@ -2842,18 +2872,49 @@ impl Store for PgStore {
             .await
             .map_err(db)?;
 
-            // §15.4 and §8.3. A `2xx` marks the callback dispatched; the signal stays outstanding
-            // and redelivery continues until an explicit ack arrives.
+            // §15.5: the retry budget is bounded, and an endpoint that has spent it is disabled
+            // rather than retried forever. Silent permanent retry is how queues die — so this
+            // stops, records why, and leaves the signal unacked and readable, because the runtime
+            // may still come and collect it by polling.
+            let exhausted = attempt.n >= MAX_CALLBACK_ATTEMPTS;
             sqlx::query(
-                "update handoff_signals set callback_lease_until = null, next_callback_at = $3 \
+                "update handoff_signals \
+                 set callback_lease_until = null, next_callback_at = $3, \
+                     callback_disabled_at = case when $4 then $5 else callback_disabled_at end \
                  where tenant_ref = $1 and id = $2 and acked_at is null",
             )
             .bind(&job.tenant_ref)
             .bind(job.signal_id.to_string())
-            .bind(opt_chrono(next_attempt_at))
+            // §15.4 and §8.3. A `2xx` marks the callback dispatched; the signal stays outstanding
+            // and redelivery continues until an explicit ack arrives.
+            .bind(opt_chrono(
+                (!exhausted).then_some(next_attempt_at).flatten(),
+            ))
+            .bind(exhausted)
+            .bind(to_chrono(attempt.started_at))
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+
+            if exhausted {
+                // "The tenant notified" (§15.5). This deployment has one channel for telling a
+                // tenant something happened, and it is the event record — so the notification is
+                // an event rather than a silence somebody has to go looking for.
+                Self::emit(
+                    &mut tx,
+                    &job.tenant_ref,
+                    None,
+                    events::CALLBACK_ENDPOINT_DISABLED,
+                    json!({
+                        "signal_id": job.signal_id.to_string(),
+                        "attempts": attempt.n,
+                        "last_status": attempt.status_code,
+                        "still_readable": true,
+                    }),
+                    attempt.started_at,
+                )
+                .await?;
+            }
             tx.commit().await.map_err(db)?;
             Ok(())
         })
