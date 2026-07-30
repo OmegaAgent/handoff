@@ -230,16 +230,37 @@ impl PgStore {
         // The grade is only ever what the channel actually reported, clamped to what it declared
         // it can prove. §7.2: a Server MUST NOT synthesize an intermediate grade it did not
         // observe, and MUST NOT record one above the channel's ceiling.
-        let event = match report.state {
-            DeliveryState::Suppressed => DeliveryEvent::Suppress,
-            DeliveryState::Bounced => DeliveryEvent::Bounce,
-            DeliveryState::Retrying if job.attempt >= MAX_DELIVERY_ATTEMPTS => {
+        let event = match (report.state, report.grade) {
+            (DeliveryState::Suppressed, _) => DeliveryEvent::Suppress,
+            (DeliveryState::Bounced, _) => DeliveryEvent::Bounce,
+            (DeliveryState::Retrying, _) if job.attempt >= MAX_DELIVERY_ATTEMPTS => {
                 DeliveryEvent::Exhausted
             }
-            DeliveryState::Retrying => DeliveryEvent::ScheduleRetry,
-            DeliveryState::Failed => DeliveryEvent::Exhausted,
-            _ => DeliveryEvent::AdvanceGrade(report.grade.min(job.capabilities.max_grade)),
+            (DeliveryState::Retrying, _) => DeliveryEvent::ScheduleRetry,
+            (DeliveryState::Failed, _) => DeliveryEvent::Exhausted,
+            (_, Some(grade)) => DeliveryEvent::AdvanceGrade(grade.min(job.capabilities.max_grade)),
+            // A progress state with no grade is an adapter contract violation, and the honest
+            // response is to record no evidence rather than the least evidence. Defaulting to
+            // `dispatched` would be synthesizing a grade nothing observed — the very thing §7.2
+            // forbids, and the same defect as recording a channel's ceiling as what it reached.
+            // `dispatched` is a real claim ("our transport accepted it"); spending it on an
+            // adapter that failed to say so puts a send in the record that may never have happened.
+            // So it lands as a retryable failure: visible in the attempt log, attributable to the
+            // adapter, and not evidence of anything.
+            (_, None) => DeliveryEvent::ScheduleRetry,
         };
+
+        // The attempt log says what actually happened, not what the report claimed. An adapter
+        // that reported progress without a grade did not dispatch anything, and a log line saying
+        // it did is how a contract violation becomes invisible.
+        let ungraded_progress = report.grade.is_none()
+            && !matches!(
+                report.state,
+                DeliveryState::Suppressed
+                    | DeliveryState::Bounced
+                    | DeliveryState::Retrying
+                    | DeliveryState::Failed
+            );
 
         self.settle_delivery(
             &job.tenant_ref,
@@ -248,9 +269,21 @@ impl PgStore {
             suppression,
             Some(Attempt {
                 n: job.attempt,
-                outcome: report.state,
-                transport_status: report.detail.clone(),
-                retryable: report.retryable,
+                outcome: if ungraded_progress {
+                    DeliveryState::Retrying
+                } else {
+                    report.state
+                },
+                transport_status: if ungraded_progress {
+                    Some(format!(
+                        "the {} adapter reported `{:?}` with no grade, which proves nothing; \
+                         recorded as a failed attempt rather than as a dispatch",
+                        job.channel, report.state
+                    ))
+                } else {
+                    report.detail.clone()
+                },
+                retryable: report.retryable || ungraded_progress,
             }),
             now,
         )

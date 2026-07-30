@@ -11,6 +11,9 @@ mod harness;
 #[path = "suite/callbacks.rs"]
 mod callbacks;
 
+#[path = "suite/deliveries.rs"]
+mod deliveries;
+
 #[path = "suite/durability.rs"]
 mod durability;
 

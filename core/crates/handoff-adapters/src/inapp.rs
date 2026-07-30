@@ -73,7 +73,7 @@ mod tests {
         let report = InApp::new().deliver(envelope).await.expect("it dispatches");
 
         assert_eq!(report.state, DeliveryState::Dispatched);
-        assert_eq!(report.grade, DeliveryGrade::Dispatched);
+        assert_eq!(report.grade, Some(DeliveryGrade::Dispatched));
         assert!(report
             .detail
             .expect("it says where")

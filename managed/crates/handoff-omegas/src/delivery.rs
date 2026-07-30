@@ -22,10 +22,13 @@
 //! # What a credential-less adapter does
 //!
 //! Nothing is faked. A transport with no credential reports the delivery **suppressed** with the
-//! stable code [`handoff_core::outbound::Suppression::NoAdapter`]'s sibling reasoning: the attempt
-//! is recorded, visible, and countable, and no request is failed. §7.3 is explicit that a channel
-//! outage must not end up inside the caller's agent.
+//! stable code [`Suppression::NotConfigured`], so the attempt is recorded, visible, and countable,
+//! and no request is failed. It is deliberately not an `Err` and not a failed report: a missing
+//! credential cannot be fixed by retrying, so spending the attempt budget on it would bury the real
+//! reason under an exhausted ladder. §7.3 is explicit that a channel outage must not end up inside
+//! the caller's agent.
 
+use handoff_core::outbound::Suppression;
 use handoff_core::ports::BoxFuture;
 use handoff_core::seam::{DeliveryChannel, DeliveryReport, Envelope};
 use handoff_protocol::delivery::{ChannelCapabilities, DeliveryGrade};
@@ -117,17 +120,22 @@ impl DeliveryChannel for ManagedChannel {
     fn deliver(&self, envelope: Envelope) -> BoxFuture<'_, Result<DeliveryReport>> {
         Box::pin(async move {
             if !self.transport.credentialed() {
-                // Recorded, visible, countable — and the request survives.
-                return Ok(DeliveryReport::suppressed(format!(
-                    "no_credential: the managed {} channel has no credential in this deployment",
-                    self.name
-                )));
+                // A stable code rather than a sentence, so an operator can alert on it. And a
+                // suppression rather than an `Err` or a failed report: a missing credential cannot
+                // be fixed by trying again, so burning the attempt budget on a retry that can never
+                // succeed would hide the real reason behind an exhausted ladder.
+                return Ok(Suppression::NotConfigured {
+                    needs: format!("a credential for the managed {} channel", self.name),
+                }
+                .report());
             }
             let report = self.transport.send(&envelope).await?;
             // Clamp rather than trust. A grade is evidence, and evidence that grades itself is not
-            // evidence.
+            // evidence. An attempt that proved nothing stays `None`.
             Ok(DeliveryReport {
-                grade: report.grade.min(self.capabilities.max_grade),
+                grade: report
+                    .grade
+                    .map(|reached| reached.min(self.capabilities.max_grade)),
                 ..report
             })
         })
@@ -195,7 +203,7 @@ mod tests {
             let grade = self.claims;
             Box::pin(async move {
                 Ok(DeliveryReport {
-                    grade,
+                    grade: Some(grade),
                     ..DeliveryReport::dispatched()
                 })
             })
@@ -264,7 +272,7 @@ mod tests {
             .deliver(fixtures::envelope("email"))
             .await
             .expect("deliver");
-        assert_eq!(report.grade, DeliveryGrade::Delivered);
+        assert_eq!(report.grade, Some(DeliveryGrade::Delivered));
     }
 
     #[tokio::test]
@@ -284,6 +292,10 @@ mod tests {
             report.state,
             handoff_protocol::delivery::DeliveryState::Suppressed
         );
-        assert!(report.detail.expect("detail").contains("no_credential"));
+        // The stable code, not the sentence: an operator alerts on `not_configured`, and the
+        // sentence after it says which credential is missing.
+        let detail = report.detail.expect("detail");
+        assert_eq!(Suppression::code_of(&detail), "channel_not_configured");
+        assert!(detail.contains("managed email channel"));
     }
 }

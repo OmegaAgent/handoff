@@ -107,7 +107,7 @@ mod tests {
             .await
             .expect("it answers");
 
-        assert_eq!(report.grade, DeliveryGrade::Dispatched);
+        assert_eq!(report.grade, Some(DeliveryGrade::Dispatched));
         let sent = channel.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].prompt.title, "Approve the release?");

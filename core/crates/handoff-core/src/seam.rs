@@ -177,8 +177,13 @@ pub struct Envelope {
     pub tenant: String,
     /// The request being delivered.
     pub request_id: RequestId,
-    /// This attempt's identity. New per attempt, so nothing from one attempt can be replayed onto
-    /// another.
+    /// The delivery being attempted.
+    ///
+    /// **Stable across this delivery's attempts**, not new per attempt. §7.3 gives one delivery an
+    /// ordered list of attempts, and the attempt number is what distinguishes them. A per-attempt
+    /// identifier would also defeat the receiver's dedupe: `Handoff-Idempotency-Key` carries this
+    /// value, so a retry that changed it would look like a new delivery to every receiver
+    /// (`signing.md` §1.3 rule 7).
     pub delivery_id: DeliveryId,
     /// Which channel is being asked to carry it.
     pub channel: String,
@@ -195,10 +200,19 @@ pub struct Envelope {
 /// What one delivery attempt achieved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryReport {
-    /// The strongest thing this attempt proved. An adapter MUST NOT report a grade above what its
-    /// [`ChannelCapabilities::max_grade`] declares; the engine clamps it regardless, because a
-    /// grade is evidence and evidence that grades itself is not evidence.
-    pub grade: DeliveryGrade,
+    /// The strongest thing this attempt proved, or `None` when it proved nothing.
+    ///
+    /// `None` is not a degenerate case, it is the common one: a suppressed delivery was never sent
+    /// and a failed one did not arrive, so neither has evidence to offer. The weakest *grade*,
+    /// `dispatched`, already means "our transport accepted it" — a real claim — so spending it on
+    /// an attempt that never reached a transport would record evidence that does not exist. There
+    /// is no grade for "nothing happened", and there should not be one; absence is the honest
+    /// representation.
+    ///
+    /// An adapter MUST NOT report a grade above what its [`ChannelCapabilities::max_grade`]
+    /// declares; the engine clamps it regardless, because a grade is evidence and evidence that
+    /// grades itself is not evidence.
+    pub grade: Option<DeliveryGrade>,
     /// The state the delivery now occupies.
     pub state: DeliveryState,
     /// Operator-facing detail. Never shown to a responder and never part of a receipt.
@@ -211,7 +225,7 @@ impl DeliveryReport {
     /// The transport accepted it, and that is all we know.
     pub fn dispatched() -> Self {
         Self {
-            grade: DeliveryGrade::Dispatched,
+            grade: Some(DeliveryGrade::Dispatched),
             state: DeliveryState::Dispatched,
             detail: None,
             retryable: false,
@@ -221,7 +235,9 @@ impl DeliveryReport {
     /// It could not be sent, and whether another attempt is worth making.
     pub fn failed(detail: impl Into<String>, retryable: bool) -> Self {
         Self {
-            grade: DeliveryGrade::Dispatched,
+            // Nothing was proved. A failed attempt that recorded `dispatched` would claim a
+            // transport accepted something it never received.
+            grade: None,
             state: if retryable {
                 DeliveryState::Retrying
             } else {
@@ -235,7 +251,8 @@ impl DeliveryReport {
     /// Policy withheld it. A real outcome and a visible one (§7.1).
     pub fn suppressed(detail: impl Into<String>) -> Self {
         Self {
-            grade: DeliveryGrade::Dispatched,
+            // Withheld before any transport saw it, so there is nothing to grade.
+            grade: None,
             state: DeliveryState::Suppressed,
             detail: Some(detail.into()),
             retryable: false,
@@ -557,6 +574,21 @@ mod tests {
             GrantHandle::parse("hg_01K3M7QW8ZC4YRXB2N6VD9FTHE").unwrap()
         ))
         .unwrap());
+    }
+
+    #[test]
+    fn an_attempt_that_proved_nothing_carries_no_grade() {
+        // The defect this guards against is a quiet one: `dispatched` is the weakest grade, so
+        // using it as a filler for "nothing happened" reads as harmless — but `dispatched` means
+        // "our transport accepted it", which a suppressed or failed attempt never established.
+        // The delivery would then carry evidence of a send that did not occur.
+        assert_eq!(DeliveryReport::failed("no such mailbox", false).grade, None);
+        assert_eq!(DeliveryReport::failed("connection reset", true).grade, None);
+        assert_eq!(DeliveryReport::suppressed("quiet hours").grade, None);
+        assert_eq!(
+            DeliveryReport::dispatched().grade,
+            Some(DeliveryGrade::Dispatched)
+        );
     }
 
     #[test]

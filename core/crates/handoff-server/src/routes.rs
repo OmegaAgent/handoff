@@ -76,6 +76,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sinks/{sink_ref}/values", post(submit_sink_values))
         .route("/v1/deliveries/{delivery_id}", get(get_delivery))
         .route("/v1/deliveries/{delivery_id}/redeliver", post(redeliver))
+        .route("/v1/deliveries/{delivery_id}/grade", post(record_grade))
         .route("/v1/meta", get(meta))
         .with_state(state)
 }
@@ -1258,6 +1259,82 @@ async fn redeliver(
             "queued_at": now.to_string(),
         }),
     ))
+}
+
+async fn record_grade(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(delivery_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:route")?;
+    let body = body_json(&body)?;
+    let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
+
+    // Evidence a channel reports **after** the send returned: a provider's delivery receipt, or
+    // the person opening the surface. A synchronous send can only ever say what the transport said
+    // at the moment it was handed the message, so without this every asynchronous channel would
+    // stay at `dispatched` forever and the grade ladder of §7.2 would be decorative.
+    let grade = match body.get("grade").and_then(|value| value.as_str()) {
+        Some("delivered") => handoff_protocol::delivery::DeliveryGrade::Delivered,
+        Some("seen") => handoff_protocol::delivery::DeliveryGrade::Seen,
+        // Neither of the other two is a channel's to report. `dispatched` is the send's own claim
+        // and is already recorded by the attempt that made it. `acted` means the person answered
+        // **through this delivery** (§7.2) — established by the answer landing and by nothing
+        // else, so accepting it here would let a caller put "they decided" on a delivery with no
+        // decision behind it.
+        Some(other @ ("dispatched" | "acted")) => {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "`{other}` is not a grade a channel reports: `dispatched` is recorded by the \
+                     attempt that dispatched, and `acted` is established by the answer"
+                ),
+            )
+            .into())
+        }
+        _ => {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "`grade` must be `delivered` or `seen`",
+            )
+            .into())
+        }
+    };
+
+    // Tenant from the credential, never from the body (I13). The grade is clamped to what the
+    // channel declared it can prove and may only advance, both inside the store's transaction —
+    // so a provider claiming more than its channel declared is refused rather than believed.
+    let state_now = state.now();
+    if state
+        .store
+        .delivery(&principal.tenant_ref, id)
+        .await?
+        .is_none()
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::RequestNotFound,
+            "no such delivery in this tenant",
+        )
+        .into());
+    }
+    state
+        .store
+        .advance_delivery_grade(&principal.tenant_ref, id, grade, state_now)
+        .await?;
+
+    let view = state
+        .store
+        .delivery(&principal.tenant_ref, id)
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::RequestNotFound,
+                "no such delivery in this tenant",
+            )
+        })?;
+    Ok(Api::ok(wire::delivery(&view)))
 }
 
 // ----------------------------------------------------------------------------------------- meta
