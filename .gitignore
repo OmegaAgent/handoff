@@ -43,3 +43,7 @@ examples/night-hack/demo/artifacts/
 .DS_Store
 .idea/
 *.swp
+
+# Conformance run scratch: logs, binaries and databases from core/dev/run-conformance.sh.
+# Never committed — a run is per-machine and per-invocation.
+core/dev/.run/
