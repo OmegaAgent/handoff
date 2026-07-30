@@ -1,10 +1,45 @@
+# Credentials and local-only notes. See SECURITY.md — in this protocol a leaked identifier is
+# not a housekeeping problem, so this list is a safety net rather than the policy.
 .env
 .env.*
+!.env.example
+*.local.md
+*.pem
+*.key
+*_accessKeys.csv
+credentials.json
+secrets.yaml
+secrets.yml
+
+# The hackathon build's gitignored design docs. DEMO-LIVE.local.md carried a live-view token that
+# granted drive access to a browser; it must never enter this repository or its history.
+DEMO-LIVE.local.md
+EXECPLAN.md
+CONTRACT.md
+
+# Rust
+core/target/
+**/*.rs.bk
+
+# Python
 __pycache__/
 *.pyc
 .venv/
+venv/
 *.egg-info/
-demo/artifacts/
-EXECPLAN.md
-CONTRACT.md
-DEMO-LIVE.local.md
+dist/
+build/
+.ruff_cache/
+.pytest_cache/
+
+# Node
+node_modules/
+*.tsbuildinfo
+
+# Demo output
+examples/night-hack/demo/artifacts/
+
+# Editors and OS
+.DS_Store
+.idea/
+*.swp

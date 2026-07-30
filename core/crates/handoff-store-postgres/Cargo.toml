@@ -1,0 +1,17 @@
+[package]
+name = "handoff-store-postgres"
+description = "Reference Postgres store for Handoff: requests, delivery attempts, durable waits, and receipts, with its own migration set."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+handoff-core.workspace = true
+handoff-protocol.workspace = true

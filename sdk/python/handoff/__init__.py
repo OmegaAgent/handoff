@@ -1,17 +1,20 @@
 """`await human()` for AI agents — the client half of Handoff.
 
-    import human
-    human.configure(base_url="https://handoff.omegas.dev")
+    import handoff
+    handoff.configure(base_url="https://handoff.omegas.dev")
 
     # Blocks until a person clears the wall in a live view of your agent's browser.
-    human.clear_wall(reason="A verification checkbox is blocking checkout",
-                     live_view_url=..., resume_url=...)
+    handoff.clear_wall(reason="A verification checkbox is blocking checkout",
+                       live_view_url=..., resume_url=...)
 
     # Blocks until a person types an answer.
-    address = human.ask("Which shipping address should I use?")
+    address = handoff.ask("Which shipping address should I use?")
 
-One file, standard library plus `requests` if present (falls back to urllib). Copy it into
-your project or `pip install -e .`.
+One file, standard library only. Copy it into your project or `pip install handoff-human`.
+
+The distribution is named `handoff-human` and the module is `handoff`. In 0.1.x the module was
+named `human`; that name still imports and forwards here, with a DeprecationWarning, and will be
+removed in 0.3.0.
 """
 
 from __future__ import annotations
@@ -32,7 +35,10 @@ __all__ = [
     "Handoff",
     "HandoffTimeout",
     "HandoffError",
+    "__version__",
 ]
+
+__version__ = "0.2.0"
 
 DEFAULT_BASE_URL = "https://handoff.omegas.dev"
 _POLL_WAIT_S = 25  # server caps a single long-poll at 30s
@@ -163,10 +169,10 @@ def clear_wall(
         page=page,
     )
     if verbose:
-        print(f"[human] blocked: {reason}\n[human] a human is being paged: {h.page_url}", flush=True)
+        print(f"[handoff] blocked: {reason}\n[handoff] a human is being paged: {h.page_url}", flush=True)
     h.wait(timeout_s=timeout_s)
     if verbose:
-        print("[human] cleared by a human, resuming", flush=True)
+        print("[handoff] cleared by a human, resuming", flush=True)
     return True
 
 
@@ -193,16 +199,16 @@ def ask(
         page=page,
     )
     if verbose:
-        print(f"[human] asking a person: {question}\n[human] {h.page_url}", flush=True)
+        print(f"[handoff] asking a person: {question}\n[handoff] {h.page_url}", flush=True)
     try:
         state = h.wait(timeout_s=timeout_s)
     except HandoffTimeout:
         if default is not None:
             if verbose:
-                print(f"[human] nobody answered, using default: {default}", flush=True)
+                print(f"[handoff] nobody answered, using default: {default}", flush=True)
             return default
         raise
     answer = state.get("answer") or ""
     if verbose:
-        print(f"[human] answered: {answer}", flush=True)
+        print(f"[handoff] answered: {answer}", flush=True)
     return answer

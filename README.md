@@ -1,268 +1,197 @@
-<h1 align="center">Handoff</h1>
+# Handoff
 
-<p align="center">
-  <strong>The communication layer between AI agents and the humans they depend on.</strong><br>
-  An agent that cannot finish alone calls <code>await human(...)</code>, and a person is reached on the<br>
-  channel that fits the moment. It blocks until they answer, then the run carries on.
-</p>
+**An open protocol for the moment a program needs a person.**
 
-<p align="center">
-  <a href="https://handoff.omegas.dev/try"><strong>Try it</strong></a> &nbsp;·&nbsp;
-  <a href="https://handoff.omegas.dev">Live</a> &nbsp;·&nbsp;
-  <a href="https://github.com/OmegaAgent/handoff">Source</a> &nbsp;·&nbsp;
-  <a href="LICENSE">MIT</a> &nbsp;·&nbsp;
-  Python 3.12
-</p>
+Agents run continuously. The people who can unblock them do not, and those people are still the ones
+accountable for the decision. Handoff specifies what happens in between: how a request for a human
+decision is stated, how it reaches someone, how their answer comes back, and what record survives
+afterwards.
 
----
+The claim the whole design is built to support is deliberately narrow:
 
-## Why it exists
+> **One human answer, delivered to your agent exactly once, as typed data, authorizing exactly one
+> effect.**
 
-Agents run around the clock. The people who can unblock them do not, and those people are still the
-accountability layer. Handoff is where that mismatch gets resolved: one call an agent makes when it
-needs a person, so it never hardcodes a channel and never owns the long-lived waiting.
+Every clause of that is load-bearing:
 
-- **Multi-channel by design.** A phone call, an SMS, a Slack message, an email, a calendar invite.
-  Channels declare what they can do (carry rich actions, capture free text, interrupt someone,
-  survive being ignored) and the framework routes on what the request requires. Adding a provider
-  must never add a branch in the core.
-- **Person-centric.** A request belongs to a person's attention queue rather than to a single run,
-  so one contact can settle several blocked runs across sessions. That is the difference between a
-  notification system and a colleague.
-- **The agent decides how and when.** How urgent this is, whether the person is awake, whether to
-  interrupt or batch, whether to text first and ask "call now or tomorrow?". Reasoned about, not
-  configured.
+- **One human answer.** A specific person acted, and the record says who. Clearance is *asserted* by
+  a human, never *inferred* from a side effect. That distinction is the reason this project exists;
+  the section on prior art below explains where it came from.
+- **Exactly once.** An answer is consumed when it is used. A stored yes cannot be spent a second
+  time by a retry, a replay, or a duplicate delivery.
+- **As typed data.** The answer is a value against a declared schema, not free text that a prompt has
+  to interpret. A field a renderer cannot draw is a field a human cannot answer, so unknown field
+  types are rejected rather than degraded into a text box.
+- **Authorizing exactly one effect.** The answer is bound to the specific thing it was shown
+  against. It does not generalize to the next call, the next run, or a similar-looking request.
 
-**Built and verified today:** the blocking primitive, the hosted API, the handoff page, voice paging,
-and live browser takeover, which is the highest-bandwidth channel there is. The person does not reply
-to a message; they take the wheel inside the agent's own session and hand it back.
+### What Handoff does not claim
 
-**Not built:** the Slack, email, SMS and calendar channels, the person model, and cross-session
-batching. Those are the direction, set out at the end of this file. Nothing here sends a Slack
-message today.
+It does not resume your program's execution. There is no stack snapshot, no continuation capture, no
+reaching into your runtime. Your code asks, waits however it prefers (a blocking call, a webhook, a
+poll), and receives an answer. What it does with that answer is entirely yours. Any description that
+implies otherwise is overselling, including any we might write later.
 
-## The worked example: a wall the agent cannot pass
+It also does not make a self-hosted deployment good at reaching people. Delivery through email, SMS,
+or voice depends on sender reputation, aligned DNS records, a reviewed app, and carrier
+relationships. None of that ships in a container, and this repository will not pretend it does.
 
-A CAPTCHA, a 2FA code, a login form, a judgment call the agent has no standing to make. The usual
-answers are to retry harder, or to give up and write a line in a log, which ends the run and discards
-everything already done. Handoff takes the third option: reach a person, hold the run open, and let
-them act. This is the case the current build proves end to end.
+## Status
 
-The SDK is one file. `pip install -e .`, or copy `human/` into your project.
+**Milestone H0: publish the contract.** The repository is licensed, governable, and has CI. The
+protocol is being written. **Nothing here serves a request yet.**
 
-```python
-import human
-
-human.configure(base_url="https://handoff.omegas.dev")   # or set HANDOFF_URL
-
-# Ask a question. Blocks until a person answers; returns their text.
-address = human.ask("Which shipping address should I use?", timeout_s=600)
-
-# Hand off a wall. Blocks until a person clears it; returns True if they did.
-cleared = human.clear_wall(
-    reason="Cloudflare Turnstile checkbox is blocking checkout",
-    live_view_url="https://<sandbox>/live?token=<hex>",
-    resume_url="https://<sandbox>/resume",
-    resume_token="<hex>",
-    live_view_is_agent_browser=True,   # this pane is the agent's real session
-    timeout_s=600,
-)
-```
-
-Both calls block by long-polling the API, so a person's decision arrives as an ordinary function
-return. `live_view_url` and `resume_url` are optional: pass them when your agent drives a browser you
-want the person to touch, and the handoff page embeds that live view. Set
-`live_view_is_agent_browser=True` only when the pane really is the agent's own session, since that is
-what makes the page tell the person their keystrokes land in the run rather than in a copy of the
-page. Lower level, if you want to own the waiting: `req = human.create_request(...)` then
-`req.wait(timeout_s=600)`.
-
-## How it works
-
-<p align="center">
-  <img src=".github/assets/flow.svg" alt="Flow diagram: the agent calls clear_wall and blocks; Handoff holds the request and pages a phone; a person answers and drives the agent's own browser through a live view; pressing I cleared it resolves the request, POSTs resume, and the blocked call returns." width="900">
-</p>
-
-1. The agent hits a wall and calls `human.clear_wall(...)` or `human.ask(...)`. The call blocks.
-2. The SDK POSTs `/v1/requests` with the agent's reason, plus the live-view and resume URLs for the
-   browser it is driving.
-3. The API reaches a person. Today that is a phone call through Retell AI: the voice states the
-   agent's reason and points at the handoff link.
-4. They open `/r/{id}`: the reason, the context, and a live view, so they can act rather than only
-   watch. When a sandbox drives the run, that pane is the agent's real browser (CDP screencast frames
-   over a WebSocket, input relayed back) and the agent declares it with `live_view_is_agent_browser`.
-   Without that assertion the page says only that this is the page the agent is stuck on, so the
-   strong claim is never made on the caller's behalf.
-5. They clear the wall or type an answer, then press "I cleared it". That hits `/resolve`, which
-   POSTs the agent browser's `resume_url`.
-6. The blocked long-poll returns with `cleared=True` or the typed answer, and the run continues from
-   where it stopped.
-
-The live view is a direct connection between the person's page and the agent's browser sandbox. The
-API holds the request, reaches the person, and carries the resolution back.
-
-<details>
-<summary>The same flow as a sequence, for reading in a terminal</summary>
-
-```
- agent + browser      handoff API       phone        human
-        |                   |             |            |
-        |-- clear_wall() -->|             |            |
-        |     (blocks)      |-- rings --->|            |
-        |                   |             |-- opens -->|
-        |                   |<------ GET /r/<id> ------|
-        |                   |             |            |
-        |<==== live view: frames out, clicks in =======|
-        |                   |<-- "I cleared it" -------|
-        |<-- POST /resume --|             |            |
-        |-- poll returns -->|             |            |
-        |  run continues    |             |            |
-```
-
-</details>
-
-## Why this and not a chat approval
-
-humanlayer.dev, gotoHuman, and LangGraph interrupts all have one shape: a text approval in chat. Chat
-is a channel Handoff intends to carry too, but the shape is the difference. An approval asks a person
-to *reply*. Handoff can ask them to *act*.
-
-- **It reaches people away from a keyboard.** The phone rings and a voice states the agent's reason,
-  rather than adding an unread badge to a workspace nobody has open.
-- **It hands over control, not a question.** The person works inside the agent's own browser session,
-  with mouse and keyboard relayed to it, then hands it back. A chat approval cannot tick a Turnstile
-  box.
-
-inkbox.ai (YC S26) runs the opposite direction, giving the agent its own identity and comms. That is
-complementary, not competing.
-
-## The gate that makes the demo honest
-
-`GET /demo/statement?handoff=<id>` returns the demo's rebate statement only when a real person has
-resolved that exact handoff id. Otherwise it returns 403.
-
-It exists because serving the demo wall's HTML also serves the numbers inside it. An agent could
-regex the total straight out of the page and never need a person, and the demo would prove nothing.
-So the payoff sits behind an endpoint the agent cannot open by itself: it holds the handoff id, but
-nothing within its reach can resolve that id. Only the person who answered the phone can.
-
-The gate holds against the real deployment, not just in theory. Ten of ten assertions passed against
-production: the 403 while pending names the state as `pending` rather than an unknown handoff, the
-agent process was confirmed still blocked while it waited, and the wall was checked as production
-serves it over HTTPS rather than over `file://`. There, a scripted `.click()` is still rejected and
-only a trusted CDP click reveals the payoff.
-
-## Verified in production
-
-Measured against the deployed server, not on a laptop:
-
-- **The long-poll returns on the person's click.** A real resolution came back in 3 seconds against a
-  25-second wait window, so the agent resumes when the person acts, not on a polling tick.
-- **`POST /resume` lands on the browser sandbox** with its bearer token.
-- **A real phone call fired from the deployed server** through Retell AI.
-- **The demo agent's `--scripted` mode ran the whole loop end to end** and read the payoff only after
-  a person cleared the wall: `GET /demo/statement` returned 403 while the handoff was pending and 200
-  once it was resolved. Ten of ten assertions passed, including that the agent was still blocked
-  while it waited.
-- **The live view works from a foreign origin** because the sandbox serves `/live` with the token as
-  a query parameter, returns 401 without it, and sets neither `X-Frame-Options` nor a CSP. Frames go
-  out and clicks come in over the same socket, so the person drives.
-
-## Limitations, stated plainly
-
-- **One channel is built.** Voice paging plus live takeover. Everything else in the channel story is
-  direction.
-- **State lives in one process on one machine.** The app is pinned to a single machine on purpose:
-  with two, a request created on one is unknown to the other.
-- **A redeploy drops pending requests.** Durable state is the first thing to fix.
-- **No auth beyond unguessable ids.** The handoff page is public to whoever holds the link.
-- **Anyone holding the API URL can ring the owner's phone.** Request creation has no key yet.
-- **`--claude` mode is not proof of the gate.** The Bedrock-backed agent mode runs, but it is fed the
-  stripped page text, which exposes the template contents. `--scripted` is the honestly gated mode,
-  and it is the one measured above.
-
-## How judges can test it
-
-Open **https://handoff.omegas.dev/try**. It mints a demo handoff and redirects you straight to
-`/r/<id>`, the page a paged person sees: the agent's stated reason, the live view, and the resolve
-control. Resolving there is what unblocks the agent and what opens the gated statement.
-
-Paging is off on that self-serve path, on purpose. A public button that rings a real person's phone
-is a public button for waking someone up. We also publish no `curl` that pages, since that would put
-a working key in the wild. The phone leg is shown in the live demo and in the backup video.
-
-<details>
-<summary><strong>Full HTTP API</strong></summary>
-
-<br>
-
-| Endpoint | Purpose |
+| Component | State |
 |---|---|
-| `GET /healthz` | Liveness. Returns `{"ok": true}`. |
-| `POST /v1/requests` | Create a handoff request. `kind` is `clear_wall` or `question`; body carries `reason`, `question`, `agent`, optional `live_view_url` / `resume_url` / `resume_token`, `live_view_is_agent_browser` (default `false`; assert it only when the pane is the agent's own session, since it decides how strongly the page describes the live view), `timeout_s`, and `page` (set `false` to skip phone paging). Returns `201` with the id and its public `page_url`. |
-| `GET /v1/requests/{id}?wait=25` | Long-poll. Returns as soon as status leaves `pending`, or after `wait` seconds. Carries `status`, `answer`, `cleared`, `resolved_by`, and timestamps. |
-| `POST /v1/requests/{id}/resolve` | Resolve one request: `{"answer", "cleared", "by"}`. Side effect: if the request carried a `resume_url`, the server POSTs it with `resume_token` as a bearer. |
-| `GET /r/{id}` | The public handoff page for one request. No auth; the id is a 22-character unguessable string. |
-| `GET /demo/statement?handoff=<id>` | The demo payoff, gated: `200` only after a person resolved that handoff id, `403` otherwise. |
-| `GET /try` | Self-serve demo. Mints a handoff with paging off and `303`-redirects to its `/r/<id>` page. |
-| `GET /` | Landing and status page. |
+| Licensing, governance, CI | Landed (this milestone) |
+| `spec/` — the normative protocol | In progress |
+| `core/` — the Rust reference implementation | Compiling skeletons. Every crate is a stub. |
+| `conformance/` — the test suite | Not started. Lands in H1, expected to fail against a stub. |
+| `sdk/python` — `handoff-human` | Exists, from the prior art. Reworked against the spec in H3. |
+| `sdk/ts` | Not started |
+| `ui/responder` — the standalone human-facing page | Not started |
 
-Request state is held in the server process, in memory. Deliberate for a four-hour build, and the
-first thing to replace.
+`handoffd` builds and prints its version. It listens on nothing, and pointing a client at it will not
+work. `handoff-conformance` runs and reports zero cases, exiting non-zero on purpose so that no
+pipeline can report conformance it has not measured.
 
-</details>
+This table is the honest state as of the last commit. If it disagrees with something else in this
+repository, this table is what was checked.
 
-<details>
-<summary><strong>What existed before tonight, and what did not</strong></summary>
+## Where the spec lives
 
-<br>
+`spec/` is normative and is the source of truth for every implementation, including ours:
 
-Built solo at founders.inc Night Hack on 2026-07-24, in under four hours.
+| File | What it is |
+|---|---|
+| `spec/handoff-protocol-v0.1.md` | The normative protocol, using RFC 2119 keywords |
+| `spec/openapi.yaml` | The wire contract, and the source the typed SDKs are generated from |
+| `spec/schemas/*.schema.json` | Request, receipt, policy, and delivery-attempt schemas |
+| `spec/signing.md` | The receipt and callback signature scheme, with test vectors |
+| `spec/CHANGELOG.md` | What changed and when |
 
-**Existed before:** Omega's internal browser-agent infrastructure. Fly.io / Sprites microVM sandboxes
-that rent a browser with a CDP endpoint; an in-sandbox live-view service streaming CDP screencast
-frames over a WebSocket with input relayed back; HMAC viewer-token minting; a sandbox-level
-`request_human_help(reason)` action whose clearance was *inferred* from the page url or title
-changing; and a `POST /resume` endpoint that nothing ever called. Personal accounts for Retell AI,
-Fly.io, Cloudflare, and AWS Bedrock predate the event too.
+The spec is versioned independently of the implementations, by tag namespace (`spec/v0.1`,
+`core/v0.3.1`, `sdk-py/v0.2.0`, and so on). See [GOVERNANCE.md](GOVERNANCE.md) for the version policy
+and for the process a spec change has to go through, which is stricter than the one for code.
 
-**Built tonight:** the entire standalone product. The `human` SDK, the hosted API (create, long-poll,
-resolve), the public handoff page, phone paging through Retell AI, the demo wall, the gated
-`/demo/statement`, and the `"I cleared it"` to `POST /resume` path.
+## Repository layout
 
-That last one closed a real gap. Inferring clearance from url or title movement silently misses walls
-cleared in place: a person ticks a Turnstile checkbox, nothing about the page identity changes, and
-the agent waits until its deadline. `POST /resume` existed but had no caller anywhere. Clearance
-stopped being a guess and became a stated fact.
+```
+spec/               The normative protocol. Apache-2.0.
+core/               Rust workspace. Apache-2.0. Published to crates.io.
+  crates/handoff-protocol/        types, state machine, policy evaluation. No I/O.
+  crates/handoff-core/            the engine and the port traits a deployment implements
+  crates/handoff-store-postgres/  reference store and its own migration set
+  crates/handoff-adapters/        delivery channels, feature-gated per channel
+  crates/handoff-server/          the reference server. Binary: handoffd
+  crates/handoff-conformance/     the suite runner. Takes any base URL.
+conformance/        Declarative cases. The governance instrument, not a test helper.
+sdk/python/         handoff-human. MIT.
+sdk/ts/             (H3) MIT.
+ui/responder/       (H3) A standalone page for the person answering. Apache-2.0.
+examples/           Worked examples, including the original hackathon build.
+docs/               Documentation source.
+```
 
-Full detail in [DISCLOSURE.md](DISCLOSURE.md).
+## Self-hosting
 
-</details>
+Self-hosting is the point rather than a concession, so it is worth being precise about what it does
+and does not get you.
 
-## Sponsor tools used
+**Once `handoffd` exists** (milestone H2) the shape will be: point it at a Postgres database, give it
+a configuration file naming the people it can reach and the channels it may use, and run it. It has
+no dependency on any hosted service, no phone-home, no licence key, and no disabled feature waiting
+to be switched on. `CONTRIBUTING.md` makes a dormant gate in this repository a mergeable-blocking
+defect rather than a matter of taste.
 
-- **Anthropic Claude** as the demo agent's brain, called through **AWS Bedrock** (no direct Anthropic
-  API credits were available, so Bedrock carried the model).
-- **Retell AI** places the phone call and speaks the agent's reason.
-- **Fly.io** hosts the API and the handoff page.
-- **Cloudflare** for DNS on `handoff.omegas.dev`.
+**What a self-hosted deployment genuinely guarantees:** correctness of the state machine;
+exactly-one-effect semantics; waits that survive a process restart; a complete local audit trail;
+full data export; and no runtime dependency on anyone else being alive, solvent, or interested.
 
-## The direction
+**What it structurally cannot guarantee**, stated here rather than discovered later:
 
-None of this is built yet. It is where the one built channel is meant to lead.
+- **Independent attestation.** A receipt signed with a key you control is adequate for internal
+  control and worthless as evidence *against* you. Only a party who is not the operator can attest to
+  what an operator's system recorded. That is the definition of a third party, not a feature we are
+  withholding.
+- **Deliverability.** See above. A fresh deployment starts at zero reputation on every channel.
+- **Cross-tenant signals.** "This number has been paged 400 times today by twelve different senders"
+  is not computable by one deployment that cannot see the others.
+- **Retention as a promise.** Your audit trail is exactly as durable as your backups. A promise needs
+  a promisor.
 
-- **Channels described by capability, never by vendor:** what a channel can carry, what it can
-  capture, whether it can interrupt someone, how long it survives being ignored. The framework routes
-  on requirements, so a new provider is a plugin rather than a branch in the core.
-- **A person model instead of a config file:** channels, timezone, quiet hours, calendar awareness,
-  learned preferences, so an agent can weigh interrupting now against texting first or waiting.
-- **The attention queue:** requests held per person rather than per run, so several blocked agents
-  reach someone as one conversation instead of several interruptions.
-- **Durable state,** so a handoff outlives the process and the machine that created it.
-- **API keys on request creation,** and signed handoff-page links.
-- **Voice answers,** with the person speaking the answer on the call and speech-to-text returning it.
-- **A TypeScript SDK,** and adapters for LangGraph, browser-use, and the Claude Agent SDK.
+Meanwhile you can read the spec and implement it yourself. That is a supported outcome, and the
+conformance suite exists so you can prove you got it right without asking us.
 
-## License
+## The open and closed line
 
-MIT. See [LICENSE](LICENSE).
+Some of the product around Handoff is commercial. The boundary is drawn by a published test rather
+than by convenience:
+
+> Open everything required to define, run, and independently verify a handoff on a single tenant's
+> own machine. Keep closed only what derives its value from a third party operating it: shared
+> infrastructure, cross-tenant knowledge, and promises that outlive the customer's own process.
+
+In practice almost everything is open. The closed surface reduces to a delivery fleet, the
+cross-tenant view, third-party attestation, and one company's own billing and organization model,
+none of which is protocol. Three clauses bind the maintainer and are written into
+[GOVERNANCE.md](GOVERNANCE.md): no crippleware, the receipt verifier is open unconditionally, and
+export is open. If you think a change violates one, cite the clause in the pull request; it has to be
+answered in public.
+
+The mechanism that keeps this from becoming a slogan is the conformance suite. A hosted service that
+cannot pass the open suite has a red build, which turns "we did not quietly fork the core" from an
+intention into a check anyone can rerun.
+
+## Licensing
+
+| Subtree | Licence |
+|---|---|
+| `spec/`, `core/`, `conformance/`, `ui/`, `docs/`, repository default | **Apache-2.0** ([LICENSE](LICENSE)) |
+| `sdk/**` | **MIT** ([LICENSE-MIT](LICENSE-MIT), plus per-directory `LICENSE` files) |
+| `examples/night-hack/` | **MIT**, unchanged from its original release |
+
+Apache-2.0 on the spec and the implementation because its §3 grants patent rights expressly and
+terminates them on patent litigation against the project. MIT on the SDKs because a thin client gets
+vendored into everything, including projects whose licences make Apache-2.0 awkward, and its patent
+exposure is nil.
+
+The Python SDK was first published under MIT, `Copyright (c) 2026 Noureddin Bakir`. That grant stands
+and is not rewritten here. Trademark conditions live in [TRADEMARKS.md](TRADEMARKS.md) and never in
+the licence text.
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. The short version:
+
+- **Sign off your commits** (`git commit -s`). We use the Developer Certificate of Origin. **There is
+  no CLA and there will not be one**, because the only thing a CLA would buy beyond what Apache-2.0
+  §5 already grants is the option to close this later.
+- **A `spec/` change needs a conformance case** that fails before it and passes after, or two
+  independent implementations.
+- **A core behaviour change without a conformance case is not merged.**
+
+Most wanted: delivery adapters, SDK ports to other languages, conformance cases, and corrections to
+ambiguous spec prose. An ambiguity in a normative document is a real defect.
+
+Security issues go to the private channel in [SECURITY.md](SECURITY.md), never a public issue. Note
+that in this protocol a request identifier can itself be a capability, so treat one like a
+credential.
+
+## Prior art, and the honesty discipline
+
+Handoff started as a four-hour build at founders.inc Night Hack on 2026-07-24. That build is
+preserved under [`examples/night-hack/`](examples/night-hack/) with a README describing what it is
+and, more usefully, what it is not.
+
+It is kept because it is the evidence. It also demonstrated the failure the protocol exists to
+prevent: before it, "the human is finished" was inferred from a page URL or title changing, which
+silently misses a wall cleared in place. A person ticks a verification checkbox, nothing about the
+page identity changes, and the agent waits until its deadline for an obstacle that is already gone.
+The fix generalizes into the rule stated at the top of this file: a human action is recorded, never
+detected.
+
+[DISCLOSURE.md](DISCLOSURE.md) is that build's honest accounting of what existed beforehand, what was
+made during the event, and what was measured rather than asserted. It is kept at the root of this
+repository on purpose. The standard it sets applies to everything here: say what was checked, say how
+it was checked, and say plainly what was not.

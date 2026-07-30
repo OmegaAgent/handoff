@@ -1,0 +1,23 @@
+[package]
+name = "handoff-server"
+description = "handoffd — the Handoff reference server. Self-hostable, single-tenant by default, no dependency on any hosted service."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "handoffd"
+path = "src/main.rs"
+
+[dependencies]
+handoff-adapters.workspace = true
+handoff-core.workspace = true
+handoff-protocol.workspace = true
+handoff-store-postgres.workspace = true

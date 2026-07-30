@@ -1,8 +1,39 @@
-# BACKLOG — Handoff (Night Hack 2026-07-24)
+# BACKLOG — Handoff
 
 Ranked. Top = handle first. Non-blockers get deferred here instead of stopping the build.
 
-## Shipped tonight (verified in production, not just written)
+## Open now — H0, publish the contract
+
+Landed in H0:
+- Apache-2.0 repository default with MIT retained on `sdk/**` and on the preserved prior art.
+  `NOTICE`, `TRADEMARKS.md`, `CONTRIBUTING.md` (DCO, no CLA), `GOVERNANCE.md`, `SECURITY.md`.
+- The §2.2 tree: `core/` Rust workspace (six crates, builds clean), `sdk/python`,
+  `examples/night-hack/` holding the hackathon build as prior art.
+- `handoff-human` 0.2.0: module renamed `human` → `handoff`, with `human` kept as a deprecated
+  re-export that warns. Removed in 0.3.0.
+- CI with no secrets: fmt, clippy, build, test, docs; Python SDK lint and import surface; a wired
+  conformance job; a spec-change-needs-a-conformance-case rule; secret hygiene.
+- Repo identity standardized on `OmegaAgent/handoff`.
+
+Still open before the first public push, in order:
+1. **Reserve the names.** `handoff-protocol`, `handoff-core`, `handoff-store-postgres`,
+   `handoff-adapters`, `handoff-server`, `handoff-conformance` on crates.io, and the npm scope for
+   the TypeScript SDK. Fallbacks exist (`handoffproto-*`, `@handoff-protocol/*`) but the choice must
+   be made before the spec is published, not after.
+2. **`spec/` v0.1.** Concurrent work. The release gate for H0 is not met until it exists.
+3. **Confirm the copyright holder going forward.** The published MIT grant says
+   `Noureddin Bakir`; the company packages say `Omegas`. Pick the entity that will hold the
+   trademark and use it consistently from here. Do not rewrite the published grant.
+4. **Decide whether the conformance suite gates a managed deploy from day one or from v1.0.**
+   Day one is stronger and slower. A gate added later is a gate that never gets added.
+5. **Turn off `continue-on-error` on the conformance CI job** the moment the first case lands.
+
+## Prior art — the hackathon build (Night Hack, 2026-07-24)
+
+Preserved under `examples/night-hack/`. What follows is that build's own backlog, kept because the
+direction section below is still the direction.
+
+### Shipped that night (verified in production, not just written)
 - Hosted API: create request / long-poll / resolve. The long-poll returns the instant a human
   resolves (measured 3s against a 25s wait), so a blocked agent resumes immediately.
 - Python SDK, one file, standard library only: `ask()`, `clear_wall()`, `create_request()`,
@@ -15,7 +46,7 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
   design: a paging failure never blocks request creation.
 - Demo wall: a self-controlled portal whose verification step requires a genuinely trusted click,
   with the payoff held in a `<template>` so it is absent from the DOM until a human clears it.
-- Public: https://handoff.omegas.dev · https://github.com/NoureddinBakir/handoff (MIT).
+- Public: https://handoff.omegas.dev · https://github.com/OmegaAgent/handoff (MIT).
 
 ## Direction (owner, 2026-07-25): the multi-channel communication layer, person-centric
 

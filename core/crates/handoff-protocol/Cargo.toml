@@ -1,0 +1,15 @@
+[package]
+name = "handoff-protocol"
+description = "Pure types, state machine, and policy evaluation for the Handoff protocol. No I/O."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]

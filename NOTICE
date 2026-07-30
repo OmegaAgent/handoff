@@ -1,0 +1,41 @@
+Handoff — an open protocol for handing a decision to a human and getting it back.
+Copyright 2026 Noureddin Bakir
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+--------------------------------------------------------------------------------
+MIT-licensed subtrees
+--------------------------------------------------------------------------------
+
+The SDKs under sdk/ are licensed under the MIT License, not Apache-2.0. See
+LICENSE-MIT at the repository root and the per-directory LICENSE files under
+sdk/. The Python SDK (sdk/python, published to PyPI as `handoff-human`) was
+first released under the MIT License, Copyright (c) 2026 Noureddin Bakir. That
+grant is not revoked or altered by this repository's Apache-2.0 default.
+
+--------------------------------------------------------------------------------
+Prior art
+--------------------------------------------------------------------------------
+
+examples/night-hack/ contains the original Handoff hackathon build
+(founders.inc Night Hack, 2026-07-24), preserved as prior art and as a worked
+example. It was released under the MIT License and is retained under it. See
+DISCLOSURE.md for what was built when, and examples/night-hack/README.md for
+what it is and is not.
+
+--------------------------------------------------------------------------------
+Trademarks
+--------------------------------------------------------------------------------
+
+"Ωmegas" and the Ω mark are trademarks of the project owner and are NOT licensed
+by the Apache License. See TRADEMARKS.md for the nominative-use grant and the
+conditions on the "Handoff-compatible" conformance claim.

@@ -1,0 +1,25 @@
+[package]
+name = "handoff-adapters"
+description = "Delivery channel adapters for Handoff — slack, email, webhook, voice — feature-gated, one crate."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["webhook"]
+webhook = []
+email = []
+slack = []
+voice = []
+all-channels = ["webhook", "email", "slack", "voice"]
+
+[dependencies]
+handoff-core.workspace = true
+handoff-protocol.workspace = true

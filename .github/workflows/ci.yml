@@ -1,0 +1,247 @@
+name: CI
+
+# No job in this file uses a secret. A change that needs one is a design problem with the
+# change, not with CI: a fork must be able to run this pipeline green on the first try.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: core — fmt, clippy, build, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version && cargo --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      - name: Docs build without warnings
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: handoffd is the server binary name
+        run: test -x target/debug/handoffd
+
+  no-fork-markers:
+    name: core — no [patch], no path dependency on a published crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A `[patch]` entry or a path dependency onto a handoff-* crate from outside this workspace
+      # is the moment a fork begins. CONTRIBUTING.md states the rule; this makes it a build
+      # failure. Path dependencies *within* core/ are how the workspace links itself and are fine.
+      - name: No [patch] sections
+        run: |
+          if grep -rn --include=Cargo.toml -E '^\s*\[patch' . ; then
+            echo "::error::[patch] is not permitted. Land the change upstream and bump the pin."
+            exit 1
+          fi
+          echo "clean"
+
+  python-sdk:
+    name: sdk/python — lint, import, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Byte-compile
+        run: python -m compileall -q handoff human
+
+      - name: Lint
+        run: |
+          python -m pip install --quiet ruff
+          python -m ruff check .
+
+      - name: Import surface
+        run: |
+          python - <<'PY'
+          import warnings
+          import handoff
+          assert handoff.__version__ == "0.2.0", handoff.__version__
+          with warnings.catch_warnings(record=True) as caught:
+              warnings.simplefilter("always")
+              import human
+              assert any(w.category is DeprecationWarning for w in caught), \
+                  "the `human` alias must warn"
+          assert human.ask is handoff.ask, "the alias must forward, not reimplement"
+          print("handoff", handoff.__version__, "+ deprecated `human` alias: ok")
+          PY
+
+      - name: Build the distribution
+        run: |
+          python -m pip install --quiet build
+          python -m build
+
+  python-sdk-stdlib-only:
+    name: sdk/python — standard library only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: No third-party dependencies
+        run: |
+          python - <<'PY'
+          import tomllib, sys
+          with open("sdk/python/pyproject.toml", "rb") as fh:
+              deps = tomllib.load(fh)["project"]["dependencies"]
+          if deps:
+              sys.exit(f"handoff-human must stay standard-library only, found: {deps}")
+          print("stdlib only")
+          PY
+
+  ts-sdk:
+    name: sdk/ts — lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether the TypeScript SDK exists yet
+        id: probe
+        run: |
+          if [ -f sdk/ts/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::sdk/ts does not exist yet (lands in H3). Nothing to lint."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.probe.outputs.present == 'true'
+        with:
+          node-version: "22"
+
+      - name: Lint and test
+        if: steps.probe.outputs.present == 'true'
+        working-directory: sdk/ts
+        run: |
+          npm ci
+          npm run lint
+          npm test
+
+  conformance:
+    name: conformance suite
+    runs-on: ubuntu-latest
+    # TODO(H1): delete this line. The suite becomes a required check the moment the first case
+    # lands. Until then the runner exits non-zero on purpose — a pipeline must never report
+    # conformance it has not measured — and this flag keeps that visible without blocking H0.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Build the runner
+        working-directory: core
+        run: cargo build -p handoff-conformance
+
+      - name: Run the suite against the reference server
+        working-directory: core
+        run: |
+          echo "::warning::TODO(H1) — the conformance suite has no cases yet. This job is"
+          echo "::warning::advisory until the first case lands, then continue-on-error goes away."
+          ./target/debug/handoff-conformance --base-url http://127.0.0.1:8080
+
+  spec-needs-conformance:
+    name: a spec change must carry a conformance case
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # GOVERNANCE.md, "The spec-change process": a normative change without an executable case is
+      # how a specification stops being one. Enforced here rather than left to review.
+      - name: Compare changed paths
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --quiet origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          echo "$changed"
+          spec=$(echo "$changed" | grep -c '^spec/' || true)
+          conf=$(echo "$changed" | grep -c '^conformance/' || true)
+          if [ "$spec" -gt 0 ] && [ "$conf" -eq 0 ]; then
+            echo "::error::This PR changes spec/ but no conformance case. See GOVERNANCE.md."
+            exit 1
+          fi
+          echo "ok (spec files: $spec, conformance files: $conf)"
+
+  secret-hygiene:
+    name: no credentials or capability tokens in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SECURITY.md: in this protocol a request identifier can itself be a capability, so this is
+      # not routine housekeeping. Every pattern below matches a literal VALUE. Naming an
+      # environment variable, or interpolating one into a URL, must not trip the check — a token
+      # in a query string only counts when a literal follows the `=`.
+      - name: Scan the working tree
+        run: |
+          set +e
+          hits=$(grep -rInE \
+            '[?&][a-z_]*token=[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16}|Bearer [A-Za-z0-9._-]{24,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+            --exclude-dir=.git --exclude-dir=target --exclude-dir=node_modules .)
+          set -e
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::Possible credential or capability token committed. Rotate it first, then remove it."
+            exit 1
+          fi
+          echo "clean"
+
+      - name: No ignored-by-policy files were committed
+        run: |
+          set +e
+          bad=$(git ls-files | grep -E '(^|/)\.env($|\.)|\.local\.md$|_accessKeys\.csv$|\.pem$')
+          set -e
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            echo "::error::These files must never be tracked. See .gitignore and SECURITY.md."
+            exit 1
+          fi
+          echo "clean"

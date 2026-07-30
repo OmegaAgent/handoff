@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/handoff-protocol",
+    "crates/handoff-core",
+    "crates/handoff-store-postgres",
+    "crates/handoff-adapters",
+    "crates/handoff-server",
+    "crates/handoff-conformance",
+]
+
+# All crates in this workspace release together under a single `core/vX.Y.Z` tag
+# (GOVERNANCE.md, "Crate versioning").
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+repository = "https://github.com/OmegaAgent/handoff"
+homepage = "https://github.com/OmegaAgent/handoff"
+authors = ["Handoff contributors"]
+keywords = ["human-in-the-loop", "agents", "protocol", "approvals"]
+categories = ["web-programming", "asynchronous"]
+
+[workspace.dependencies]
+handoff-protocol = { version = "0.1.0", path = "crates/handoff-protocol" }
+handoff-core = { version = "0.1.0", path = "crates/handoff-core" }
+handoff-store-postgres = { version = "0.1.0", path = "crates/handoff-store-postgres" }
+handoff-adapters = { version = "0.1.0", path = "crates/handoff-adapters" }
+
+[profile.release]
+lto = "thin"

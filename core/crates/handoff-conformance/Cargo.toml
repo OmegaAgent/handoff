@@ -1,0 +1,20 @@
+[package]
+name = "handoff-conformance"
+description = "The Handoff conformance suite. Runs the declarative cases against any base URL and reports pass/fail per case."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "handoff-conformance"
+path = "src/main.rs"
+
+[dependencies]
+handoff-protocol.workspace = true

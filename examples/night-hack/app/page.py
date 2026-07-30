@@ -420,7 +420,7 @@ if(btn) btn.addEventListener('click',async()=>{{
 # ---------------------------------------------------------------------- landing
 
 
-GITHUB = "https://github.com/NoureddinBakir/handoff"
+GITHUB = "https://github.com/OmegaAgent/handoff"
 
 # app/main.py owns this flag and 404s /demo when it is off. The landing reads the
 # same switch so its primary CTA never points at a route that is not there.
