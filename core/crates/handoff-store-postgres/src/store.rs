@@ -3361,7 +3361,7 @@ fn pick_delivery(request: &RequestView, declared: Option<DeliveryId>) -> Option<
         deliveries
             .iter()
             .enumerate()
-            .filter(|(_, d)| could_have_been_used(&d))
+            .filter(|(_, d)| could_have_been_used(d))
             .max_by_key(|(index, d)| (d.can_authenticate_person, d.grade_reached, *index))
             .map(|(_, d)| d.clone())
     };

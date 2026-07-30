@@ -160,23 +160,35 @@ new error code are additive.
   answer produces N receipts without violating **I1**, and is not in this version.
 - **Receipt retention** is a policy field (`policy.schema.json`) with no protocol-mandated minimum.
 
-### Fixed — `via.grade_reached` may be null
+### Fixed — the two spec artifacts disagreed about `via.grade_reached`
 
-Found by a hostile review pass and confirmed reachable by C-14 itself.
+*(Corrected. An earlier revision of this entry said the field was a required four-value enum that
+forced a Server to invent a value. That was wrong: `grade_reached` has never appeared in any
+`required` array, so omitting it was always valid. The reviewer who found the underlying bug caught
+the error in my description of it.)*
 
-`via.grade_reached` was a required four-value enum, so a Server whose answering delivery had never
-been graded was **forced to invent a value**, and every implementation reached for `dispatched`.
-That value asserts that our transport accepted the message. Writing it for a delivery nothing ever
-graded puts a send on the receipt that may never have happened — in the one artifact whose whole
-purpose is to be evidence.
+The real defect was a disagreement between two normative artifacts. `openapi.yaml` typed
+`grade_reached` as `anyOf: [enum, "null"]`; `schemas/receipt.schema.json` typed it as a bare
+four-value enum with no null. A receipt carrying `null` — which the reference server produces for
+every policy receipt from an expiry, and which C-10 accepts — validated against one artifact and was
+rejected by the other. Two implementations reading different files would have disagreed about
+whether a legal receipt was legal.
 
-`grade_reached` is now nullable. `null` means no grade was ever recorded, and a Server MUST NOT
-substitute `dispatched` for it.
+`receipt.schema.json` now matches `openapi.yaml`. A Server MAY omit the key or send `null`; both
+mean the same thing, and §7.2 now says plainly that neither may be rounded up to `dispatched`.
+`dispatched` asserts that a transport accepted the message, so writing it for a delivery nothing
+ever graded puts a send on the receipt that may never have happened.
 
-This was the fourth appearance of one shape in a single milestone: a channel's *ceiling* written as
+That normative sentence earned itself immediately. The reference server was naming a **suppressed**
+delivery — our own email scaffold, which transmits nothing — as the delivery the person answered
+through, and stamping `dispatched` on it. The cause was a selection that preferred the *most recent*
+candidate over the one that could actually have carried the answer; the invented grade was the
+second half of it. Both are fixed in the implementation.
+
+This was the fifth appearance of one shape in a single milestone: a channel's *ceiling* written as
 the grade *reached*; `failed()` and `suppressed()` reporting `dispatched`; an `unwrap_or` filling a
-`None` arm; and this. Three were implementation defects and were fixed as such. The fourth was not
-fixable in an implementation, because the schema could not express "no evidence" — which is why the
-type, and not the callers, was the thing that needed changing.
+`None` arm; a schema that disagreed with its sibling about how to say "nothing"; and a selection
+that reached for a plausible candidate when the honest answer was "none of these". Four were
+implementations and one was the contract.
 
 **Zero evidence and the weakest evidence are different claims**, and a receipt may not blur them.
