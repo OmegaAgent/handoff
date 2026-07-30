@@ -3327,16 +3327,60 @@ async fn load_grants(
 /// The caller's `via_delivery_id` wins. Otherwise the newest delivery that is still open is the
 /// honest guess, because that is the one a person was most recently pointed at.
 fn pick_delivery(request: &RequestView, declared: Option<DeliveryId>) -> Option<DeliveryView> {
+    // "Answered through this delivery" has to be a claim about a delivery the person could
+    // actually have used. Two things follow, and the first one is easy to get wrong in the
+    // direction that flatters us.
+    //
+    // **A withheld or failed delivery is not a candidate.** Suppressed, failed and bounced
+    // deliveries never put the ask in front of anybody, so nobody answered through one. On the
+    // reference deployment the default ladder's second rung is `email`, a scaffold that transmits
+    // nothing and ends `suppressed` — and it is the *newest* delivery by the time anyone answers.
+    // Taking the newest open delivery therefore wrote an email nobody sent onto the receipt as the
+    // one the person answered through.
+    //
+    // **But `queued` is still a candidate**, which is the part that looks wrong and is not. For
+    // the in-app surface, dispatching *is* the request being listable at its canonical URL, and I4
+    // guarantees that from the moment it is raised; the queue row is our own bookkeeping catching
+    // up. Excluding `queued` would make a receipt's contents depend on whether a background worker
+    // had run yet, which is a race, not a fact about the intervention.
+    let could_have_been_used = |d: &&DeliveryView| {
+        !matches!(
+            d.state,
+            DeliveryState::Suppressed
+                | DeliveryState::Failed
+                | DeliveryState::Bounced
+                | DeliveryState::Cancelled
+                | DeliveryState::Stale
+        )
+    };
+
+    // Among candidates, the strongest claim wins rather than the most recent. §4.7: only a channel
+    // that can authenticate a person can carry an answer, so one that can outranks one that cannot
+    // however lately it was minted; then the grade actually reached; then recency as a tie-break.
+    let best = |deliveries: &[DeliveryView]| {
+        deliveries
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| could_have_been_used(&d))
+            .max_by_key(|(index, d)| (d.can_authenticate_person, d.grade_reached, *index))
+            .map(|(_, d)| d.clone())
+    };
+
     if let Some(id) = declared {
-        return request.deliveries.iter().find(|d| d.id == id).cloned();
+        // A client naming a delivery that was never sent is mistaken about its own history, and
+        // honouring it would write that mistake into an evidence artifact. The answer still stands
+        // — the person did answer — so this falls through to the honest choice rather than
+        // refusing a decision over a wrong annotation.
+        if let Some(named) = request
+            .deliveries
+            .iter()
+            .find(|d| d.id == id)
+            .filter(could_have_been_used)
+        {
+            return Some(named.clone());
+        }
     }
-    request
-        .deliveries
-        .iter()
-        .rev()
-        .find(|d| !matches!(d.state, DeliveryState::Cancelled | DeliveryState::Stale))
-        .or_else(|| request.deliveries.last())
-        .cloned()
+    best(&request.deliveries)
 }
 
 /// Record which request an `Idempotency-Key` produced, so a replay returns it **in its current

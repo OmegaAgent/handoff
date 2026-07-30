@@ -748,6 +748,13 @@ record a grade above a channel's declared `max_grade`. A Server MUST NOT treat `
 
 The receipt records the grade the answering delivery reached (§9.2, `via.grade_reached`).
 
+A Server MUST record the grade that delivery is **known to have reached**, and MUST NOT substitute a
+weaker grade when none was recorded. If no grade was ever recorded, `grade_reached` is `null`. It is
+specifically NOT `dispatched`: that value asserts that our transport accepted the message, so
+writing it for a delivery nothing ever graded puts a send on the record that may never have
+happened. Zero evidence and the weakest evidence are different claims, and a receipt is the one
+artifact in this protocol that may not blur them.
+
 ### 7.3 Attempts within a delivery
 
 A delivery owns an ordered list of attempts, each `{n, started_at, ended_at, outcome,

@@ -261,7 +261,7 @@ pub fn plan_answer(input: AnswerInput<'_>) -> Result<AnswerPlan> {
             // Answering through a delivery is itself the observation that earns `acted` — but only
             // where the channel can say who the person was (§4.7). Everywhere else the strongest
             // honest claim is whatever the channel actually reported.
-            grade_reached: Some(grade_of(d)),
+            grade_reached: grade_of(d),
         }),
         authority: ReceiptAuthority {
             required,
@@ -577,16 +577,20 @@ pub fn rendered_digest(request_prompt: &Value, requires: &Value, version: u64) -
 }
 
 /// The grade the answering delivery reached (§9.2, §7.2).
-fn grade_of(delivery: &DeliveryView) -> handoff_protocol::delivery::DeliveryGrade {
+fn grade_of(delivery: &DeliveryView) -> Option<handoff_protocol::delivery::DeliveryGrade> {
     use handoff_protocol::delivery::DeliveryGrade;
     if delivery.can_authenticate_person && delivery.max_grade >= DeliveryGrade::Acted {
-        DeliveryGrade::Acted
-    } else {
-        delivery
-            .grade_reached
-            .unwrap_or(DeliveryGrade::Dispatched)
-            .min(delivery.max_grade)
+        // Answering through it *is* the observation, on a channel that can say who answered.
+        return Some(DeliveryGrade::Acted);
     }
+    // Otherwise: what the channel actually reported, and nothing where it reported nothing.
+    // `None` here is not a weak grade to be rounded up to `dispatched` — `dispatched` asserts a
+    // transport accepted something, so inventing it puts a send on the receipt that may never have
+    // happened. §7.2 forbids synthesizing a grade that was not observed, and the receipt is the
+    // last artifact that should be guessing.
+    delivery
+        .grade_reached
+        .map(|reached| reached.min(delivery.max_grade))
 }
 
 #[cfg(test)]

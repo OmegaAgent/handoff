@@ -4,28 +4,69 @@
   "title": "Handoff Receipt",
   "description": "The immutable record of an outcome, minted in the same transaction as the state transition. A request has at most one decision receipt (I1). Receipts are never updated; a correction is a new receipt (I2).",
   "type": "object",
-  "required": ["id", "request_id", "org_id", "kind", "decision", "actor", "decided_at", "request_version", "request_digest", "rendered", "authority", "chain"],
+  "required": [
+    "id",
+    "request_id",
+    "org_id",
+    "kind",
+    "decision",
+    "actor",
+    "decided_at",
+    "request_version",
+    "request_digest",
+    "rendered",
+    "authority",
+    "chain"
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": { "type": "string", "pattern": "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$" },
-    "request_id": { "$ref": "request.schema.json#/$defs/RequestId" },
-    "org_id": { "$ref": "request.schema.json#/$defs/OrgId" },
+    "id": {
+      "type": "string",
+      "pattern": "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "request_id": {
+      "$ref": "request.schema.json#/$defs/RequestId"
+    },
+    "org_id": {
+      "$ref": "request.schema.json#/$defs/OrgId"
+    },
     "kind": {
-      "enum": ["decision", "policy", "correction"],
+      "enum": [
+        "decision",
+        "policy",
+        "correction"
+      ],
       "description": "`policy` records an outcome reached without a person. `correction` supersedes an earlier receipt without editing it; both remain in the chain."
     },
     "corrects": {
-      "oneOf": [{ "type": "string", "pattern": "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$" }, { "type": "null" }],
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        {
+          "type": "null"
+        }
+      ],
       "description": "REQUIRED when kind is `correction`, null otherwise."
     },
-    "decision": { "$ref": "#/$defs/RecordedDecision" },
-    "actor": { "$ref": "#/$defs/Actor" },
+    "decision": {
+      "$ref": "#/$defs/RecordedDecision"
+    },
+    "actor": {
+      "$ref": "#/$defs/Actor"
+    },
     "decided_at": {
       "type": "string",
       "format": "date-time",
       "description": "Server clock. A server MUST NOT accept a client-supplied decision time."
     },
-    "attempt_id": { "type": ["string", "null"] },
+    "attempt_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "request_version": {
       "type": "integer",
       "minimum": 1,
@@ -37,14 +78,27 @@
     },
     "rendered": {
       "type": "object",
-      "required": ["digest"],
+      "required": [
+        "digest"
+      ],
       "additionalProperties": false,
       "description": "What the person actually saw. Computed at presentation time and retained; a server MUST NOT re-derive it later from the request's current content.",
       "properties": {
-        "digest": { "$ref": "request.schema.json#/$defs/Digest" },
-        "ref": { "type": ["string", "null"], "description": "Locator for the retained rendering." },
+        "digest": {
+          "$ref": "request.schema.json#/$defs/Digest"
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Locator for the retained rendering."
+        },
         "binding": {
-          "enum": ["advisory", "strict"],
+          "enum": [
+            "advisory",
+            "strict"
+          ],
           "description": "Which presentation-binding mode applied at answer time."
         },
         "diverged": {
@@ -54,49 +108,95 @@
       }
     },
     "via": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
       "description": "The delivery through which the answer arrived. Null for a policy receipt.",
       "properties": {
-        "delivery_id": { "type": "string", "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$" },
-        "channel": { "type": "string" },
-        "target": { "$ref": "request.schema.json#/$defs/Target" },
+        "delivery_id": {
+          "type": "string",
+          "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "channel": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "request.schema.json#/$defs/Target"
+        },
         "grade_reached": {
-          "enum": ["dispatched", "delivered", "seen", "acted"],
-          "description": "`dispatched` means our transport accepted it — it is not evidence a person received anything."
+          "oneOf": [
+            {
+              "enum": [
+                "dispatched",
+                "delivered",
+                "seen",
+                "acted"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The grade the answering delivery is known to have reached. `dispatched` means our transport accepted it \u2014 it is not evidence a person received anything. `null` means no grade was ever recorded for that delivery, which is weaker still and MUST NOT be written as `dispatched`: zero evidence and the weakest evidence are different claims, and a receipt that conflates them asserts a send that may never have happened."
         }
       }
     },
     "authority": {
       "type": "object",
-      "required": ["required"],
+      "required": [
+        "required"
+      ],
       "additionalProperties": false,
       "properties": {
-        "required": { "$ref": "request.schema.json#/$defs/Authority" },
+        "required": {
+          "$ref": "request.schema.json#/$defs/Authority"
+        },
         "satisfied": {
           "oneOf": [
             {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "role": { "type": "string" },
-                "auth_strength": { "enum": ["link_only", "session", "reauth", "mfa"] },
+                "role": {
+                  "type": "string"
+                },
+                "auth_strength": {
+                  "enum": [
+                    "link_only",
+                    "session",
+                    "reauth",
+                    "mfa"
+                  ]
+                },
                 "endorsements": {
                   "type": "array",
                   "description": "Every principal that contributed to quorum, each with the moment it endorsed.",
                   "items": {
                     "type": "object",
-                    "required": ["principal_id", "at"],
+                    "required": [
+                      "principal_id",
+                      "at"
+                    ],
                     "additionalProperties": false,
                     "properties": {
-                      "principal_id": { "$ref": "request.schema.json#/$defs/PrincipalId" },
-                      "at": { "type": "string", "format": "date-time" }
+                      "principal_id": {
+                        "$ref": "request.schema.json#/$defs/PrincipalId"
+                      },
+                      "at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
                     }
                   }
                 }
               }
             },
-            { "const": "none", "description": "A policy receipt satisfied no authority." }
+            {
+              "const": "none",
+              "description": "A policy receipt satisfied no authority."
+            }
           ]
         }
       }
@@ -106,48 +206,115 @@
       "description": "The progressive-disclosure ladder, recorded as one intervention with one decision.",
       "items": {
         "type": "object",
-        "required": ["n", "at"],
+        "required": [
+          "n",
+          "at"
+        ],
         "additionalProperties": false,
         "properties": {
-          "n": { "type": "integer", "minimum": 1 },
-          "at": { "type": "string", "format": "date-time" },
-          "fields_provided": { "type": "array", "items": { "type": "string" } },
+          "n": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fields_provided": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "secret_fields": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Names only. Values never appear here, or anywhere else (I7)."
           },
-          "via_delivery_id": { "type": ["string", "null"] },
-          "request_version": { "type": "integer", "minimum": 1 }
+          "via_delivery_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_version": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },
     "capabilities_exercised": {
       "type": "array",
-      "items": { "$ref": "#/$defs/CapabilityUse" }
+      "items": {
+        "$ref": "#/$defs/CapabilityUse"
+      }
     },
-    "clearance": { "$ref": "#/$defs/Clearance" },
+    "clearance": {
+      "$ref": "#/$defs/Clearance"
+    },
     "waiter_state_at_decision": {
-      "enum": ["armed", "signalled", "orphaned"],
+      "enum": [
+        "armed",
+        "signalled",
+        "orphaned"
+      ],
       "description": "Records that an answer arrived after the requester was already gone."
     },
-    "chain": { "$ref": "#/$defs/ChainEntry" }
+    "chain": {
+      "$ref": "#/$defs/ChainEntry"
+    }
   },
-
   "allOf": [
     {
-      "if": { "properties": { "kind": { "const": "correction" } }, "required": ["kind"] },
-      "then": { "properties": { "corrects": { "type": "string" } }, "required": ["corrects"] }
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "correction"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "corrects": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "corrects"
+        ]
+      }
     },
     {
-      "if": { "properties": { "kind": { "const": "policy" } }, "required": ["kind"] },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
       "then": {
-        "properties": { "actor": { "properties": { "type": { "const": "policy" } } } },
+        "properties": {
+          "actor": {
+            "properties": {
+              "type": {
+                "const": "policy"
+              }
+            }
+          }
+        },
         "description": "A policy receipt MUST name the policy as the actor so that no audit mistakes it for consent."
       }
     }
   ],
-
   "$defs": {
     "RecordedDecision": {
       "type": "object",
@@ -159,88 +326,278 @@
           "description": "The typed answer. A field declared `secret` appears here ONLY as {\"provided\": true}; the value itself never enters a receipt (I7)."
         },
         "disposition": {
-          "enum": ["decide", "delegate", "unable"],
+          "enum": [
+            "decide",
+            "delegate",
+            "unable"
+          ],
           "default": "decide",
           "description": "`delegate` and `unable` are dispositions, not states. Neither settles the request on its own."
         },
-        "delegated_to": { "oneOf": [{ "$ref": "request.schema.json#/$defs/Target" }, { "type": "null" }] },
-        "note": { "type": ["string", "null"] },
+        "delegated_to": {
+          "oneOf": [
+            {
+              "$ref": "request.schema.json#/$defs/Target"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "effective": {
-          "enum": ["deny", "default"],
+          "enum": [
+            "deny",
+            "default"
+          ],
           "description": "Present on a policy receipt: what the unanswered request resolved to."
         }
       }
     },
-
     "Actor": {
       "type": "object",
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "additionalProperties": false,
       "description": "A record that cannot say who decided is not a receipt. A server MUST NOT record type `user` unless it authenticated a person.",
       "properties": {
         "type": {
-          "enum": ["user", "policy", "runtime", "anonymous_link"],
+          "enum": [
+            "user",
+            "policy",
+            "runtime",
+            "anonymous_link"
+          ],
           "description": "`runtime` records a machine observation credited as such; it never stands in for a person (I16). `anonymous_link` records that only a delivery token was held."
         },
-        "principal_id": { "oneOf": [{ "$ref": "request.schema.json#/$defs/PrincipalId" }, { "type": "null" }] },
-        "display": { "type": ["string", "null"] },
-        "role_at_decision": { "type": ["string", "null"], "description": "Snapshot: the role held at the moment of the decision, not the role held now." },
-        "auth_strength": { "enum": ["link_only", "session", "reauth", "mfa"] },
-        "reauth_at": { "type": ["string", "null"], "format": "date-time" },
-        "mfa_at": { "type": ["string", "null"], "format": "date-time" },
-        "ip_digest": { "type": ["string", "null"], "description": "Salted digest. Enough to correlate a disputed session, not a surveillance record." },
-        "user_agent_digest": { "type": ["string", "null"] },
+        "principal_id": {
+          "oneOf": [
+            {
+              "$ref": "request.schema.json#/$defs/PrincipalId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role_at_decision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Snapshot: the role held at the moment of the decision, not the role held now."
+        },
+        "auth_strength": {
+          "enum": [
+            "link_only",
+            "session",
+            "reauth",
+            "mfa"
+          ]
+        },
+        "reauth_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "mfa_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "ip_digest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Salted digest. Enough to correlate a disputed session, not a surveillance record."
+        },
+        "user_agent_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "on_behalf_of": {
-          "oneOf": [{ "$ref": "request.schema.json#/$defs/PrincipalId" }, { "type": "null" }],
+          "oneOf": [
+            {
+              "$ref": "request.schema.json#/$defs/PrincipalId"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "description": "On a requester actor: the person the machine acted for. Null means genuinely autonomous work, and MUST read as such rather than as an unattributed blank."
         }
       },
       "allOf": [
         {
-          "if": { "properties": { "type": { "const": "user" } }, "required": ["type"] },
-          "then": { "required": ["principal_id"], "properties": { "principal_id": { "type": "string" } } }
+          "if": {
+            "properties": {
+              "type": {
+                "const": "user"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "principal_id"
+            ],
+            "properties": {
+              "principal_id": {
+                "type": "string"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "type": { "enum": ["policy", "runtime", "anonymous_link"] } }, "required": ["type"] },
-          "then": { "properties": { "principal_id": { "type": "null" } } }
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "policy",
+                  "runtime",
+                  "anonymous_link"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "principal_id": {
+                "type": "null"
+              }
+            }
+          }
         }
       ]
     },
-
     "CapabilityUse": {
       "type": "object",
-      "required": ["handle", "scopes", "resolved_at"],
+      "required": [
+        "handle",
+        "scopes",
+        "resolved_at"
+      ],
       "additionalProperties": false,
       "description": "Presence and effect, never content. Input payloads, keystrokes, and form values MUST NOT be recorded.",
       "properties": {
-        "handle": { "$ref": "request.schema.json#/$defs/GrantHandle" },
-        "session_ref": { "type": "string", "pattern": "^hs_[0-9A-HJKMNP-TV-Z]{26}$" },
-        "scopes": { "type": "array", "items": { "enum": ["view", "drive"] }, "minItems": 1 },
-        "role_at_grant": { "type": "string" },
-        "resolved_at": { "type": "string", "format": "date-time" },
-        "released_at": { "type": ["string", "null"], "format": "date-time" },
-        "held_ms": { "type": "integer", "minimum": 0 },
-        "close_reason": { "enum": ["released", "expired", "revoked", "lease_lapsed"] },
-        "input_events": { "type": "integer", "minimum": 0, "description": "A count. Never payloads." },
+        "handle": {
+          "$ref": "request.schema.json#/$defs/GrantHandle"
+        },
+        "session_ref": {
+          "type": "string",
+          "pattern": "^hs_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "view",
+              "drive"
+            ]
+          },
+          "minItems": 1
+        },
+        "role_at_grant": {
+          "type": "string"
+        },
+        "resolved_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "held_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "close_reason": {
+          "enum": [
+            "released",
+            "expired",
+            "revoked",
+            "lease_lapsed"
+          ]
+        },
+        "input_events": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A count. Never payloads."
+        },
         "navigations": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Ordered origins visited during the session. Origin granularity by default; full URLs only behind an explicit deployment policy."
         },
-        "blast_radius_digest": { "$ref": "request.schema.json#/$defs/Digest" },
-        "resource_digest": { "type": "string", "description": "Digest of the provider resource reference — proves which resource without publishing provider internals." }
+        "blast_radius_digest": {
+          "$ref": "request.schema.json#/$defs/Digest"
+        },
+        "resource_digest": {
+          "type": "string",
+          "description": "Digest of the provider resource reference \u2014 proves which resource without publishing provider internals."
+        }
       }
     },
-
     "Clearance": {
       "type": "object",
-      "required": ["source", "at"],
+      "required": [
+        "source",
+        "at"
+      ],
       "additionalProperties": false,
       "description": "How the completion of an out-of-band act was established. Clearance is asserted, never inferred (I16).",
       "properties": {
-        "source": { "enum": ["human_assertion", "runtime_inference", "timeout"] },
-        "actor": { "oneOf": [{ "$ref": "request.schema.json#/$defs/PrincipalId" }, { "type": "null" }] },
-        "at": { "type": "string", "format": "date-time" },
+        "source": {
+          "enum": [
+            "human_assertion",
+            "runtime_inference",
+            "timeout"
+          ]
+        },
+        "actor": {
+          "oneOf": [
+            {
+              "$ref": "request.schema.json#/$defs/PrincipalId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "runtime_observation": {
           "type": "object",
           "additionalProperties": true,
@@ -249,24 +606,52 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "source": { "enum": ["runtime_inference", "timeout"] } }, "required": ["source"] },
+          "if": {
+            "properties": {
+              "source": {
+                "enum": [
+                  "runtime_inference",
+                  "timeout"
+                ]
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
           "then": {
-            "properties": { "actor": { "type": "null" } },
+            "properties": {
+              "actor": {
+                "type": "null"
+              }
+            },
             "description": "The protocol never fabricates a person."
           }
         }
       ]
     },
-
     "ChainEntry": {
       "type": "object",
-      "required": ["height", "prev_digest", "digest"],
+      "required": [
+        "height",
+        "prev_digest",
+        "digest"
+      ],
       "additionalProperties": false,
-      "description": "Per-tenant hash chain. See signing.md §2.2 for the exact canonicalization and worked vectors.",
+      "description": "Per-tenant hash chain. See signing.md \u00a72.2 for the exact canonicalization and worked vectors.",
       "properties": {
-        "height": { "type": "integer", "minimum": 0, "description": "0-based position in this tenant's chain. Binding it prevents an entry being excised and the rest re-linked." },
-        "prev_digest": { "$ref": "request.schema.json#/$defs/Digest", "description": "64 zeros for the first receipt in a tenant." },
-        "digest": { "$ref": "request.schema.json#/$defs/Digest" }
+        "height": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0-based position in this tenant's chain. Binding it prevents an entry being excised and the rest re-linked."
+        },
+        "prev_digest": {
+          "$ref": "request.schema.json#/$defs/Digest",
+          "description": "64 zeros for the first receipt in a tenant."
+        },
+        "digest": {
+          "$ref": "request.schema.json#/$defs/Digest"
+        }
       }
     }
   }

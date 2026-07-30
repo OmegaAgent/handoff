@@ -152,5 +152,10 @@ steps:
           - path: kind
             equals: decision
           - path: via.grade_reached
-            one_of: [dispatched, delivered, seen, acted]
-            because: "§9.2 — the receipt records the grade the answering delivery reached"
+            one_of: [dispatched, delivered, seen, acted, null]
+            because: >
+              §7.2 and §9.2 — the receipt records the grade the answering delivery is *known* to
+              have reached. `null` is a legal and meaningful answer: it means nothing ever graded
+              that delivery. It is specifically not `dispatched`, which asserts that a transport
+              accepted the message, so rounding an ungraded delivery up to it would put a send on
+              the record that may never have happened.

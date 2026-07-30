@@ -216,3 +216,75 @@ async fn a_delivery_in_another_tenant_is_indistinguishable_from_one_that_never_e
     // §13: `404 …_not_found` instead of `403` wherever existence is itself sensitive.
     assert_eq!(status, 404, "{refused}");
 }
+
+#[tokio::test]
+async fn a_receipt_never_names_a_delivery_that_was_never_sent() {
+    // The defect this guards: the default ladder's second rung is `email`, a scaffold that
+    // transmits nothing and ends `suppressed` — and it is the newest delivery by the time anyone
+    // answers. Taking the newest open delivery put an email nobody sent onto the receipt as the one
+    // the person answered through, graded `dispatched`, which asserts a transport accepted it.
+    //
+    // A receipt is the artifact the whole product exists to make trustworthy, so a false claim here
+    // is the worst one available.
+    let deployment = Deployment::start("receipt-via", 18112).await;
+
+    let mut body = raise_body("run:receipt-via", "Approve the release?");
+    body["routing"] = serde_json::json!({
+        "targets": [{"kind": "role", "value": "editor"}],
+        "ladder": [
+            {"after": "PT0S", "channels": ["inapp"]},
+            {"after": "PT0S", "channels": ["email"]},
+        ],
+    });
+    let (status, raised) = post(&deployment.base, "/requests", MACHINE_A, "via-1", body).await;
+    assert_eq!(status, 201, "{raised}");
+    let request = raised["id"].as_str().expect("an id").to_string();
+
+    // Wait until the suppressed email is on the record, so the wrong answer is available to pick.
+    let mut suppressed = false;
+    for _ in 0..100 {
+        let (_, list) = get(
+            &deployment.base,
+            &format!("/requests/{request}/deliveries"),
+            MACHINE_A,
+        )
+        .await;
+        suppressed = list["data"]
+            .as_array()
+            .is_some_and(|d| d.iter().any(|x| x["state"] == "suppressed"));
+        if suppressed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        suppressed,
+        "the email rung never suppressed, so this proves nothing"
+    );
+
+    let (status, answered) = post(
+        &deployment.base,
+        &format!("/requests/{request}/answer"),
+        crate::harness::EDITOR_A,
+        "via-answer",
+        serde_json::json!({"values": {"decision": "approve"}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{answered}");
+
+    let (_, receipt) = get(
+        &deployment.base,
+        &format!("/requests/{request}/receipt"),
+        MACHINE_A,
+    )
+    .await;
+    assert_eq!(
+        receipt["via"]["channel"], "inapp",
+        "the answer arrived through the in-app surface, not through an email that was suppressed"
+    );
+    assert_eq!(
+        receipt["via"]["grade_reached"], "acted",
+        "§7.2 — the grade the answering delivery reached, not one invented for a delivery that \
+         never left the queue"
+    );
+}

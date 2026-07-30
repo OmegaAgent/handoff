@@ -159,3 +159,24 @@ new error code are additive.
 - **Cross-request batching** — one answer settling several waiting runtimes — needs a rule for how one
   answer produces N receipts without violating **I1**, and is not in this version.
 - **Receipt retention** is a policy field (`policy.schema.json`) with no protocol-mandated minimum.
+
+### Fixed — `via.grade_reached` may be null
+
+Found by a hostile review pass and confirmed reachable by C-14 itself.
+
+`via.grade_reached` was a required four-value enum, so a Server whose answering delivery had never
+been graded was **forced to invent a value**, and every implementation reached for `dispatched`.
+That value asserts that our transport accepted the message. Writing it for a delivery nothing ever
+graded puts a send on the receipt that may never have happened — in the one artifact whose whole
+purpose is to be evidence.
+
+`grade_reached` is now nullable. `null` means no grade was ever recorded, and a Server MUST NOT
+substitute `dispatched` for it.
+
+This was the fourth appearance of one shape in a single milestone: a channel's *ceiling* written as
+the grade *reached*; `failed()` and `suppressed()` reporting `dispatched`; an `unwrap_or` filling a
+`None` arm; and this. Three were implementation defects and were fixed as such. The fourth was not
+fixable in an implementation, because the schema could not express "no evidence" — which is why the
+type, and not the callers, was the thing that needed changing.
+
+**Zero evidence and the weakest evidence are different claims**, and a receipt may not blur them.

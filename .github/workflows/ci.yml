@@ -186,6 +186,23 @@ jobs:
     # Required. `continue-on-error` was removed when the first cases landed in H1 — a pipeline must
     # never report conformance it has not measured, and a suite that cannot fail a build is
     # decorative.
+    #
+    # Two directions are checked, and both are needed. The suite must go RED against a server that
+    # implements nothing, or it is measuring nothing. And it must go GREEN against `handoffd`, or
+    # the README's claim — that a service which cannot pass the open suite has a red build — is a
+    # sentence rather than a check. For a while only the first half was wired, which is how a
+    # governance instrument quietly becomes decorative.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
 
@@ -196,9 +213,9 @@ jobs:
         working-directory: core
         run: cargo build -p handoff-conformance
 
-      # Until the reference server passes the suite, the check that matters is the opposite one:
-      # that the suite reports red against a server which implements nothing. A suite written
-      # before its implementation only means something if it can be shown to fail.
+      # Half one: the suite must be able to report red. A suite written before its implementation
+      # only means something if it can be shown to fail against a server that does nothing —
+      # otherwise it would report the same green against a server that does the wrong thing.
       - name: The suite fails loudly against a server that implements nothing
         working-directory: core
         run: |
@@ -220,6 +237,32 @@ jobs:
             exit 1
           fi
           echo "The suite correctly reported non-conformance (exit ${rc})."
+
+      # Half two, and the one the README actually promises: the reference server must PASS. Without
+      # this the pipeline proves only that the suite can fail, and "a service that cannot pass the
+      # open suite has a red build" is a sentence nobody has wired to anything.
+      - name: The reference server passes the suite
+        run: |
+          # No pipe: `cmd | tee` reports tee's exit status, which is how a green build gets
+          # reported for a red run.
+          set +e
+          sh core/dev/run-conformance.sh > /tmp/conformance.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/conformance.out
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::handoffd does not pass the conformance suite."
+            exit 1
+          fi
+          grep -q '24/24 passing' /tmp/conformance.out || {
+            echo "::error::The suite exited 0 without reporting a full pass. Read the output above."
+            exit 1
+          }
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: omega
+          PGPASSWORD: omega
 
   spec-needs-conformance:
     name: a spec change must carry a conformance case
