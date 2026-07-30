@@ -38,16 +38,22 @@ relationships. None of that ships in a container, and this repository will not p
 
 ## Status
 
-**Milestone H0: publish the contract.** The repository is licensed, governable, and has CI. The
-protocol is being written. **Nothing here serves a request yet.**
+**Pre-release. The protocol runs; it has not been published, and there is no hosted service.**
+
+The reference server passes the conformance suite in full. Read `docs/hostile-review.md` before
+relying on any of this: an independent review pass found defects that are open at the time of
+writing, and `BACKLOG.md` states the gaps plainly rather than leaving them to be discovered.
 
 | Component | State |
 |---|---|
-| Licensing, governance, CI | Landed (this milestone) |
-| `spec/` — the normative protocol | In progress |
-| `core/` — the Rust reference implementation | Compiling skeletons. Every crate is a stub. |
-| `conformance/` — the test suite | Not started. Lands in H1, expected to fail against a stub. |
-| `sdk/python` — `handoff-human` | Exists, from the prior art. Reworked against the spec in H3. |
+| `spec/` — the normative protocol | v0.1, frozen. 21 invariants, OpenAPI 3.1, signing test vectors that reproduce. |
+| `conformance/` — the suite | 24 Level 1 cases + 1 Level 2. Written before the server, and demonstrably red against one that implements nothing. |
+| `core/` — the Rust reference implementation | `handoffd` passes **24/24**. |
+| `sdk/python` — `handoff-human` | 0.2.0. Standard library only. |
+| `sdk/ts` — `@handoffproto/sdk` | Zero runtime dependencies. |
+| `managed/` — the hosted adapter | Closed-source, unpublished. Refuses where a dependency does not exist rather than pretending. |
+
+Nothing has been published to crates.io, npm, or PyPI, and the package names are not yet reserved.
 | `sdk/ts` | Not started |
 | `ui/responder` — the standalone human-facing page | Not started |
 

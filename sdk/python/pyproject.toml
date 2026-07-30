@@ -1,7 +1,7 @@
 [project]
 name = "handoff-human"
 version = "0.2.0"
-description = "await human() for AI agents: page a real person, let them take the wheel, resume the run"
+description = "await human() for AI agents: one human answer, delivered exactly once as typed data, authorizing exactly one effect"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

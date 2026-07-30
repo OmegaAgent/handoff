@@ -1447,7 +1447,7 @@ Level 1 invariant, and C-17 is the only such case.
 | C-21 | 1 | Channel content matching a decision format does not settle a request; a channel declaring `can_authenticate_person: false` produces a provisional answer only | I16, I6 |
 | C-22 | 1 | All eight interaction patterns in `fixtures/use-cases/` are accepted and answerable with **no request-kind field anywhere in the wire traffic**. A page-state change alone produces no clearance receipt | I14, I16 |
 | C-23 | 1 | Drive every transition in §6.2 and §8.2. For each one, the state change and its event are observable together: no state exists whose event is missing, and no event exists whose state change was rolled back. Kill the Server between the state write and the event write → after restart, either both are present or neither is | I12 |
-| C-24 | 1 | Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `1e20` → accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
+| C-24 | 1 | Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `9007199254740991` (2^53 − 1) → accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
 
 Four notes for implementers:
 
