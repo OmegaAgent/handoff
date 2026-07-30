@@ -1261,6 +1261,38 @@ async fn redeliver(
     ))
 }
 
+/// Record evidence a channel reported **after** the send returned.
+///
+/// A synchronous send can only report what the transport said at the moment it took the message,
+/// which for a real channel is `dispatched` and nothing more. A provider's delivery receipt, or the
+/// person opening the surface, arrives later — so without this route every asynchronous channel
+/// stays at `dispatched` forever and the grade ladder of §7.2 is decorative.
+///
+/// # Who may call it, and what it cannot do
+///
+/// It takes its **own scope**, `handoff:deliveries:grade`, rather than reusing the routing scope.
+/// §7.4 already establishes the principle: overriding a ladder needs a separate scope from raising
+/// a request, because a key that can ask a question and one that can page the on-call at 3 a.m. are
+/// different blast radiuses. Asserting what a person did is a third one. A deployment hands this
+/// scope only to the credential its own provider webhooks authenticate as.
+///
+/// Three things it cannot do, in decreasing order of how much they would matter:
+///
+/// 1. **It cannot award `acted`.** `acted` means the person answered *through this delivery*
+///    (§7.2), which is established by an answer landing and by nothing else. If this route accepted
+///    it, a holder of this scope could write "they decided" onto a delivery with no decision behind
+///    it — no receipt would be minted, but the delivery record is what an escalation review reads.
+/// 2. **It cannot exceed the channel's declared ceiling**, because the store runs the same
+///    [`transition`](handoff_protocol::delivery::transition) every other delivery write runs. A
+///    caller reporting `seen` for an email delivery is refused, since email declares `delivered`.
+/// 3. **It cannot move a grade backwards**, for the same reason.
+///
+/// The residual risk, stated rather than glossed: a holder of this scope can inflate a delivery
+/// from `dispatched` to `delivered` on a channel capped there, and if that delivery is the one an
+/// answer arrives through, the receipt's `via.grade_reached` carries it. That is inherent to any
+/// channel-evidence ingress — the deployment is trusting its own provider webhooks — and it is why
+/// the scope is separate. It cannot reach `seen` or `acted`, which are the grades that assert
+/// something about a **person** rather than about a transport.
 async fn record_grade(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1268,22 +1300,22 @@ async fn record_grade(
     body: axum::body::Bytes,
 ) -> ApiResult {
     let principal = caller(&state, &headers).await?;
-    principal.require_scope("handoff:requests:route")?;
+    principal.require_scope("handoff:deliveries:grade")?;
     let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "delivery_grade", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
     let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
 
-    // Evidence a channel reports **after** the send returned: a provider's delivery receipt, or
-    // the person opening the surface. A synchronous send can only ever say what the transport said
-    // at the moment it was handed the message, so without this every asynchronous channel would
-    // stay at `dispatched` forever and the grade ladder of §7.2 would be decorative.
     let grade = match body.get("grade").and_then(|value| value.as_str()) {
         Some("delivered") => handoff_protocol::delivery::DeliveryGrade::Delivered,
         Some("seen") => handoff_protocol::delivery::DeliveryGrade::Seen,
-        // Neither of the other two is a channel's to report. `dispatched` is the send's own claim
-        // and is already recorded by the attempt that made it. `acted` means the person answered
-        // **through this delivery** (§7.2) — established by the answer landing and by nothing
-        // else, so accepting it here would let a caller put "they decided" on a delivery with no
-        // decision behind it.
+        // Neither of the other two is a channel's to report. `dispatched` is the send's own claim,
+        // already recorded by the attempt that made it; `acted` is the person's, and only an
+        // answer establishes it.
         Some(other @ ("dispatched" | "acted")) => {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
@@ -1303,38 +1335,51 @@ async fn record_grade(
         }
     };
 
-    // Tenant from the credential, never from the body (I13). The grade is clamped to what the
-    // channel declared it can prove and may only advance, both inside the store's transaction —
-    // so a provider claiming more than its channel declared is refused rather than believed.
-    let state_now = state.now();
-    if state
-        .store
-        .delivery(&principal.tenant_ref, id)
-        .await?
-        .is_none()
-    {
-        return Err(ProtocolError::new(
-            ErrorCode::RequestNotFound,
-            "no such delivery in this tenant",
-        )
-        .into());
-    }
-    state
-        .store
-        .advance_delivery_grade(&principal.tenant_ref, id, grade, state_now)
-        .await?;
-
-    let view = state
+    // Tenancy from the credential, never from the body (I13) — and never from possession of the
+    // delivery id, which is an identifier and not an authorization (§4.6, I17).
+    let now = state.now();
+    let current = state
         .store
         .delivery(&principal.tenant_ref, id)
         .await?
         .ok_or_else(|| {
+            // §13: `404 …_not_found` instead of `403` wherever existence is itself sensitive.
             ProtocolError::new(
                 ErrorCode::RequestNotFound,
                 "no such delivery in this tenant",
             )
         })?;
-    Ok(Api::ok(wire::delivery(&view)))
+
+    // Already at or past this grade: nothing to record, and **not an error**. Delivery is
+    // at-least-once and consumers dedupe (§16 rule 10), so a provider webhook will resend, and its
+    // delivery receipt routinely lands after the person has already opened the surface. Answering
+    // 4xx to a duplicate teaches a retrying provider to keep retrying forever; answering with the
+    // state it is already in is both true and idempotent (I20), with or without a caller's key.
+    let view = if current
+        .grade_reached
+        .is_some_and(|reached| reached >= grade)
+    {
+        current
+    } else {
+        state
+            .store
+            .advance_delivery_grade(&principal.tenant_ref, id, grade, now)
+            .await?;
+        state
+            .store
+            .delivery(&principal.tenant_ref, id)
+            .await?
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::RequestNotFound,
+                    "no such delivery in this tenant",
+                )
+            })?
+    };
+
+    let rendered = wire::delivery(&view);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
 }
 
 // ----------------------------------------------------------------------------------------- meta

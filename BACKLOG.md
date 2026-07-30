@@ -79,10 +79,15 @@ tested against a real Postgres because durability is not a property a fake can d
 6. **The managed delivery fleet has no transports.** `delivery.rs` declares what the fleet should be
    and refuses the two shapes that must never ship; the reviewed Slack app, the warmed SES identity,
    and the numbers are operational assets, not code.
-6a. **`advance_delivery_grade` has no HTTP route.** It is a store primitive, so later evidence — a
-   provider's delivery receipt, a person opening the surface — can only be recorded in-process. A
-   managed deployment drives it from its own webhook ingress and therefore needs a route, or every
-   delivery stays at `dispatched` forever and the grade ladder is decorative. Ask H4 for the route.
+6a. ~~`advance_delivery_grade` has no HTTP route.~~ **Done (H4).**
+   `POST /v1/deliveries/{delivery_id}/grade`, scope `handoff:requests:route`, tenant from the
+   credential. It accepts `delivered` and `seen` only: `acted` means the person answered *through
+   this delivery* and is established by an answer landing and nothing else, so accepting it would
+   let a routing key write "they decided" onto a delivery with no decision behind it; `dispatched`
+   is the send's own claim and is already recorded by the attempt that made it. **Still to do on
+   the managed side:** a webhook ingress that drives it from SES delivery notifications and Slack
+   events. Until that exists, managed deliveries stay at `dispatched` — the route is no longer the
+   blocker, the ingress is.
 7. **Wiring attestation needs an open port.** The receipt is sealed inside the answer transaction and
    nothing in `Store` takes a signer. It must be an upstream change, or the hosted tier produces
    receipts the open verifier cannot check — which is a vendor claim rather than evidence.

@@ -80,18 +80,39 @@ async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() 
     assert_eq!(graded["state"], "seen");
     assert_eq!(graded["grade_reached"], "seen");
 
-    // ---- A grade only ever advances (§7.1). `delivered` is now behind us.
-    let (status, backwards) = post_plain(
+    // ---- Reporting it again changes nothing and is not an error. Delivery is at-least-once and
+    // consumers dedupe (§16 rule 10), so a provider webhook resends; answering 4xx to a duplicate
+    // teaches it to retry forever.
+    let (status, repeated) = post_plain(
+        &deployment.base,
+        &format!("/deliveries/{delivery}/grade"),
+        MACHINE_A,
+        serde_json::json!({"grade": "seen"}),
+    )
+    .await;
+    assert_eq!(status, 200, "a repeated report is idempotent: {repeated}");
+    assert_eq!(repeated["grade_reached"], "seen");
+    assert_eq!(
+        repeated["attempts"], graded["attempts"],
+        "a duplicate must not append an attempt"
+    );
+
+    // ---- A grade already behind us is the same case, not a conflict. An SES delivery receipt
+    // routinely lands after the person has already opened the surface, and the delivery has
+    // genuinely reached at least `delivered` — so this is true, idempotent, and not a rejection.
+    let (status, late) = post_plain(
         &deployment.base,
         &format!("/deliveries/{delivery}/grade"),
         MACHINE_A,
         serde_json::json!({"grade": "delivered"}),
     )
     .await;
-    assert_ne!(
-        status, 200,
-        "a delivery that reached `seen` must not fall back to `delivered`: {backwards}"
+    assert_eq!(status, 200, "{late}");
+    assert_eq!(
+        late["grade_reached"], "seen",
+        "§7.1 — a delivery MUST NOT move backwards down the ladder"
     );
+    assert_eq!(late["state"], "seen");
 
     // ---- The refusals that matter.
     for (grade, why) in [
@@ -120,6 +141,66 @@ async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() 
     let (_, view) = get(&deployment.base, &format!("/requests/{request}"), MACHINE_A).await;
     assert_eq!(view["state"], "pending");
     assert!(view["receipt"].is_null());
+}
+
+#[tokio::test]
+async fn a_grade_report_replays_under_an_idempotency_key() {
+    // I20: every mutating operation is idempotent under a caller-supplied key. The advance itself
+    // is already idempotent by construction, so this checks the other half — that a retry with the
+    // key returns the *stored* response rather than re-deriving one.
+    let deployment = Deployment::start("grades-key", 18111).await;
+    let (_, raised) = post(
+        &deployment.base,
+        "/requests",
+        MACHINE_A,
+        "grade-key-1",
+        raise_body("run:grades-key", "Approve the release?"),
+    )
+    .await;
+    let request = raised["id"].as_str().expect("an id").to_string();
+
+    let mut delivery = String::new();
+    for _ in 0..100 {
+        let (_, list) = get(
+            &deployment.base,
+            &format!("/requests/{request}/deliveries"),
+            MACHINE_A,
+        )
+        .await;
+        if let Some(one) = list["data"]
+            .as_array()
+            .and_then(|d| d.iter().find(|x| x["state"] == "dispatched"))
+        {
+            delivery = one["id"].as_str().expect("an id").to_string();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(!delivery.is_empty(), "no delivery ever reached dispatched");
+
+    let (first_status, first) = post(
+        &deployment.base,
+        &format!("/deliveries/{delivery}/grade"),
+        MACHINE_A,
+        "grade-key-seen",
+        serde_json::json!({"grade": "seen"}),
+    )
+    .await;
+    let (again_status, again) = post(
+        &deployment.base,
+        &format!("/deliveries/{delivery}/grade"),
+        MACHINE_A,
+        "grade-key-seen",
+        serde_json::json!({"grade": "seen"}),
+    )
+    .await;
+
+    assert_eq!(first_status, 200, "{first}");
+    assert_eq!(again_status, first_status);
+    assert_eq!(
+        again, first,
+        "the replay returns what the first call returned"
+    );
 }
 
 #[tokio::test]
