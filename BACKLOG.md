@@ -45,12 +45,11 @@ Still open before the first public push, in order:
    trademark and use it consistently from here. Do not rewrite the published grant.
 4. **Decide whether the conformance suite gates a managed deploy from day one or from v1.0.**
    Day one is stronger and slower. A gate added later is a gate that never gets added.
-5. **Turn off `continue-on-error` on the conformance CI job** the moment the first case lands.
 
 ## H5 — the managed adapter and the cutover
 
 Landed in `managed/` (closed, `UNLICENSED`, `publish = false`) and `docs/cutover-plan.md`. Eight seam
-ports implemented against the Ωmegas control plane over HTTP; 75 tests; the outbox and reconciler are
+ports implemented against the Ωmegas control plane over HTTP; 76 tests; the outbox and reconciler are
 tested against a real Postgres because durability is not a property a fake can demonstrate.
 
 **Blocking, and needing an owner decision rather than a schedule:**
