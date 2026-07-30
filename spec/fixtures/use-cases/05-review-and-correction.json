@@ -1,0 +1,85 @@
+{
+  "pattern": "review-and-correction",
+  "note": "A document field seeded with the agent's draft and validated against a schema. The person edits the value; the receipt records the version they saw.",
+  "raise": {
+    "waiter_ref": "run:0198f2d9",
+    "urgency": "normal",
+    "prompt": {
+      "title": "Check this extracted invoice before I file it",
+      "body": "Two of the line items were low-confidence."
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "invoice",
+            "label": "Invoice",
+            "type": "document",
+            "required": true,
+            "schema_ref": "https://schemas.example.com/invoice-v2.json",
+            "initial": {
+              "vendor": "Acme Corp",
+              "total": "2400.00",
+              "lines": [
+                {
+                  "sku": "A-1",
+                  "qty": 2,
+                  "amount": "1200.00"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "capabilities": [],
+      "authority": {
+        "min_role": "editor",
+        "auth_strength": "session",
+        "quorum": 1,
+        "forbid_requester": true
+      }
+    },
+    "ttl": "PT8H",
+    "ttl_policy": {
+      "on_expiry": "default",
+      "default_answer": {
+        "invoice": {
+          "vendor": "Acme Corp",
+          "total": "2400.00",
+          "lines": [
+            {
+              "sku": "A-1",
+              "qty": 2,
+              "amount": "1200.00"
+            }
+          ]
+        }
+      }
+    },
+    "presentation_binding": "strict",
+    "metadata": {
+      "hint": "review"
+    }
+  },
+  "answer": {
+    "values": {
+      "invoice": {
+        "vendor": "Acme Corporation",
+        "total": "2400.00",
+        "lines": [
+          {
+            "sku": "A-1",
+            "qty": 2,
+            "amount": "1200.00"
+          }
+        ]
+      }
+    },
+    "rendered_digest": "sha256:7e6d5c4b3a291807f6e5d4c3b2a190817e6d5c4b3a291807f6e5d4c3b2a19081"
+  },
+  "expect": {
+    "state": "answered",
+    "stale_presentation_rejected_with": "presentation_stale"
+  }
+}

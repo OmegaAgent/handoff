@@ -1,0 +1,166 @@
+id: C-16
+title: An unknown requires version or field type is rejected and nothing is created
+level: 1
+invariants: [I21]
+spec:
+  - "§5.2 — requires.v is REQUIRED and partial acceptance is forbidden"
+  - "§5.3.2 — an unknown field type is 400, never a degraded text input"
+  - "§19 — versioned envelopes fail closed"
+  - "§18 C-16"
+rationale: >
+  Rejecting is always recoverable; a misrepresented decision is not. A request the Server only
+  partly understands is a request the person will be shown incompletely, and the receipt would then
+  record consent to something nobody saw. The load-bearing half of this case is the second step of
+  each pair: it is easy to return a 400 and easy to have already written the row, and only a listing
+  proves nothing was created.
+
+requires:
+  principals: [machine_a]
+
+steps:
+  - name: raise with a requires envelope version this Server does not implement
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c16-v2-${run_id}"
+      body:
+        waiter_ref: "run:c16-version-${run_id}"
+        prompt:
+          title: "A request from a future client"
+        requires:
+          v: 2
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 400
+        body:
+          - path: error.code
+            equals: unsupported_requires_version
+            because: "§5.2 — a Server that does not implement the declared version rejects the raise"
+
+  - name: and no request was created
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c16-version-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data
+            length: 0
+            because: >
+              §5.2 — partial acceptance, creating the request with unrecognized fields dropped, is
+              forbidden. A 400 that still wrote a row is the failure this assertion exists for.
+
+  - name: raise with a field type this Server cannot draw
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c16-field-${run_id}"
+      body:
+        waiter_ref: "run:c16-field-${run_id}"
+        prompt:
+          title: "Sign here"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: signature
+                label: "Draw your signature"
+                type: handwriting
+                required: true
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 400
+        body:
+          - path: error.code
+            equals: unsupported_field_type
+            because: >
+              §5.3.2 — a Server MUST NOT degrade an unrecognized field to a text input. A field the
+              surface cannot draw is a field the person cannot answer, and rendering it anyway
+              produces a receipt that misstates what was asked.
+
+  - name: and no request was created for that either
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c16-field-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data
+            length: 0
+
+  - name: raise with a capability type this Server cannot render
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c16-cap-${run_id}"
+      body:
+        waiter_ref: "run:c16-capability-${run_id}"
+        prompt:
+          title: "Take the wheel"
+        requires:
+          v: 1
+          answer:
+            fields: []
+          capabilities:
+            - handle: "hg_01K3M7QW8ZC4YRXB2N6VD9FTHG"
+              type: holographic_projection
+              scope: drive
+          authority: {min_role: admin, auth_strength: session}
+      expect:
+        status: 400
+        body:
+          - path: error.code
+            equals: unsupported_capability_type
+            because: "§19 — a capability nobody can render is a request nobody can answer"
+
+  - name: and no request was created for that either
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c16-capability-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data
+            length: 0
+
+  - name: what this Server does accept is discoverable rather than guessed
+    http:
+      method: GET
+      path: /meta
+      as: anonymous
+      expect:
+        status: 200
+        body:
+          - path: protocol_version
+            equals: "0.1"
+          - path: field_types
+            length_at_least: 1
+            because: >
+              §19 — a client that sees a type it needs missing from field_types knows the raise
+              will fail closed before it tries
+          - path: conformance_level
+            one_of: [1, 2]

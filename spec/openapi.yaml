@@ -1,0 +1,4197 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://spec.openapis.org/oas/3.1/dialect/base
+
+info:
+  title: Handoff Protocol
+  version: 0.1.0
+  summary: An open wire protocol for asking a human to decide or act, and for getting the answer back to a process that may have died in the meantime.
+  description: |
+    Handoff is a human-intervention protocol. A machine principal *raises* a request describing what
+    it needs (`requires.answer` — the shape of the answer; `requires.capabilities` — surfaces the human
+    must be handed in order to answer; `requires.authority` — who is entitled to answer). Handoff
+    routes it to people, a human *answers* it, and an immutable *receipt* plus a spendable
+    *authorization* are minted in the same transaction. The waiting process is a durable server-side
+    row, not a client-side loop, so a client may die and re-attach without losing the answer.
+
+    ## Design rules that the whole contract depends on
+
+    - **No `kind` enum.** There is exactly one request type. Behaviour is driven by the declaration,
+      never by a discriminator, so a new interaction type adds zero branches to a conforming server.
+    - **First-writer-wins.** Every settle operation is conditional on `state = "pending"`. A conflicting
+      second answer is a `409` that changes nothing and returns the receipt that already exists.
+    - **A capability is an opaque handle, never a URL by value.** No resolvable address for a
+      capability appears in a request, a receipt, a delivery, a signal, or any log. The only place a
+      URL is materialized is the authenticated resolve endpoint, called by the human's own client.
+    - **Secrets travel out of band.** `secret`-typed field values go to a declared sink; the answer
+      carries only `{"provided": true}`.
+    - **Fail closed.** An unrecognized `requires.v`, field `type`, or capability `type` is a `400` and
+      creates nothing. A declaration a renderer cannot draw is a request a human cannot answer.
+    - **A raise never fails because a channel is down.** Delivery is fire-and-forget with respect to
+      raising; deliveries come back `queued`.
+    - **Additive is not breaking.** Clients MUST ignore unknown response fields. Keys prefixed `x-` in
+      `metadata` and `requires` are stored verbatim, returned verbatim, and never interpreted.
+
+    ## Transport
+
+    HTTPS only, JSON only, UTF-8. Timestamps are RFC 3339 in UTC. Durations are ISO-8601 strings
+    (`PT15M`, `PT4H`, `P1D`). Ids are `<prefix>_<26-character Crockford base32 ULID>` — time-sortable
+    and safe to log.
+
+    ## Conformance
+
+    A server is **Level 1** conformant when it implements every operation in this document except the
+    `continuation` extension (`resume_ref` / `resume_payload`, which are **Level 2**). `GET /meta`
+    reports which level and which extensions a deployment supports, so a conformance runner discovers
+    support rather than assuming it.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  contact:
+    name: Handoff Protocol
+    url: https://handoff.example.com/docs
+
+externalDocs:
+  description: Protocol guide, error index, and the conformance suite.
+  url: https://handoff.example.com/docs
+
+servers:
+  - url: https://{host}/v1
+    description: |
+      Any conforming deployment. The major version is in the path: a new major ships alongside its
+      predecessor rather than replacing it. Managed and self-hosted deployments differ only in `host`.
+    variables:
+      host:
+        default: handoff.example.com
+        description: Host of the Handoff deployment. Self-hosted deployments substitute their own.
+
+tags:
+  - name: requests
+    description: Raising, reading, amending, routing, and settling human-intervention requests.
+  - name: waiters
+    description: The durable server-side wait. Signals, acks, and re-attachment after client death.
+  - name: receipts
+    description: Immutable, hash-chained records of what was decided, by whom, and on what basis.
+  - name: authorizations
+    description: What an agent spends. One decision authorizes one effect, idempotent per effect key.
+  - name: capabilities
+    description: Opaque grant handles, and the authenticated exchange of a handle for a live session.
+  - name: deliveries
+    description: Per-channel attempts to reach a person, with graded evidence of what actually happened.
+  - name: meta
+    description: Unauthenticated capability discovery for conformance runners and clients.
+
+security:
+  - machineKey: []
+  - humanSession: []
+  - humanBearer: []
+
+paths:
+  /requests:
+    post:
+      tags: [requests]
+      operationId: raiseRequest
+      summary: Raise a human-intervention request
+      description: |
+        Creates a `pending` request, registers its durable waiter, and enqueues rung-0 deliveries.
+        Returns `201` on create and `200` on an idempotent replay — the status code is how a caller
+        distinguishes "I asked" from "I already asked", and the replay returns the stored
+        representation in whatever state it is in now, including `answered` with its receipt.
+
+        A raise never blocks on delivery: deliveries come back `queued`. If no channel can be
+        attempted at all the request is still created and `503 delivery_unavailable` is returned only
+        when the server cannot even queue — never as a way of discarding the ask.
+      security:
+        - machineKey: []
+      x-required-scopes: [handoff:requests:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RaiseRequest'
+      responses:
+        "201":
+          description: The request was created.
+          headers: &rateLimitHeaders
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "200":
+          description: |
+            Idempotent replay. The same `Idempotency-Key` with the same body digest, or a `dedupe_key`
+            that matches a request that is still `pending`.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+        "503":
+          $ref: '#/components/responses/DeliveryUnavailable'
+
+    get:
+      tags: [requests]
+      operationId: listRequests
+      summary: List requests
+      description: |
+        Cursor-paginated over the ULID, so results sort by creation time. Listing is scoped to the
+        caller's org and to what the caller may see; there is no public list. A `pending` request whose
+        *attempt* has lapsed remains listed — a lapsed attempt changes `urgency_state` from `attention`
+        to `waiting`, never visibility.
+      x-required-scopes: [handoff:requests:read]
+      parameters:
+        - name: state
+          in: query
+          description: Filter by lifecycle state. Repeat the parameter to match more than one state.
+          schema:
+            $ref: '#/components/schemas/RequestState'
+        - name: waiter_ref
+          in: query
+          description: Filter to one waiter. Matched byte-for-byte; the server never parses the value.
+          schema:
+            type: string
+            maxLength: 512
+        - name: assignee
+          in: query
+          description: Filter to requests a given principal is a delivery target of.
+          schema:
+            type: string
+        - name: channel
+          in: query
+          description: Filter to requests with at least one delivery on this channel.
+          schema:
+            type: string
+        - name: created_after
+          in: query
+          description: Inclusive lower bound on `created_at`.
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          description: Exclusive upper bound on `created_at`.
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        "200":
+          description: A page of requests.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestList'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    get:
+      tags: [requests]
+      operationId: getRequest
+      summary: Get a request, optionally long-polling for a state change
+      description: |
+        Returns immediately when the request is not `pending`. When it is `pending` and `wait` is
+        supplied, the server holds the connection until the state changes or `min(wait, 30)` seconds
+        elapse, then returns the current representation with `200`.
+
+        Hanging up does not affect anything: the durable wait is a server-side row, and the long-poll
+        is one of two transports that can carry its signal. A client that dies mid-poll re-attaches
+        with `POST /waiters/{waiter_ref}/reattach`.
+      x-required-scopes: [handoff:requests:read]
+      parameters:
+        - $ref: '#/components/parameters/Wait'
+      responses:
+        "200":
+          description: The current representation of the request.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/amend:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: amendRequest
+      summary: Amend a pending request in place
+      description: |
+        Merges `prompt` and `requires` forward, bumps `version`, and re-renders open deliveries. The
+        request id, the waiter, and any in-progress attempt survive.
+
+        Amendment is "the same ask, better described". If the change touches anything the answer is
+        *about* — the amount, the recipient, the set of choices — it is a **supersession**, not an
+        amendment, because a human who already saw the old wording must not accidentally authorize the
+        new one.
+
+        `409 request_in_progress` once any delivery has reached `acted`: somebody is answering the
+        version they were shown, and the text underneath them does not change.
+      security:
+        - machineKey: []
+      x-required-scopes: [handoff:requests:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AmendRequest'
+      responses:
+        "200":
+          description: The amended request, with `version` incremented.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: cancelRequest
+      summary: Withdraw a pending request
+      description: |
+        Moves the request to `cancelled`, cancels open deliveries, and signals the waiter. The `reason`
+        is shown to any human who is mid-answer.
+
+        **The human always wins the race.** A cancel that arrives after an answer landed returns
+        `409 already_answered` with the existing receipt and changes nothing. A machine changing its
+        mind a millisecond after a person clicked must never discard that person's work.
+      security:
+        - machineKey: []
+      x-required-scopes: [handoff:requests:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        "200":
+          description: The cancelled request.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/supersede:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: supersedeRequest
+      summary: Replace a pending request with a materially different one
+      description: |
+        Links `superseded_by` in both directions, cancels open deliveries, and signals the waiter with
+        `{type: "superseded"}` so a human looking at the old surface is redirected to the successor.
+        The successor must already exist and still be `pending`.
+
+        Use this — never `amend` — whenever the change touches what the answer is about. An answer
+        already given against the old request stays valid and wins the race (`409 already_answered`).
+      security:
+        - machineKey: []
+      x-required-scopes: [handoff:requests:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupersedeRequest'
+      responses:
+        "200":
+          description: The superseded request, carrying `superseded_by`.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/escalate:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: escalateRequest
+      summary: Advance the routing ladder
+      description: |
+        Fires the next ladder rung (or the named `rung`), minting **deliveries** — never a new request.
+        One intervention, one decision, one receipt, however many people were paged along the way.
+
+        Requires the `handoff:requests:route` scope, which default keys do not have. A compromised key
+        that can ask a question is a very different blast radius from one that can page the on-call at
+        3 a.m.
+      security:
+        - machineKey: []
+      x-required-scopes: [handoff:requests:route]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EscalateRequest'
+      responses:
+        "200":
+          description: The request, with the new rung's deliveries attached.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+        "503":
+          $ref: '#/components/responses/DeliveryUnavailable'
+
+  /requests/{request_id}/reassign:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: reassignRequest
+      summary: Retarget a pending request at a different person, role, group, or rotation
+      description: |
+        Cancels open deliveries aimed at the previous target and mints new ones for `to`. Reassignment
+        is an operation, not a request type — there is no `kind: "reassign"` anywhere in this protocol.
+        A human who wants the same thing from inside the answer flow uses the `delegate` disposition on
+        `POST /requests/{request_id}/answer` instead.
+
+        Requires `handoff:requests:route` because it decides who gets paged.
+      security:
+        - machineKey: []
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: [handoff:requests:route]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReassignRequest'
+      responses:
+        "200":
+          description: The request, retargeted.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/attempt:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: armAttempt
+      summary: Arm or re-arm the attempt clock
+      description: |
+        The attempt clock means "a specific human is expected to be doing this right now"; the request
+        clock means "this ask is still worth answering". They are separate on purpose: **the attempt
+        expires, the request does not.**
+
+        Arming sets `attempt_expires_at` to now + `ttl` (default `attempt_ttl`, itself defaulting to
+        `PT15M`). Re-arming always starts a fresh window — a later challenge step never inherits a
+        near-expired countdown. On lapse the waiter is nudged exactly once with an `attempt_lapsed`
+        signal and the request stays `pending`, listable, and answerable at its canonical URL.
+      x-required-scopes: [handoff:requests:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttemptRequest'
+      responses:
+        "200":
+          description: The request, with `attempt_expires_at` set.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Request'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/answer:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    post:
+      tags: [requests]
+      operationId: answerRequest
+      summary: Settle a request — human principals only
+      description: |
+        The write is conditional on `state = "pending"`. If it matches, the server mints an immutable
+        receipt and (unless `partial`) an authorization in the same transaction, signals the waiter,
+        and cancels open deliveries. If it does not match, the server inspects the current state and
+        returns a **specific** `409` — `already_answered` with the existing receipt,
+        `request_expired`, `request_cancelled`, or `request_superseded` with `superseded_by`. Never a
+        silent overwrite, and never a `200` carrying a failure flag.
+
+        A retried click is not a conflict: the same `Idempotency-Key` as the answer that landed returns
+        `200` with the original receipt.
+
+        **Only human principals may answer.** A machine key gets `403 requester_may_not_answer` — by
+        principal *type*, not by role. The party that asked cannot be the party that answers.
+
+        **`secret`-typed fields carry only `{"provided": true}` here.** The values themselves went to
+        the declared sink (`POST /sinks/{sink_ref}/values`). A raw value posted against a `secret` field
+        is `422 answer_validation_failed`.
+
+        `partial: true` drives progressive disclosure — password, then OTP, as one request rather than
+        two asks. The server amends the field set to the next step, re-arms the attempt clock fresh,
+        appends a step to the eventual receipt, and does **not** signal the waiter: the agent never
+        learns there was an intermediate step.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerRequest'
+      responses:
+        "200":
+          description: |
+            The request is settled (or, when `partial` is true, advanced to its next step). The
+            `authorization` is `null` for a partial answer and for any answer whose disposition is
+            not `decide`.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/receipt:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    get:
+      tags: [receipts]
+      operationId: getRequestReceipt
+      summary: Get the receipt for a settled request
+      description: |
+        `404 request_not_found` while the request is still `pending` — a receipt exists only once a
+        decision has been made, whether by a person or by an expiry policy.
+      x-required-scopes: [handoff:requests:read]
+      responses:
+        "200":
+          description: The receipt.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Receipt'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /requests/{request_id}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/RequestIdPath'
+    get:
+      tags: [deliveries]
+      operationId: listRequestDeliveries
+      summary: List every delivery attempted for a request
+      description: |
+        Every rung of every ladder, in creation order, with each delivery's own attempt log. This is
+        the answer to "did anyone actually get paged, and on what" at 3 a.m.
+      x-required-scopes: [handoff:requests:read]
+      responses:
+        "200":
+          description: The deliveries for this request.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /receipts:
+    get:
+      tags: [receipts]
+      operationId: listReceipts
+      summary: Export receipts for the caller's org
+      description: |
+        Cursor-paginated, org-scoped, ordered by receipt id (and therefore by mint time). This is the
+        audit export: it is deliberately a separate scope from reading requests, because "can ask a
+        question" and "can read every decision this org has ever made" are different powers.
+      x-required-scopes: [handoff:receipts:read]
+      parameters:
+        - name: created_after
+          in: query
+          description: Inclusive lower bound on `decided_at`.
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          description: Exclusive upper bound on `decided_at`.
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        "200":
+          description: A page of receipts.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptList'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /receipts/chain-head:
+    get:
+      tags: [receipts]
+      operationId: getReceiptChainHead
+      summary: Get the current head of the org's receipt hash chain
+      description: |
+        Every receipt carries `chain.prev_digest`, linking it to its predecessor in the same org. The
+        head is what an external verifier records so that any later rewrite of history is detectable:
+        re-walk the chain from a previously exported head and the digests must still agree.
+
+        Tamper-evidence without key management. Detached signatures and external anchoring are out of
+        scope for this version.
+
+        This path is reserved: `chain-head` is not a valid receipt id, so it can never collide with
+        `GET /receipts/{receipt_id}`.
+      x-required-scopes: [handoff:receipts:read]
+      responses:
+        "200":
+          description: The chain head as of `as_of`.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainHead'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /receipts/{receipt_id}:
+    parameters:
+      - $ref: '#/components/parameters/ReceiptIdPath'
+    get:
+      tags: [receipts]
+      operationId: getReceipt
+      summary: Get one receipt
+      description: |
+        Receipts are append-only. There is no update or delete operation in this protocol, and a
+        conforming implementation MUST reject them at the storage layer too. A correction is a new
+        receipt with `kind: "correction"` and `corrects` pointing at the receipt it amends.
+      x-required-scopes: [handoff:receipts:read]
+      responses:
+        "200":
+          description: The receipt.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Receipt'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /waiters/{waiter_ref}/signals:
+    parameters:
+      - $ref: '#/components/parameters/WaiterRefPath'
+    get:
+      tags: [waiters]
+      operationId: pollWaiterSignals
+      summary: Poll a waiter's unacked signals, optionally long-polling
+      description: |
+        Returns every signal enqueued for this waiter that has not been acked. Signals are a **queue**,
+        not a flag, so an `attempt_lapsed` nudge can never overwrite a subsequent `answered`.
+
+        **Reading a signal does not consume it.** Consumption is `POST /signals/{signal_id}/ack`. That
+        two-step is the exactly-once hinge: at-least-once delivery plus an idempotent ack equals
+        effectively-once application. A client that reads a signal and then crashes has not received it.
+
+        With `wait`, the server holds the connection until a signal is available or `min(wait, 30)`
+        seconds elapse, and returns `204` when the window closes with nothing pending.
+      x-required-scopes: [handoff:waiters:wait]
+      parameters:
+        - $ref: '#/components/parameters/Wait'
+      responses:
+        "200":
+          description: One or more unacked signals.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalList'
+        "204":
+          description: The long-poll window elapsed with nothing pending. Poll again.
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /waiters/{waiter_ref}/reattach:
+    parameters:
+      - $ref: '#/components/parameters/WaiterRefPath'
+    post:
+      tags: [waiters]
+      operationId: reattachWaiter
+      summary: Re-attach to a waiter after the client's own process died
+      description: |
+        Returns the waiter's state, its still-open requests, and every unacked signal, and re-arms the
+        lease. This is the operation that makes the wait survive the waiting process: the wait was
+        never in that process to begin with.
+
+        A `leased` waiter whose heartbeat lapsed is `orphaned`; re-attaching returns it to `armed`
+        without losing a single signal.
+      x-required-scopes: [handoff:waiters:wait]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      responses:
+        "200":
+          description: The waiter's state and its unacked signals.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReattachResult'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /signals/{signal_id}/ack:
+    parameters:
+      - $ref: '#/components/parameters/SignalIdPath'
+    post:
+      tags: [waiters]
+      operationId: ackSignal
+      summary: Acknowledge a signal and stop its redelivery
+      description: |
+        Idempotent: acking twice returns `200` both times, with `first_ack` true then false, and stops
+        redelivery exactly once.
+
+        `applied: false` with a `reason` is **not an error**. It records that the runtime received the
+        decision but could not act on it — a fact the audit should hold rather than swallow.
+      x-required-scopes: [handoff:waiters:wait]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AckRequest'
+      responses:
+        "200":
+          description: The signal is acked.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AckResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /signals/{signal_id}/attempts:
+    parameters:
+      - $ref: '#/components/parameters/SignalIdPath'
+    get:
+      tags: [waiters]
+      operationId: listSignalAttempts
+      summary: List callback attempts made for a signal
+      description: |
+        Every outbound callback attempt with its status code, duration, outcome, and error. A webhook
+        you cannot inspect is a webhook you cannot debug at 3 a.m.
+      x-required-scopes: [handoff:waiters:wait]
+      responses:
+        "200":
+          description: The attempt log for this signal.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackAttemptList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /authorizations/{authorization_id}:
+    parameters:
+      - $ref: '#/components/parameters/AuthorizationIdPath'
+    get:
+      tags: [authorizations]
+      operationId: getAuthorization
+      summary: Get an authorization
+      description: |
+        The receipt records what was decided; the authorization is what the agent spends. Reading it
+        never changes its state — only `redeem` does.
+      x-required-scopes: [handoff:requests:read]
+      responses:
+        "200":
+          description: The authorization.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Authorization'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /authorizations/{authorization_id}/redeem:
+    parameters:
+      - $ref: '#/components/parameters/AuthorizationIdPath'
+    post:
+      tags: [authorizations]
+      operationId: redeemAuthorization
+      summary: Spend an authorization against one effect
+      description: |
+        Idempotent per `effect_key`: replaying the same key returns `200` with `first_redemption:
+        false`, so a retried agent turn cannot double-spend. This is the whole point — a replayed run
+        must not send the customer a second refund.
+
+        `409 authorization_spent` when a `single_use` authorization is redeemed with a *different*
+        `effect_key`. `409 effect_digest_mismatch` when `bound_to.effect_digest` disagrees with the
+        supplied `effect_digest` — an approval of "refund $2,400" cannot be spent on "refund $24,000".
+      security:
+        - machineKey: []
+      x-required-scopes: [handoff:authorizations:redeem]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemRequest'
+      responses:
+        "200":
+          description: The authorization is redeemed against this effect key.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedeemResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /grants/{handle}:
+    parameters:
+      - $ref: '#/components/parameters/GrantHandlePath'
+    get:
+      tags: [capabilities]
+      operationId: getCapabilityGrant
+      summary: Read a capability grant declaration before accepting it
+      description: |
+        This is what the human-facing surface shows **before** the human accepts. It carries the full
+        `blast_radius` and its digest, and no resolvable address of any kind: the handle is a database
+        pointer, not a credential.
+
+        `blast_radius.summary` MUST be rendered to the human before the control that resolves the
+        grant. That is a conformance point, not a suggestion — a person accepting a grant is accepting
+        a scope of consequence they would otherwise be unable to see.
+
+        Human session only. A machine principal never resolves, and never needs to read, a capability.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      responses:
+        "200":
+          description: The grant declaration.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityGrant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "410":
+          $ref: '#/components/responses/Gone'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+    delete:
+      tags: [capabilities]
+      operationId: revokeCapabilityGrant
+      summary: Revoke a capability grant
+      description: |
+        Closes every open session on the grant and prevents new ones. Revocation is a single write, and
+        it is bounded for sessions already open by the lease interval — a client that stops being able
+        to renew loses the surface within one lease period.
+
+        Revocation is also implicit when the request goes terminal. There is no state in which a
+        terminal request still hands out live capabilities.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeGrantRequest'
+      responses:
+        "204":
+          description: The grant is revoked. Repeating the call is a no-op and also returns `204`.
+          headers: *rateLimitHeaders
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /grants/{handle}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/GrantHandlePath'
+    post:
+      tags: [capabilities]
+      operationId: resolveCapabilityGrant
+      summary: Exchange a grant handle for a live session
+      description: |
+        The only place in the protocol where a resolvable address is materialized, and the only place
+        identity, role, scope, TTL, and blast radius are checked. Called by the human's own client,
+        never by the agent, and authenticated with an ordinary human session — never with the handle
+        itself.
+
+        The returned `transport.url` is **minted at resolve time, single-session, short-lived, and MUST
+        NOT be persisted.** It is never written to a protocol table, never appended to an event, never
+        placed in a message, and never reaches a model's context.
+
+        Checks, in order, each of which has its own error:
+        1. the request exists and is still `pending` — a terminal request resolves nothing;
+        2. the grant is neither expired (`410 capability_expired`) nor revoked;
+        3. the caller is a member of the grant's tenancy (`403 insufficient_authority`);
+        4. the caller's role meets the minimum for **each requested scope** — `drive` is strictly
+           higher than `view`, because driving a shared authenticated surface is not watching one;
+        5. binding — the grant is unbound (bind now) or already bound to this caller, else
+           `409 grant_already_held` unless `max_holders > 1`;
+        6. `accepted_blast_radius_digest` matches the grant's current `blast_radius_digest`, else
+           `409 blast_radius_mismatch`. The human cannot be handed something different from what they
+           were shown.
+
+        Every successful resolve appends a receipt event, so taking control is never possible without
+        leaving a record of who took it, when, and over what.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantSessionRequest'
+      responses:
+        "200":
+          description: A live session. Renew before `lease_until` or the session closes.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantSession'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "410":
+          $ref: '#/components/responses/Gone'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /grants/{handle}/sessions/{session_ref}/renew:
+    parameters:
+      - $ref: '#/components/parameters/GrantHandlePath'
+      - $ref: '#/components/parameters/SessionRefPath'
+    post:
+      tags: [capabilities]
+      operationId: renewGrantSession
+      summary: Renew a session lease
+      description: |
+        Re-checks revocation, expiry, binding, and the caller's **current** role, so a role removed
+        mid-session takes effect within one lease period. Renewal is also the release signal: a client
+        that stops renewing closes the session with `lease_lapsed`, and the receipt records the real
+        held duration rather than an optimistic one.
+
+        Renew after `renew_after_ms`, not at the last moment.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      responses:
+        "200":
+          description: The lease is extended.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewResult'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "410":
+          $ref: '#/components/responses/Gone'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /grants/{handle}/sessions/{session_ref}:
+    parameters:
+      - $ref: '#/components/parameters/GrantHandlePath'
+      - $ref: '#/components/parameters/SessionRefPath'
+    delete:
+      tags: [capabilities]
+      operationId: releaseGrantSession
+      summary: Release a session
+      description: |
+        The explicit "I'm done" that closes the session with `released` rather than waiting for the
+        lease to lapse. The grant survives and may be resolved again while it is still valid; only the
+        session ends.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      responses:
+        "204":
+          description: The session is closed. Repeating the call is a no-op and also returns `204`.
+          headers: *rateLimitHeaders
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /sinks/{sink_ref}/values:
+    parameters:
+      - $ref: '#/components/parameters/SinkRefPath'
+    post:
+      tags: [requests]
+      operationId: submitSinkValues
+      summary: Submit secret values out of band
+      description: |
+        Where `secret`-typed values go. They never enter the request row, the receipt, the event log, a
+        waiter signal, or the answer body — the answer carries only `{"provided": true}` per field.
+
+        Keys MUST be declared `requires.answer.fields` names on the request that owns this sink;
+        undeclared keys are rejected with `400 invalid_request` rather than forwarded. A surface cannot
+        smuggle arbitrary keys through to the runtime.
+
+        Values MUST NOT be logged, echoed back in any response, included in any error message, or
+        placed in a URL or query string. A conforming implementation writes them to the runtime-owned
+        sink and forgets them.
+
+        This protocol defines the sink **seam** and ships no default sink implementation: the values
+        travel a channel the runtime owns. A default would be a credential-custody product wearing a
+        protocol's clothes.
+
+        Human session only.
+      security:
+        - humanSession: []
+        - humanBearer: []
+      x-required-scopes: []
+      x-no-log: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SinkValuesRequest'
+      responses:
+        "202":
+          description: |
+            The sink accepted the named keys. The response echoes **names only**, never values, and
+            `state` is the sink's own opaque progress label.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SinkValuesResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /deliveries/{delivery_id}:
+    parameters:
+      - $ref: '#/components/parameters/DeliveryIdPath'
+    get:
+      tags: [deliveries]
+      operationId: getDelivery
+      summary: Get one delivery
+      description: |
+        `grade_reached` is graded evidence, and the grades are not interchangeable: `dispatched` means
+        our transport accepted it, `delivered` means the channel says it reached the person's endpoint,
+        `seen` means the person opened the request surface **authenticated**, and `acted` means the
+        person answered through this delivery. A channel declares its `max_grade` and whether it can
+        authenticate a person, so nobody accidentally treats a phone call as consent.
+      x-required-scopes: [handoff:requests:read]
+      responses:
+        "200":
+          description: The delivery.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delivery'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /deliveries/{delivery_id}/redeliver:
+    parameters:
+      - $ref: '#/components/parameters/DeliveryIdPath'
+    post:
+      tags: [deliveries]
+      operationId: redeliverDelivery
+      summary: Queue another attempt for a delivery
+      description: |
+        Manual redelivery, for when a channel swallowed a message and nobody was paged. Queues a new
+        attempt on the same delivery; it never mints a new request and never resets the receipt.
+
+        Requires `handoff:requests:route`, because re-delivering is re-paging a person.
+      x-required-scopes: [handoff:requests:route]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      responses:
+        "202":
+          description: Another attempt is queued.
+          headers: *rateLimitHeaders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedeliverResult'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+        "503":
+          $ref: '#/components/responses/DeliveryUnavailable'
+
+  /meta:
+    get:
+      tags: [meta]
+      operationId: getMeta
+      summary: Discover what this deployment supports
+      description: |
+        Unauthenticated. A conformance runner and a client both use this to discover support instead of
+        assuming it: which protocol version, which conformance level, which extensions, which field and
+        capability types this server will accept, and how long a long-poll it will hold.
+
+        A client that sees a `type` it needs missing from `field_types` knows the raise will fail closed
+        with `400 unsupported_field_type` before it tries.
+      security: []
+      x-required-scopes: []
+      responses:
+        "200":
+          description: This deployment's capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meta'
+
+components:
+
+  securitySchemes:
+    machineKey:
+      type: http
+      scheme: bearer
+      description: |
+        An opaque API key of the form `omg_<product>_<env>_<key_id>_<secret>`, presented as
+        `Authorization: Bearer …`. The key resolves to an **org-scoped principal of type
+        `service_account`** with no user identity; tenancy comes from the key, never from a request
+        body. `env` is one of `live`, `test`, or `selfhost`; a `test` key may only raise
+        `test_mode: true` requests, which deliver to a sandbox destination so nobody's on-call is paged
+        by a quickstart.
+
+        A machine key can raise, read, route, wait, and redeem. It can never answer.
+    humanSession:
+      type: apiKey
+      in: cookie
+      name: handoff_session
+      description: |
+        An interactive browser session cookie for a human principal. Required — alongside
+        `humanBearer` as the alternative — for answering, for resolving capability grants, and for
+        submitting values to a secret sink.
+    humanBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A signed session assertion for a human principal, for non-browser human clients (a CLI, a
+        native app). Carries the same authority as `humanSession` and is subject to the same
+        `requires.authority` checks, including `auth_strength`.
+
+  parameters:
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Caller-chosen key that makes the operation safe to retry. Same key + same body digest returns
+        the stored representation; same key + a **different** body digest is
+        `409 idempotency_key_reused`. The retention window is at least 24 hours.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      example: refund-8821-attempt-1
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Strongly recommended on every mutating call. On `answer` it is what turns a retried click into
+        a `200` carrying the original receipt instead of a `409`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    RequestIdPath:
+      name: request_id
+      in: path
+      required: true
+      description: The request's id.
+      schema:
+        $ref: '#/components/schemas/RequestId'
+    ReceiptIdPath:
+      name: receipt_id
+      in: path
+      required: true
+      description: The receipt's id.
+      schema:
+        $ref: '#/components/schemas/ReceiptId'
+    SignalIdPath:
+      name: signal_id
+      in: path
+      required: true
+      description: The signal's id.
+      schema:
+        $ref: '#/components/schemas/SignalId'
+    AuthorizationIdPath:
+      name: authorization_id
+      in: path
+      required: true
+      description: The authorization's id.
+      schema:
+        $ref: '#/components/schemas/AuthorizationId'
+    DeliveryIdPath:
+      name: delivery_id
+      in: path
+      required: true
+      description: The delivery's id.
+      schema:
+        $ref: '#/components/schemas/DeliveryId'
+    GrantHandlePath:
+      name: handle
+      in: path
+      required: true
+      description: The opaque capability grant handle. It is a pointer, not a credential.
+      schema:
+        $ref: '#/components/schemas/GrantHandle'
+    SessionRefPath:
+      name: session_ref
+      in: path
+      required: true
+      description: The grant session reference returned by the resolve call.
+      schema:
+        $ref: '#/components/schemas/GrantSessionRef'
+    SinkRefPath:
+      name: sink_ref
+      in: path
+      required: true
+      description: The secret sink declared on the request as `requires.answer.value_sink.ref`.
+      schema:
+        $ref: '#/components/schemas/SinkRef'
+    WaiterRefPath:
+      name: waiter_ref
+      in: path
+      required: true
+      description: |
+        The caller's own opaque grouping key for a unit of agent work, URL-encoded. The server stores
+        and matches it byte-for-byte and never parses it: any structure inside it is the caller's
+        business. At most 512 bytes.
+      schema:
+        $ref: '#/components/schemas/WaiterRef'
+      example: "run%3A0198f2a1-6f4c-7c11-9d3e-2b8a5e1c9f04"
+    Wait:
+      name: wait
+      in: query
+      required: false
+      description: |
+        Long-poll window in seconds. `0` (or omitted) returns immediately. The server caps the wait at
+        `meta.max_wait_seconds`, which is 30. Hanging up never affects the durable wait.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 30
+        default: 0
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, clamped to the stated range.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque forward cursor — pass `next_cursor` from the previous page. Because ids are ULIDs,
+        paging is stable under concurrent writes.
+      schema:
+        type: string
+        maxLength: 256
+
+  headers:
+    XRateLimitLimit:
+      description: Requests permitted in the current window for this key.
+      schema:
+        type: integer
+        minimum: 0
+    XRateLimitRemaining:
+      description: Requests remaining in the current window.
+      schema:
+        type: integer
+        minimum: 0
+    XRateLimitReset:
+      description: Unix epoch seconds at which the current window resets.
+      schema:
+        type: integer
+        minimum: 0
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+        minimum: 0
+
+  responses:
+    BadRequest:
+      description: |
+        The body is malformed, or it declares something this server does not understand. Unrecognized
+        `requires.v`, field `type`, or capability `type` **fails closed**: the server creates nothing
+        and drops nothing. A field a renderer cannot draw is a field a human cannot answer, and
+        rendering it as a text box would be worse than refusing.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_request:
+              value:
+                error:
+                  code: invalid_request
+                  message: "prompt.title is required"
+            unsupported_field_type:
+              value:
+                error:
+                  code: unsupported_field_type
+                  message: "field 'signature' declares type 'handwriting', which this server cannot render"
+            unsupported_capability_type:
+              value:
+                error:
+                  code: unsupported_capability_type
+                  message: "capability type 'remote_desktop' is not supported by this deployment"
+            unsupported_requires_version:
+              value:
+                error:
+                  code: unsupported_requires_version
+                  message: "requires.v=2 is not understood by this v1 server; no request was created"
+    Unauthorized:
+      description: |
+        No credential, or one that is absent, malformed, revoked, or expired. `invalid_api_key` covers
+        all four deliberately: a separate `key_revoked` code would tell an attacker which keys once
+        existed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_api_key:
+              value:
+                error:
+                  code: invalid_api_key
+                  message: "the API key is not valid"
+            authentication_required:
+              value:
+                error:
+                  code: authentication_required
+                  message: "this operation requires an authenticated human session"
+    Forbidden:
+      description: |
+        Authenticated, but not permitted. `requester_may_not_answer` is by principal **type**: a machine
+        key can never answer, whatever scopes it holds. `tenant_mismatch` is returned only where the
+        resource's existence is not itself sensitive; where it is, the server returns `404` instead.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            insufficient_scope:
+              value:
+                error:
+                  code: insufficient_scope
+                  message: "this key lacks handoff:requests:route"
+            product_not_entitled:
+              value:
+                error:
+                  code: product_not_entitled
+                  message: "this organization has no Handoff entitlement"
+            insufficient_authority:
+              value:
+                error:
+                  code: insufficient_authority
+                  message: "this request requires min_role=admin; you are an editor"
+            requester_may_not_answer:
+              value:
+                error:
+                  code: requester_may_not_answer
+                  message: "a service_account principal may not answer a request it can raise"
+            tenant_mismatch:
+              value:
+                error:
+                  code: tenant_mismatch
+                  message: "the resource belongs to another organization"
+            auth_strength_not_permitted:
+              value:
+                error:
+                  code: auth_strength_not_permitted
+                  message: "this deployment does not accept auth_strength=link_only"
+    NotFound:
+      description: |
+        No such resource in the caller's scope. Also returned in place of `403` wherever the existence
+        of the resource is itself sensitive.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            request_not_found:
+              value:
+                error:
+                  code: request_not_found
+                  message: "no such request"
+            capability_not_found:
+              value:
+                error:
+                  code: capability_not_found
+                  message: "no such capability grant"
+            signal_not_found:
+              value:
+                error:
+                  code: signal_not_found
+                  message: "no such signal"
+            authorization_not_found:
+              value:
+                error:
+                  code: authorization_not_found
+                  message: "no such authorization"
+    Conflict:
+      description: |
+        The operation is well-formed but the resource is not in a state that permits it. Every conflict
+        is **specific** — never a generic 409 — and nothing changed. Where a receipt already exists it
+        is named in `receipt_id`; where a successor exists it is named in `superseded_by`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            already_answered:
+              value:
+                error:
+                  code: already_answered
+                  message: "req_01K3M7QW8ZC4YRXB2N6VD9FTHE was answered at 2026-07-30T14:07:44Z"
+                  request_id: req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+                  receipt_id: rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE
+            request_expired:
+              value:
+                error:
+                  code: request_expired
+                  message: "the request expired at 2026-07-30T18:02:11Z"
+            request_cancelled:
+              value:
+                error:
+                  code: request_cancelled
+                  message: "the request was withdrawn: the customer resolved it by phone"
+            request_superseded:
+              value:
+                error:
+                  code: request_superseded
+                  message: "this request was replaced"
+                  superseded_by: req_01K3MC7QW8ZC4YRXB2N6VD9FT
+            request_in_progress:
+              value:
+                error:
+                  code: request_in_progress
+                  message: "a delivery has reached 'acted'; amend is no longer permitted"
+            idempotency_key_reused:
+              value:
+                error:
+                  code: idempotency_key_reused
+                  message: "this Idempotency-Key was used with a different body"
+            authorization_spent:
+              value:
+                error:
+                  code: authorization_spent
+                  message: "single-use authorization already redeemed for effect_key stripe:refund:ch_1B"
+            effect_digest_mismatch:
+              value:
+                error:
+                  code: effect_digest_mismatch
+                  message: "the effect digest does not match what was authorized"
+            blast_radius_mismatch:
+              value:
+                error:
+                  code: blast_radius_mismatch
+                  message: "the blast radius changed since it was shown; re-read the grant and re-confirm"
+            grant_already_held:
+              value:
+                error:
+                  code: grant_already_held
+                  message: "this grant is bound to another holder and max_holders is 1"
+            presentation_stale:
+              value:
+                error:
+                  code: presentation_stale
+                  message: "rendered_digest does not match the current request version"
+    Gone:
+      description: The capability grant's TTL elapsed. It cannot be renewed; a new grant must be minted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            capability_expired:
+              value:
+                error:
+                  code: capability_expired
+                  message: "this grant expired at 2026-07-30T18:41:12Z"
+    UnprocessableEntity:
+      description: |
+        The body parsed but the answer does not satisfy `requires.answer` — a missing required field, a
+        choice outside `options`, a number outside `min`/`max`, or a raw value posted against a
+        `secret` field. `fields` names each offending field so a surface can highlight it in place.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            answer_validation_failed:
+              value:
+                error:
+                  code: answer_validation_failed
+                  message: "the answer does not satisfy the declared field set"
+                  fields:
+                    - name: decision
+                      code: required
+                      message: "this field is required"
+                    - name: password
+                      code: secret_value_not_permitted
+                      message: "secret values go to the sink; the answer carries {\"provided\": true}"
+    RateLimited:
+      description: Too many requests for this key. Back off for `Retry-After` seconds.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/XRateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/XRateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/XRateLimitReset'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            rate_limited:
+              value:
+                error:
+                  code: rate_limited
+                  message: "rate limit exceeded for this key"
+    DeliveryUnavailable:
+      description: |
+        No channel could be attempted. **The request is still created** — its deliveries are `failed`
+        and the ladder will retry. Failing the raise because a messaging vendor is down would put that
+        vendor's outage inside the customer's agent, which inverts the entire point of this protocol.
+        Callers SHOULD treat this as a warning, read `request_id` from the error body, and carry on.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            delivery_unavailable:
+              value:
+                error:
+                  code: delivery_unavailable
+                  message: "the request exists; no channel could be attempted right now"
+                  request_id: req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+
+  schemas:
+
+    # ---------------------------------------------------------------- primitives
+
+    Id:
+      type: string
+      description: |
+        `<prefix>_<26-character Crockford base32 ULID>` — time-sortable and safe to log. Crockford
+        base32 omits `I`, `L`, `O`, and `U`, so an id survives being read aloud or retyped.
+      pattern: '^[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+
+    RequestId:
+      type: string
+      description: A human-intervention request.
+      pattern: '^req_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+
+    ReceiptId:
+      type: string
+      description: An immutable receipt.
+      pattern: '^rcpt_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE
+
+    AuthorizationId:
+      type: string
+      description: A spendable authorization.
+      pattern: '^auth_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - auth_01K3MB2R4ZC4YRXB2N6VD9FTHE
+
+    DeliveryId:
+      type: string
+      description: One attempt-bearing send to one target on one channel.
+      pattern: '^dlv_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - dlv_01K3M7QW9AC4YRXB2N6VD9FTHE
+
+    SignalId:
+      type: string
+      description: One queued notification to a waiter.
+      pattern: '^sig_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - sig_01K3MB2R4XC4YRXB2N6VD9FTHE
+
+    GrantHandle:
+      type: string
+      description: |
+        An opaque capability grant handle. It is a database pointer, not a credential: holding it
+        confers nothing without an authenticated resolve. Unlike other ids a handle MUST be generated
+        from a cryptographic RNG rather than derived from a clock, so it cannot be guessed or
+        recomputed from a leaked platform secret.
+      pattern: '^hg_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - hg_01K3M7QWB1C4YRXB2N6VD9FTHE
+
+    GrantSessionRef:
+      type: string
+      description: A short-lived, lease-bound session produced by resolving a grant.
+      pattern: '^hs_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - hs_01K3MB9X2KC4YRXB2N6VD9FTHE
+
+    SinkRef:
+      type: string
+      description: A runtime-owned destination for `secret`-typed values. It never appears in a receipt.
+      pattern: '^snk_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - snk_01K3M7QWC9C4YRXB2N6VD9FTHE
+
+    ResumeToken:
+      type: string
+      description: |
+        Proof that the acking client is the waiter the signal was enqueued for. Presented on
+        `POST /signals/{signal_id}/ack` and on re-attachment; never a capability for anything else.
+      pattern: '^rt_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - rt_01K3MB2R55C4YRXB2N6VD9FTHE
+
+    PrincipalId:
+      type: string
+      description: |
+        A principal: `usr_` a person, `sa_` a service account, `org_` an organization. A service
+        account has no user identity — that is what makes `requester_may_not_answer` decidable by type.
+      pattern: '^(usr|org|sa)_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - usr_01J9ZP4KRTC4YRXB2N6VD9FTHE
+
+    OrgId:
+      type: string
+      description: The organization that owns the resource. Always derived from the credential, never from a body.
+      pattern: '^org_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - org_01K0A2XFV8C4YRXB2N6VD9FTHE
+
+    WaiterRef:
+      type: string
+      description: |
+        The caller's opaque grouping key for a unit of agent work — a run id, a thread id, a session
+        id. Stored and matched byte-for-byte; the server never parses it and never switches on it.
+      minLength: 1
+      maxLength: 512
+      examples:
+        - "run:0198f2a1-6f4c-7c11-9d3e-2b8a5e1c9f04"
+
+    Duration:
+      type: string
+      description: |
+        An ISO-8601 duration — `PT15M`, `PT4H`, `P1D`. Durations rather than absolute deadlines, so a
+        declaration means the same thing whenever it is evaluated.
+      pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+      examples:
+        - PT15M
+        - PT4H
+        - P1D
+
+    Digest:
+      type: string
+      description: A hash, algorithm-prefixed so it can be migrated without ambiguity.
+      pattern: '^[a-z0-9-]+:[0-9a-f]{32,128}$'
+      examples:
+        - "sha256:9f2c4b1e77a0e56ff536d0ce8e108d8bd5257a869e7ecebeda32affa62cdca3f"
+
+    # ---------------------------------------------------------------- raise
+
+    RaiseRequest:
+      type: object
+      description: |
+        Everything a caller declares when it asks for a human. Note what is **not** here: no channel,
+        no recipient address, no request `kind`. The agent declares urgency and what it needs; routing
+        is org policy resolved server-side and snapshotted onto the request, so a policy edit mid-flight
+        cannot retroactively change what happened.
+      required: [waiter_ref, prompt, requires]
+      additionalProperties: false
+      properties:
+        waiter_ref:
+          $ref: '#/components/schemas/WaiterRef'
+        liveness:
+          type: string
+          description: |
+            `durable` — the wait survives this process (a parked run, a checkpointed graph); the answer
+            is worth recording even if the caller is gone. `leased` — the wait is a live client process
+            holding a poll; a lapsed heartbeat means nobody is left to receive an answer, so paging
+            people stops.
+          enum: [durable, leased]
+          default: durable
+        urgency:
+          type: string
+          description: |
+            How hard to try. The agent declares urgency; **Handoff decides the channel.** This is the
+            only way channels stay branch-free — a new channel is an adapter plus a policy row, never a
+            change at any call site.
+          enum: [low, normal, high, critical]
+          default: normal
+        prompt:
+          $ref: '#/components/schemas/Prompt'
+        requires:
+          $ref: '#/components/schemas/Requires'
+        ttl:
+          description: |
+            How long the ask stays worth answering. **Absent means the request never expires** — the
+            unbounded case is the default because a human wait can legitimately be arbitrarily long,
+            and an accidental deadline silently converts a decision into a policy outcome.
+          allOf:
+            - $ref: '#/components/schemas/Duration'
+        ttl_policy:
+          $ref: '#/components/schemas/TtlPolicy'
+        attempt_ttl:
+          description: |
+            The attempt window — "a specific human is expected to be doing this right now". Re-armed
+            fresh on each progressive step; on lapse the waiter is nudged once and the request stays
+            `pending` and answerable.
+          allOf:
+            - $ref: '#/components/schemas/Duration'
+          default: PT15M
+        on_waiter_terminal:
+          type: string
+          description: |
+            What to do when the waiter goes terminal or its lease lapses. `keep` (the default for
+            `durable`) preserves the ask so a late answer is still recorded, with the request marked
+            `waiter.state = "orphaned"` so a human can see it. `cancel` (the default for `leased`)
+            stops paging people about work nobody is left to receive.
+          enum: [keep, cancel]
+        routing:
+          $ref: '#/components/schemas/Routing'
+        mode:
+          type: string
+          description: |
+            `advisory` (default) — Handoff records the decision, mints the authorization, and never
+            holds the effect; the agent proceeds under its own judgment. `gated` — the agent must
+            redeem the authorization before the effect.
+
+            Blocking is a property a **request** declares, never a policy imposed on a class of
+            actions. A deployment that grows an org-wide "gate everything matching X" setting has
+            re-created the thing this distinction exists to avoid.
+          enum: [advisory, gated]
+          default: advisory
+        presentation_binding:
+          type: string
+          description: |
+            `strict` requires the answer to carry a `rendered_digest` matching the version the human
+            was actually shown, so an answer against stale wording is `409 presentation_stale` rather
+            than a silent mismatch between what was read and what was approved.
+          enum: [advisory, strict]
+          default: advisory
+        dedupe_key:
+          type: string
+          description: |
+            Ask-once key. While a request with this key is `pending`, a second raise returns that
+            request (with `prompt`/`requires` merged forward) instead of paging anyone again. When
+            absent the server derives one from `waiter_ref`, the canonicalized `requires`, and
+            `prompt.title`.
+          maxLength: 255
+        resume_ref:
+          type: string
+          description: |
+            **Level 2 (`continuation` extension).** An opaque pointer the runtime hands back to itself
+            — a checkpoint id, an object-store key. Returned byte-identical in the signal and stored
+            nowhere else. Handoff never dereferences it.
+          maxLength: 2048
+        resume_payload:
+          type: string
+          description: |
+            **Level 2 (`continuation` extension).** Base64 continuation state, returned byte-identical
+            in the signal. Capped at roughly 64 KiB: this is a pointer-sized escape hatch, not a state
+            store, and a server MUST NOT log it.
+          contentEncoding: base64
+          maxLength: 87400
+        callback:
+          $ref: '#/components/schemas/Callback'
+        metadata:
+          type: object
+          description: |
+            Caller-owned annotations, stored and returned verbatim. **The core never switches on
+            anything in here** — including a `hint` key, which is for your dashboards and is
+            explicitly non-normative. Keys prefixed `x-` are reserved for vendor extensions and are
+            never interpreted.
+          additionalProperties: true
+        test_mode:
+          type: boolean
+          description: |
+            Route this request to a sandbox destination instead of to real people. The only requests a
+            `test`-environment key may raise. Nobody's on-call should be paged at 2 a.m. because a
+            developer was working through the quickstart.
+          default: false
+      examples:
+        - waiter_ref: "run:0198f2a1-6f4c-7c11-9d3e-2b8a5e1c9f04"
+          liveness: durable
+          urgency: high
+          prompt:
+            title: "Refund $2,400 to Acme Corp?"
+            body: "Invoice **INV-8821** was double-charged on 2026-07-28. Acme has asked for a full refund of the second charge."
+            evidence:
+              - kind: link
+                label: Invoice INV-8821
+                url: https://billing.internal/inv/8821
+              - kind: table
+                label: Both charges
+                value:
+                  columns: [date, amount, id]
+                  rows:
+                    - ["2026-07-28", "$2,400", "ch_1A"]
+                    - ["2026-07-28", "$2,400", "ch_1B"]
+          requires:
+            v: 1
+            answer:
+              fields:
+                - name: decision
+                  label: Decision
+                  type: choice
+                  required: true
+                  options:
+                    - id: approve
+                      label: Refund it
+                    - id: reject
+                      label: "Don't refund"
+                - name: note
+                  label: Add a note
+                  type: text
+                  required: false
+                  max_len: 500
+            capabilities: []
+            authority:
+              min_role: editor
+              auth_strength: session
+          ttl: PT4H
+          ttl_policy:
+            on_expiry: expire_and_deny
+          attempt_ttl: PT15M
+          on_waiter_terminal: keep
+          metadata:
+            run_id: 0198f2a1
+            customer: acme
+
+    Prompt:
+      type: object
+      description: What the human reads. Markdown for prose; structured `evidence` for anything they must check.
+      required: [title]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          description: |
+            One line, and it must be answerable on its own — it is what arrives on a lock screen, in a
+            push notification, and in a one-line chat preview.
+          minLength: 1
+          maxLength: 200
+        body:
+          type: string
+          description: Markdown. Rendered by the surface; never interpreted by the core.
+          maxLength: 20000
+        evidence:
+          type: array
+          description: |
+            The things the human should look at before deciding. Evidence is structured so every
+            surface can render it natively rather than pasting a URL into prose.
+          items:
+            $ref: '#/components/schemas/Evidence'
+          maxItems: 50
+
+    Evidence:
+      type: object
+      description: One piece of supporting material. Exactly one of `url`, `value`, or `ref` carries the content.
+      required: [kind, label]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          description: How to render it. Unknown kinds are rendered as a labelled link or ignored — never as an error.
+          enum: [link, table, image, document, text]
+        label:
+          type: string
+          description: What this evidence is, in the human's words.
+          maxLength: 200
+        url:
+          type: string
+          format: uri
+          description: An external locator. Opening it is the reader's own authenticated action; it is never a capability.
+        value:
+          description: Inline content — a table object, a string, a structured document.
+        ref:
+          type: string
+          description: An opaque handle to content held elsewhere, resolved by the surface.
+          maxLength: 512
+
+    Requires:
+      type: object
+      description: |
+        The three orthogonal declarations that replace a request `kind` enum: the shape of the answer,
+        the capabilities the human must be handed to be *able* to answer, and who is entitled to
+        answer. Every use case — approve/reject, ask a question, assist a login, clear a challenge,
+        review and correct, confirm an effect — is a different population of these three, and none of
+        them adds a branch to a conforming server.
+      required: [v]
+      additionalProperties: true
+      properties:
+        v:
+          type: integer
+          description: |
+            Envelope version. **A server that does not understand this value MUST reject the raise
+            with `400 unsupported_requires_version` and create nothing** — never partial acceptance
+            with the unknown parts dropped.
+          const: 1
+        answer:
+          $ref: '#/components/schemas/AnswerSpec'
+        capabilities:
+          type: array
+          description: |
+            What the human must be handed in order to answer — not what the request "is". Each entry
+            is an opaque handle plus the declaration a surface needs to explain it.
+          items:
+            $ref: '#/components/schemas/CapabilityDeclaration'
+          maxItems: 16
+        authority:
+          $ref: '#/components/schemas/Authority'
+
+    AnswerSpec:
+      type: object
+      description: The shape of a valid answer. One declaration; one renderer; no per-vendor code anywhere.
+      additionalProperties: false
+      properties:
+        fields:
+          type: array
+          description: |
+            **May be empty, and empty is meaningful**: it means the whole request is an attestation —
+            there is nothing to type, the human does the thing and says so. A challenge nobody can type
+            an answer to is the canonical case.
+          items:
+            $ref: '#/components/schemas/Field'
+          maxItems: 64
+        value_sink:
+          $ref: '#/components/schemas/ValueSink'
+
+    ValueSink:
+      type: object
+      description: |
+        Declared, never assumed. Where `secret`-typed values go, on a channel the runtime owns. The
+        core knows only that such values exist and that the answer carries `{"provided": true}`.
+      required: [ref]
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          description: Opaque provider name. The core looks it up; it never matches on the string.
+          maxLength: 128
+        op:
+          type: string
+          description: Opaque operation name meaningful to the provider only.
+          maxLength: 128
+        ref:
+          $ref: '#/components/schemas/SinkRef'
+
+    Field:
+      type: object
+      description: |
+        One thing the human is asked for. The type set is closed and versioned: an unknown `type` is
+        `400 unsupported_field_type`, because a field the renderer cannot draw is a field the human
+        cannot answer.
+      required: [name, type]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: Stable key in the answer's `values` object. Lowercase snake case.
+          pattern: '^[a-z][a-z0-9_]{0,63}$'
+        label:
+          type: string
+          description: What the human sees. Defaults to a humanized `name`.
+          maxLength: 200
+        type:
+          type: string
+          description: |
+            `choice` carries the option `id` (an array when `multi`). `text`, `number`, `boolean` carry
+            their value. `secret` carries **nothing** in the answer — the value goes to the sink and the
+            answer says `{"provided": true}`. `attestation` carries `true` only, and is how a human
+            says "I did the out-of-band thing". `document` carries a structured value validated against
+            `schema_ref`. `file_ref` carries an opaque handle, never bytes.
+          enum: [choice, text, number, boolean, secret, attestation, document, file_ref]
+        required:
+          type: boolean
+          description: A missing required field is `422 answer_validation_failed`, named in `fields`.
+          default: false
+        help:
+          type: string
+          description: One line of guidance shown near the input.
+          maxLength: 500
+        options:
+          type: array
+          description: For `choice`. An answer outside this set is a validation failure, not a free-text fallback.
+          items:
+            $ref: '#/components/schemas/FieldOption'
+          maxItems: 100
+        multi:
+          type: boolean
+          description: For `choice` — the answer is an array of option ids rather than one id.
+          default: false
+        max_len:
+          type: integer
+          description: For `text`. Enforced server-side, not only in the surface.
+          minimum: 1
+        min:
+          type: number
+          description: For `number`, inclusive lower bound.
+        max:
+          type: number
+          description: For `number`, inclusive upper bound.
+        initial:
+          description: |
+            Pre-filled value. For `document` this is what the human edits — the review-and-correct
+            case, where the agent proposes and the person amends.
+        schema_ref:
+          type: string
+          format: uri
+          description: For `document`. The answer is validated against this schema before the receipt is minted.
+        sink_ref:
+          $ref: '#/components/schemas/SinkRef'
+      examples:
+        - name: decision
+          label: Decision
+          type: choice
+          required: true
+          options:
+            - id: approve
+              label: Refund it
+            - id: reject
+              label: "Don't refund"
+
+    FieldOption:
+      type: object
+      description: One selectable option. `id` is what the answer carries; `label` is what the human reads.
+      required: [id, label]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          maxLength: 128
+        label:
+          type: string
+          maxLength: 200
+
+    Authority:
+      type: object
+      description: |
+        Who is entitled to answer, declared **on the request** rather than implied by whichever endpoint
+        happened to be called. A delivery channel never confers authority: receiving the page and being
+        allowed to answer are separate facts.
+      additionalProperties: false
+      properties:
+        min_role:
+          type: string
+          description: Minimum role in the owning tenancy. A lower-privileged answerer is `403 insufficient_authority`.
+          enum: [viewer, editor, admin]
+        auth_strength:
+          type: string
+          description: |
+            How firmly the answerer's identity must be established. `link_only` is defined so that
+            deployments which knowingly accept it can record it honestly — the receipt says
+            `actor.type = "anonymous_link"` — but a deployment MAY refuse it with
+            `403 auth_strength_not_permitted`. `reauth` requires a fresh credential presentation for
+            this decision; `mfa` requires a second factor.
+          enum: [link_only, session, reauth, mfa]
+          default: session
+        assignees:
+          type: array
+          description: Who this is for. Empty means "anyone who satisfies the rest of this block".
+          items:
+            $ref: '#/components/schemas/Target'
+          maxItems: 50
+        quorum:
+          type: integer
+          description: |
+            How many distinct principals must answer before the request settles. Partial answers are
+            recorded and the request stays `pending` until quorum is met. Modelled now so a later
+            version is not a schema migration across every receipt; **`1` is the only value a Level 1
+            server must support.**
+          minimum: 1
+          default: 1
+        forbid_requester:
+          type: boolean
+          description: |
+            Always true, and stated rather than assumed: the principal that raised a request may never
+            answer it. This is enforced by principal **type** — a machine key gets
+            `403 requester_may_not_answer` regardless of its scopes.
+          const: true
+          default: true
+        reason:
+          type: string
+          description: |
+            Why this authority is required, shown to the human. "The resulting session cookie outlives
+            the run" is a better prompt than a role name.
+          maxLength: 500
+
+    Target:
+      type: object
+      description: |
+        Who to reach. One union, resolved through a single `resolve_targets(target) -> [principal]`
+        step, so adding a targeting concept never adds a branch. `rotation` resolves at rung-fire time,
+        not at raise time, so an escalation reaches whoever is actually on call.
+      required: [kind, value]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [principal, role, group, rotation, anyone]
+        value:
+          type: string
+          description: Opaque to the protocol; meaningful to the deployment's directory.
+          maxLength: 256
+      examples:
+        - kind: role
+          value: "space:editor"
+
+    Routing:
+      type: object
+      description: |
+        A per-request override of the org's escalation policy. **Requires the
+        `handoff:requests:route` scope**, deliberately separate from `handoff:requests:write`: a
+        compromised key that can ask a question is a different blast radius from one that can page the
+        on-call at 3 a.m. Whatever ladder applies is snapshotted onto the request at raise time.
+      additionalProperties: false
+      properties:
+        targets:
+          type: array
+          description: Rung-0 targets.
+          items:
+            $ref: '#/components/schemas/Target'
+          maxItems: 50
+        ladder:
+          type: array
+          description: |
+            Ordered rungs. **A rung mints deliveries, never a new request** — one intervention, one
+            decision, one receipt, however many people were tried.
+          items:
+            $ref: '#/components/schemas/RoutingRung'
+          maxItems: 10
+
+    RoutingRung:
+      type: object
+      description: One step of an escalation ladder, fired `after` the request was raised.
+      required: [after, channels]
+      additionalProperties: false
+      properties:
+        after:
+          $ref: '#/components/schemas/Duration'
+        channels:
+          type: array
+          description: |
+            Channel names are an **open vocabulary**: the core carries the string and looks up an
+            adapter. A deployment's channel list is discoverable, not hard-coded into this document.
+          items:
+            type: string
+            maxLength: 64
+          minItems: 1
+        to:
+          $ref: '#/components/schemas/Target'
+
+    TtlPolicy:
+      type: object
+      description: |
+        What happens when `expires_at` arrives. The protocol's bias is to **fail toward a typed
+        terminal answer, never toward silence — and when the answer must be guessed, guess "no"**,
+        because proceeding unasked is the expensive error.
+      required: [on_expiry]
+      additionalProperties: false
+      properties:
+        on_expiry:
+          type: string
+          description: |
+            `escalate` advances the ladder and extends the TTL, falling through to the deployment's
+            terminal policy once rungs are exhausted. `expire_and_deny` settles as `expired` with
+            `effective: "deny"` — unanswered means no. `default` settles as `expired` carrying
+            `default_answer`, and its receipt records `actor.type = "policy"` so no audit ever mistakes
+            it for consent. `park` never expires and re-reminds on a cadence.
+          enum: [escalate, expire_and_deny, default, park]
+        default_answer:
+          type: object
+          description: |
+            Required when `on_expiry` is `default`. **Must be declared at raise time**, before anyone
+            knew the human would go quiet — that is what makes it a pre-agreement rather than a
+            convenient assumption made after the fact.
+          additionalProperties: true
+        reminder_every:
+          description: For `park` only. How often to re-page while the request stays open.
+          allOf:
+            - $ref: '#/components/schemas/Duration'
+
+    Callback:
+      type: object
+      description: |
+        Where to POST signals for runtimes whose wait lives server-side, so they never poll. A
+        callback carries ids and typed values — never a grant URL, never a secret value. A `2xx` marks
+        the callback *dispatched*; the signal is still not consumed until it is acked.
+      required: [url]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTPS endpoint. Signed per delivery; receivers must resolve tenancy from their own stored state, never from the body.
+        secret_ref:
+          type: string
+          description: Handle for the signing secret. Two secrets may be active during a rotation overlap.
+          maxLength: 128
+
+    # ---------------------------------------------------------------- capabilities
+
+    CapabilityDeclaration:
+      type: object
+      description: |
+        What the human must be handed, declared as an opaque handle plus enough description to explain
+        it. **No resolvable address ever appears here** — not a URL, not an endpoint, not a token. The
+        handle is exchanged for a live session at the authenticated resolve endpoint, by the human's
+        own client.
+      required: [handle, type, scope]
+      additionalProperties: false
+      properties:
+        handle:
+          $ref: '#/components/schemas/GrantHandle'
+        type:
+          type: string
+          description: |
+            Open vocabulary of capability kinds (for example `interactive_surface`). Unknown types are
+            `400 unsupported_capability_type`: a capability nobody can render is a request nobody can
+            answer. `GET /meta` lists what a deployment accepts.
+          maxLength: 64
+        scope:
+          type: string
+          description: |
+            `view` is frames out, no input in. `drive` is full control and requires strictly higher
+            authority, because driving a shared authenticated surface is not the same act as watching
+            one. Scope is enforced at the grant, not by a client-side attribute on an embed.
+          enum: [view, drive]
+        provider:
+          type: string
+          description: Opaque provider name. The core looks the provider up and calls it; it never matches on the string.
+          maxLength: 128
+        resource_ref:
+          type: string
+          description: Opaque provider resource id. Meaningless to the core, which hands it straight back to the provider.
+          maxLength: 512
+        label:
+          type: string
+          description: What this is, in the human's words — "the browser the agent is driving".
+          maxLength: 200
+        purpose:
+          type: string
+          description: Why the human is being handed it, so accepting is an informed act.
+          maxLength: 500
+        optional:
+          type: boolean
+          description: |
+            `true` means the request is answerable without ever resolving this capability — the escape
+            hatch pattern, where a typed answer is the main path and the surface is the fallback.
+          default: false
+        ttl:
+          description: How long the grant stays resolvable. Renewed whenever the attempt clock is re-armed.
+          allOf:
+            - $ref: '#/components/schemas/Duration'
+        blast_radius_digest:
+          description: |
+            Digest of the `blast_radius` a human will be shown. The resolve call echoes it back as
+            `accepted_blast_radius_digest`, so a human can never be handed something other than what
+            they read.
+          allOf:
+            - $ref: '#/components/schemas/Digest'
+
+    CapabilityGrant:
+      type: object
+      description: |
+        The declaration plus everything a surface needs to let a human decide whether to accept: the
+        **full** blast radius, the expiry, the binding, and any provider constraints. Readable only
+        with a human session.
+      required: [handle, type, scope, blast_radius, blast_radius_digest]
+      additionalProperties: false
+      properties:
+        handle:
+          $ref: '#/components/schemas/GrantHandle'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        type:
+          type: string
+          maxLength: 64
+          description: The capability kind, as declared on the request.
+        scope:
+          type: string
+          description: The maximum scope this grant can produce. A session may request a subset, never a superset.
+          enum: [view, drive]
+        provider:
+          type: string
+          maxLength: 128
+          description: Opaque provider name.
+        resource_ref:
+          type: string
+          maxLength: 512
+          description: Opaque provider resource id.
+        label:
+          type: string
+          maxLength: 200
+          description: Human-facing name for the surface.
+        purpose:
+          type: string
+          maxLength: 500
+          description: Why the human is being offered it.
+        optional:
+          type: boolean
+          description: Whether the request is answerable without resolving this grant.
+        ttl:
+          $ref: '#/components/schemas/Duration'
+        blast_radius:
+          $ref: '#/components/schemas/BlastRadius'
+        blast_radius_digest:
+          $ref: '#/components/schemas/Digest'
+        expires_at:
+          type: string
+          format: date-time
+          description: After this instant the grant is `410 capability_expired` and cannot be renewed.
+        revoked_at:
+          description: When the grant was revoked. Non-null means no further sessions, ever.
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        max_holders:
+          type: integer
+          description: |
+            How many distinct people may hold this grant at once. `1` is the default and means the
+            second person to resolve gets `409 grant_already_held` — deliberate, because two people
+            driving one surface is how a takeover becomes unattributable.
+          minimum: 1
+          default: 1
+        bound_principal_id:
+          description: The principal this grant pinned to on first successful resolve. Null until then.
+          anyOf:
+            - $ref: '#/components/schemas/PrincipalId'
+            - type: "null"
+        constraints:
+          type: object
+          description: |
+            Provider-enforced narrowing — for example a list of origins a session may act on. **The
+            core carries this object and compares nothing inside it**; the provider enforces it. This
+            is how a takeover is narrowed without growing a scope name per case.
+          additionalProperties: true
+
+    BlastRadius:
+      type: object
+      description: |
+        The scope of consequence a human accepts when they take a capability. Provider-declared,
+        core-carried, human-rendered, receipt-digested. `summary` MUST be shown before the control that
+        resolves the grant.
+      required: [summary, shared_with]
+      additionalProperties: false
+      properties:
+        summary:
+          type: string
+          description: One sentence a non-expert understands — "everything this workspace's browser is signed into".
+          maxLength: 300
+        shared_with:
+          type: string
+          description: |
+            The one field the core can **compare**, which is why it is a closed vocabulary while
+            everything else here is opaque provider text. It lets policy say things like "never
+            auto-page for anything above `request`".
+          enum: [isolated, request, space, org]
+        principals:
+          type: integer
+          description: How many people's access is implicated. A count, never a roster, in the open record.
+          minimum: 0
+        identities:
+          type: array
+          description: |
+            What the surface is signed in as, shown to the human before they accept. This list is
+            effectively personal data: it is rendered and digested, and only the digest goes in the
+            receipt.
+          items:
+            $ref: '#/components/schemas/BlastRadiusIdentity'
+          maxItems: 100
+        reversible:
+          type: boolean
+          description: Whether actions taken through this capability can be undone. `false` should read as a warning in the surface.
+        note:
+          type: string
+          description: Any additional consequence the human should know — "actions here are indistinguishable from actions by the signed-in accounts".
+          maxLength: 1000
+
+    BlastRadiusIdentity:
+      type: object
+      description: One identity the capability is signed in as.
+      required: [origin]
+      additionalProperties: false
+      properties:
+        origin:
+          type: string
+          maxLength: 256
+          description: Where the identity applies. Origin-level by default; never a full URL with parameters.
+        label:
+          type: string
+          maxLength: 200
+          description: The account as a human would name it.
+
+    CreateGrantSessionRequest:
+      type: object
+      description: Resolve a grant handle into a live session. Sent by the human's own client, with a human session.
+      required: [scopes, accepted_blast_radius_digest]
+      additionalProperties: false
+      properties:
+        scopes:
+          type: array
+          description: A subset of the grant's scope. Asking for more than the grant allows is `403 insufficient_authority`.
+          items:
+            type: string
+            enum: [view, drive]
+          minItems: 1
+          maxItems: 2
+        accepted_blast_radius_digest:
+          description: |
+            The digest of the blast radius this human was actually shown. A mismatch is
+            `409 blast_radius_mismatch` — required, because "I accepted" must mean "I accepted *this*".
+          allOf:
+            - $ref: '#/components/schemas/Digest'
+        constraints:
+          type: object
+          description: |
+            Further narrowing the human accepts (never widening). Carried to the provider verbatim;
+            the core compares nothing inside it.
+          additionalProperties: true
+
+    GrantSession:
+      type: object
+      description: |
+        A live, leased session. `transport.url` is minted here and nowhere else, is single-session and
+        short-lived, and **MUST NOT be persisted** — not in a database, not in a message, not in a log,
+        not in a model's context.
+      required: [session_ref, scopes, lease_until, transport]
+      additionalProperties: false
+      properties:
+        session_ref:
+          $ref: '#/components/schemas/GrantSessionRef'
+        scopes:
+          type: array
+          description: What this session may actually do — the intersection of what was asked for and what authority permits.
+          items:
+            type: string
+            enum: [view, drive]
+        lease_until:
+          type: string
+          format: date-time
+          description: The session closes at this instant unless renewed. It bounds how long a revocation takes to bite.
+        renew_after_ms:
+          type: integer
+          description: Renew after this many milliseconds, not at the last moment.
+          minimum: 0
+        blast_radius:
+          $ref: '#/components/schemas/BlastRadius'
+        transport:
+          $ref: '#/components/schemas/GrantTransport'
+        receipt_id:
+          description: The receipt recording that this person took this capability at this time.
+          anyOf:
+            - $ref: '#/components/schemas/ReceiptId'
+            - type: "null"
+
+    GrantTransport:
+      type: object
+      description: How to reach the live surface. Ephemeral by construction.
+      required: [kind, url]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          description: Transport family. The client picks its connection method from this, not from parsing the URL.
+          enum: [websocket, https]
+        url:
+          type: string
+          format: uri
+          description: |
+            Single-session, expires with the lease. Treat it as a secret in flight and discard it on
+            release; it is the one resolvable address in the entire protocol.
+
+    RevokeGrantRequest:
+      type: object
+      description: Optional reason recorded with the revocation.
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 500
+          description: Why the grant was pulled. Shown in the audit trail.
+
+    RenewResult:
+      type: object
+      description: The extended lease. Re-checked against revocation, expiry, binding, and the caller's current role.
+      required: [lease_until]
+      additionalProperties: false
+      properties:
+        lease_until:
+          type: string
+          format: date-time
+        renew_after_ms:
+          type: integer
+          minimum: 0
+          description: When to renew next.
+
+    # ---------------------------------------------------------------- request
+
+    RequestState:
+      type: string
+      description: |
+        Four terminal states, and every one of them produces a typed terminal signal to the waiter.
+        **There is no path by which a request goes quiet.**
+      enum: [pending, answered, expired, cancelled, superseded]
+
+    Request:
+      type: object
+      description: The full representation of a human-intervention request.
+      required: [id, state, version, org_id, waiter_ref, prompt, requires, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        state:
+          $ref: '#/components/schemas/RequestState'
+        version:
+          type: integer
+          description: Bumped by every amendment. A receipt records the version the human actually saw.
+          minimum: 1
+        org_id:
+          $ref: '#/components/schemas/OrgId'
+        waiter_ref:
+          $ref: '#/components/schemas/WaiterRef'
+        urgency:
+          type: string
+          enum: [low, normal, high, critical]
+          description: As declared at raise time.
+        urgency_state:
+          type: string
+          description: |
+            `attention` — a human is expected to be on it right now. `waiting` — the attempt lapsed and
+            nobody is actively working it. **This is a label and a sort key, never a filter**: a
+            `pending` request whose attempt lapsed must stay listed and answerable, or "always
+            resumable" is true in the database and false in the inbox.
+          enum: [attention, waiting]
+        prompt:
+          $ref: '#/components/schemas/Prompt'
+        requires:
+          $ref: '#/components/schemas/Requires'
+        mode:
+          type: string
+          enum: [advisory, gated]
+          description: Whether the agent must redeem an authorization before the effect.
+        presentation_binding:
+          type: string
+          enum: [advisory, strict]
+          description: >
+            Under `strict`, an answer whose echoed `rendered_digest` no longer matches is rejected with
+            409 `presentation_stale`. Under `advisory` it is accepted and the divergence is recorded.
+        liveness:
+          type: string
+          enum: [durable, leased]
+          description: As declared at raise time; determines how waiter death is detected.
+        on_waiter_terminal:
+          type: string
+          enum: [keep, cancel]
+          description: What happens to this request when its waiter goes terminal.
+        ttl_policy:
+          $ref: '#/components/schemas/TtlPolicy'
+        routing:
+          allOf:
+            - $ref: '#/components/schemas/Routing'
+          description: >
+            The routing ladder as resolved server-side at raise time and **snapshotted onto the
+            request**, so that a policy edit mid-flight cannot retroactively change what happened.
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          description: Null when no TTL was declared — the ask waits indefinitely.
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        attempt_expires_at:
+          description: Null until an attempt is armed. Lapsing changes `urgency_state`, never `state`.
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        answered_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: Server clock at the moment the settling write committed.
+        superseded_by:
+          description: The successor, when this request was superseded.
+          anyOf:
+            - $ref: '#/components/schemas/RequestId'
+            - type: "null"
+        cancel_reason:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Shown to any human who was mid-answer when the request was withdrawn.
+        surface_url:
+          type: string
+          format: uri
+          description: |
+            **A locator, not a capability.** Opening it prompts for authentication; knowing the URL
+            grants nothing. The unguessable id is never the access-control model.
+        deliveries:
+          type: array
+          items:
+            $ref: '#/components/schemas/Delivery'
+          description: Every delivery minted so far, across every rung.
+        receipt:
+          description: Present once the request is settled; null while `pending`.
+          anyOf:
+            - $ref: '#/components/schemas/Receipt'
+            - type: "null"
+        authorization:
+          description: Present once an answer minted one; null otherwise.
+          anyOf:
+            - $ref: '#/components/schemas/Authorization'
+            - type: "null"
+        waiter:
+          $ref: '#/components/schemas/WaiterView'
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Returned verbatim, never interpreted.
+      examples:
+        - id: req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+          state: pending
+          version: 1
+          org_id: org_01K0A2XFV8C4YRXB2N6VD9FTHE
+          waiter_ref: "run:0198f2a1-6f4c-7c11-9d3e-2b8a5e1c9f04"
+          urgency: high
+          urgency_state: attention
+          prompt:
+            title: "Refund $2,400 to Acme Corp?"
+            body: "Invoice **INV-8821** was double-charged on 2026-07-28."
+          requires:
+            v: 1
+            answer:
+              fields:
+                - name: decision
+                  label: Decision
+                  type: choice
+                  required: true
+                  options:
+                    - id: approve
+                      label: Refund it
+                    - id: reject
+                      label: "Don't refund"
+            capabilities: []
+            authority:
+              min_role: editor
+              auth_strength: session
+          mode: advisory
+          created_at: "2026-07-30T14:02:11Z"
+          expires_at: "2026-07-30T18:02:11Z"
+          attempt_expires_at: null
+          answered_at: null
+          superseded_by: null
+          cancel_reason: null
+          surface_url: https://handoff.example.com/r/req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+          deliveries:
+            - id: dlv_01K3M7QW9AC4YRXB2N6VD9FTHE
+              request_id: req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+              channel: inapp
+              target:
+                kind: role
+                value: "space:editor"
+              rung: 0
+              state: queued
+              grade_reached: null
+              max_grade: acted
+              can_authenticate_person: true
+              attempts: []
+              created_at: "2026-07-30T14:02:11Z"
+              updated_at: "2026-07-30T14:02:11Z"
+          receipt: null
+          authorization: null
+          waiter:
+            state: armed
+            liveness: durable
+          metadata:
+            run_id: 0198f2a1
+
+    WaiterView:
+      type: object
+      description: |
+        The waiting side, as seen from the request. `orphaned` is visible on purpose: a request whose
+        requester died is still answerable, and a human deserves to know their answer may arrive after
+        the run that asked is gone.
+      additionalProperties: false
+      properties:
+        state:
+          type: string
+          enum: [armed, signalled, delivering, acked, orphaned, released]
+        liveness:
+          type: string
+          enum: [durable, leased]
+
+    RequestList:
+      type: object
+      description: One page of requests. Ask for the next page by passing `next_cursor` as `cursor`.
+      required: [data, has_more]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Request'
+        has_more:
+          type: boolean
+        next_cursor:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Null when `has_more` is false.
+
+    AmendRequest:
+      type: object
+      description: |
+        Fields present are merged forward; fields absent are untouched. Amending never changes the
+        request id, the waiter, or an in-progress attempt.
+      additionalProperties: false
+      properties:
+        prompt:
+          $ref: '#/components/schemas/Prompt'
+        requires:
+          $ref: '#/components/schemas/Requires'
+
+    CancelRequest:
+      type: object
+      description: Withdraw the ask.
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          description: Shown to a human who is mid-answer, so the surface can explain why it just changed under them.
+          minLength: 1
+          maxLength: 500
+
+    SupersedeRequest:
+      type: object
+      description: Point this request at the request that replaces it.
+      required: [by]
+      additionalProperties: false
+      properties:
+        by:
+          description: The successor. It must already exist and still be `pending`.
+          allOf:
+            - $ref: '#/components/schemas/RequestId'
+
+    EscalateRequest:
+      type: object
+      description: Advance the ladder now rather than waiting for the rung timer.
+      additionalProperties: false
+      properties:
+        rung:
+          type: integer
+          description: Jump to a specific rung. Omitted means "the next one".
+          minimum: 0
+
+    ReassignRequest:
+      type: object
+      description: Retarget the request at somebody else.
+      required: [to]
+      additionalProperties: false
+      properties:
+        to:
+          $ref: '#/components/schemas/Target'
+        reason:
+          type: string
+          description: Recorded on the request and surfaced to the new target — being handed a decision without context is how decisions stall.
+          maxLength: 500
+
+    AttemptRequest:
+      type: object
+      description: Arm or re-arm the attempt clock.
+      additionalProperties: false
+      properties:
+        ttl:
+          description: Overrides the request's `attempt_ttl` for this window only.
+          allOf:
+            - $ref: '#/components/schemas/Duration'
+
+    # ---------------------------------------------------------------- answer
+
+    AnswerRequest:
+      type: object
+      description: |
+        A human's settling write. `values` is keyed by declared field `name`; anything not declared is
+        rejected rather than stored, so a surface cannot smuggle keys through to the runtime.
+      required: [values]
+      additionalProperties: false
+      properties:
+        values:
+          type: object
+          description: |
+            One entry per declared field. **A `secret` field carries `{"provided": true}` and nothing
+            else** — the value itself went to the sink. A raw value here is
+            `422 answer_validation_failed`.
+          additionalProperties: true
+        via_delivery_id:
+          description: |
+            Which delivery the human answered through. This is what grades that delivery to `acted` —
+            the strongest evidence tier, and the only one that proves a person acted rather than that a
+            transport accepted something.
+          anyOf:
+            - $ref: '#/components/schemas/DeliveryId'
+            - type: "null"
+        partial:
+          type: boolean
+          description: |
+            `true` advances a multi-step ask: the server validates, routes secrets to the sink, amends
+            the field set to the next step, re-arms the attempt clock **fresh**, appends a step to the
+            eventual receipt, and does **not** signal the waiter. Password-then-OTP is one request, not
+            two asks, and the agent never learns there was an intermediate step.
+          default: false
+        note:
+          type: string
+          description: The human's own words, recorded verbatim in the receipt.
+          maxLength: 2000
+        disposition:
+          type: string
+          description: |
+            `decide` (the default) settles the request and mints an authorization. `delegate` hands it
+            to `delegate_to` and leaves it `pending`. `unable` records that this person cannot answer —
+            an honest fact worth having, and better than silence that looks like inattention.
+          enum: [decide, delegate, unable]
+          default: decide
+        delegate_to:
+          $ref: '#/components/schemas/Target'
+        capability_uses:
+          type: array
+          description: |
+            Which capability sessions this human used to be able to answer. Recorded in the receipt as
+            held time, input counts, and navigated origins — presence and effect, **never keystrokes or
+            input payloads**, because a person driving a live surface types real passwords into it.
+          items:
+            $ref: '#/components/schemas/CapabilityUse'
+          maxItems: 16
+        rendered_digest:
+          description: |
+            Digest of exactly what this human was shown. Required when the request declares
+            `presentation_binding: strict`; a mismatch is `409 presentation_stale`. This is what turns
+            "we have a log" into "the log cannot be quietly rewritten to say something else was
+            approved".
+          allOf:
+            - $ref: '#/components/schemas/Digest'
+      examples:
+        - values:
+            decision: approve
+            note: Confirmed with Acme on the phone.
+          via_delivery_id: dlv_01K3M7QW9AC4YRXB2N6VD9FTHE
+          partial: false
+          disposition: decide
+
+    CapabilityUse:
+      type: object
+      description: One capability session the answerer held while answering.
+      required: [handle, session_ref]
+      additionalProperties: false
+      properties:
+        handle:
+          $ref: '#/components/schemas/GrantHandle'
+        session_ref:
+          $ref: '#/components/schemas/GrantSessionRef'
+
+    AnswerResult:
+      type: object
+      description: |
+        What the settling write produced. The receipt exists the instant this returns — it is minted in
+        the same transaction as the state change, not written afterwards by a listener that might not run.
+      required: [request, receipt]
+      additionalProperties: false
+      properties:
+        request:
+          type: object
+          description: The settled request, in brief. Fetch the full representation if you need it.
+          required: [id, state]
+          additionalProperties: false
+          properties:
+            id:
+              $ref: '#/components/schemas/RequestId'
+            state:
+              $ref: '#/components/schemas/RequestState'
+            answered_at:
+              anyOf:
+                - type: string
+                  format: date-time
+                - type: "null"
+        receipt:
+          type: object
+          description: The receipt, in brief. `digest` is the chain entry; fetch the full receipt for the rest.
+          required: [id, digest]
+          additionalProperties: false
+          properties:
+            id:
+              $ref: '#/components/schemas/ReceiptId'
+            digest:
+              $ref: '#/components/schemas/Digest'
+        authorization:
+          description: |
+            Null for a `partial` answer and for any disposition other than `decide` — there is nothing
+            to spend until a decision has actually been made.
+          anyOf:
+            - type: object
+              required: [id, single_use]
+              additionalProperties: false
+              properties:
+                id:
+                  $ref: '#/components/schemas/AuthorizationId'
+                single_use:
+                  type: boolean
+                expires_at:
+                  anyOf:
+                    - type: string
+                      format: date-time
+                    - type: "null"
+            - type: "null"
+
+    # ---------------------------------------------------------------- delivery
+
+    Delivery:
+      type: object
+      description: |
+        One tracked attempt to reach one target on one channel. Delivery is a first-class entity, not a
+        side effect of a sweep: "we tried" is a claim that has to survive being questioned.
+      required: [id, request_id, channel, state]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/DeliveryId'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        channel:
+          type: string
+          description: Open vocabulary. The core carries the name and looks up an adapter; it never switches on it.
+          maxLength: 64
+        target:
+          $ref: '#/components/schemas/Target'
+        rung:
+          type: integer
+          description: Which ladder rung minted this delivery. Rung 0 fires at raise time.
+          minimum: 0
+        state:
+          type: string
+          description: |
+            `suppressed` is a real outcome, not a failure — quiet hours, dedupe, or missing consent.
+            `stale` means the request settled through some other delivery. Neither is an error, and
+            both must be visible: an invisible suppression is indistinguishable from a bug.
+          enum: [queued, suppressed, sending, dispatched, retrying, failed, delivered, bounced, seen, acted, stale, cancelled]
+        grade_reached:
+          description: |
+            The strongest evidence this delivery achieved. `dispatched` means our transport accepted
+            it — **it is not evidence a person got anything.** `delivered` means the channel says it
+            reached the person's endpoint. `seen` means they opened the surface authenticated. `acted`
+            means they answered through it.
+          anyOf:
+            - type: string
+              enum: [dispatched, delivered, seen, acted]
+            - type: "null"
+        max_grade:
+          type: string
+          description: |
+            The best grade this channel can ever prove, declared by its adapter. A voice page that
+            cannot authenticate a person tops out at `delivered`, which stops anyone from treating a
+            phone call as consent.
+          enum: [dispatched, delivered, seen, acted]
+        can_authenticate_person:
+          type: boolean
+          description: Whether this channel can establish *who* received it. A channel that cannot, cannot carry an answer.
+        attempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveryAttempt'
+          description: Every send attempt, with backoff between them. Exponential with jitter, not a flat retry.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DeliveryAttempt:
+      type: object
+      description: One transport-level send.
+      required: [n, started_at]
+      additionalProperties: false
+      properties:
+        n:
+          type: integer
+          minimum: 1
+          description: Attempt number, from 1.
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        outcome:
+          type: string
+          description: What happened at the transport level, independent of whether a person ever saw it.
+          enum: [accepted, transient_failure, permanent_failure, timeout, suppressed]
+        transport_status:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The channel's own status string, carried verbatim for debugging.
+        error:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Failure detail. Never contains message content.
+
+    DeliveryList:
+      type: object
+      description: All deliveries for one request, in creation order.
+      required: [data]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Delivery'
+
+    RedeliverResult:
+      type: object
+      description: Acknowledgement that another attempt is queued. It is not a claim that anyone was reached.
+      required: [delivery_id, queued_at]
+      additionalProperties: false
+      properties:
+        delivery_id:
+          $ref: '#/components/schemas/DeliveryId'
+        queued_at:
+          type: string
+          format: date-time
+
+    # ---------------------------------------------------------------- waiter
+
+    Signal:
+      type: object
+      description: |
+        One queued notification to a waiter. Signals are a **queue**, not a flag: an `attempt_lapsed`
+        nudge can never overwrite a subsequent `answered`. Reading does not consume; the ack does.
+      required: [id, request_id, waiter_ref, type, sequence, resume_token, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/SignalId'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        waiter_ref:
+          $ref: '#/components/schemas/WaiterRef'
+        type:
+          type: string
+          description: |
+            Four terminal types plus `attempt_lapsed`, which is a **non-terminal nudge**: the request
+            stays `pending` and stays answerable. It fires exactly once, ever, per attempt.
+          enum: [answered, expired, cancelled, superseded, attempt_lapsed]
+        sequence:
+          type: integer
+          description: |
+            Monotonically increasing per `waiter_ref`. A client that tracks the highest sequence it has
+            applied can detect gaps and reordering without inspecting content.
+          minimum: 1
+        resume_token:
+          $ref: '#/components/schemas/ResumeToken'
+        decision:
+          description: The typed decision. **Null for `attempt_lapsed`**, which decides nothing.
+          anyOf:
+            - $ref: '#/components/schemas/Decision'
+            - type: "null"
+        resume_ref:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Level 2. Returned byte-identical to what was raised.
+        resume_payload:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Level 2. Returned byte-identical to what was raised, and present in no log.
+        attempts:
+          type: integer
+          description: How many times this signal has been pushed to a callback. Redelivery stops at the ack, not at a 2xx.
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        acked_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+      examples:
+        - id: sig_01K3MB2R4XC4YRXB2N6VD9FTHE
+          request_id: req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+          waiter_ref: "run:0198f2a1-6f4c-7c11-9d3e-2b8a5e1c9f04"
+          type: answered
+          sequence: 1
+          resume_token: rt_01K3MB2R55C4YRXB2N6VD9FTHE
+          decision:
+            outcome: answered
+            values:
+              decision: approve
+              note: Confirmed with Acme on the phone.
+            source: human
+            effective: null
+            receipt_id: rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE
+            authorization_id: auth_01K3MB2R4ZC4YRXB2N6VD9FTHE
+            superseded_by: null
+          resume_ref: null
+          resume_payload: null
+          attempts: 1
+          created_at: "2026-07-30T14:07:44Z"
+          acked_at: null
+
+    Decision:
+      type: object
+      description: |
+        The typed outcome the runtime consumes. It is **data the runtime reads, never an instruction it
+        must obey** — that distinction is what keeps a decision auditable instead of persuasive.
+      required: [outcome, source]
+      additionalProperties: false
+      properties:
+        outcome:
+          type: string
+          enum: [answered, expired, cancelled, superseded]
+        values:
+          type: object
+          description: The answer, keyed by field name. Never carries a `secret` value.
+          additionalProperties: true
+        source:
+          type: string
+          description: |
+            `human` — a person decided. `policy` — an expiry policy decided. `runtime_inference` — a
+            runtime concluded the human acted. **The protocol never fabricates a person**: one field,
+            and the audit trail stops lying about who decided.
+          enum: [human, policy, runtime_inference]
+        effective:
+          description: For an expiry — whether the effective answer is a denial or the pre-declared default.
+          anyOf:
+            - type: string
+              enum: [deny, default]
+            - type: "null"
+        receipt_id:
+          $ref: '#/components/schemas/ReceiptId'
+        authorization_id:
+          anyOf:
+            - $ref: '#/components/schemas/AuthorizationId'
+            - type: "null"
+        superseded_by:
+          anyOf:
+            - $ref: '#/components/schemas/RequestId'
+            - type: "null"
+
+    SignalList:
+      type: object
+      description: Unacked signals for one waiter, oldest first.
+      required: [data, has_more]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Signal'
+        has_more:
+          type: boolean
+
+    ReattachResult:
+      type: object
+      description: |
+        Everything a restarted client needs to carry on: the waiter's state, the requests still open
+        under it, and every unacked signal. Nothing was lost while the client was gone.
+      required: [waiter_ref, state, open_requests, signals]
+      additionalProperties: false
+      properties:
+        waiter_ref:
+          $ref: '#/components/schemas/WaiterRef'
+        state:
+          type: string
+          enum: [armed, signalled, delivering, acked, orphaned, released]
+        open_requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequestId'
+          description: Requests under this waiter that are still `pending`.
+        signals:
+          type: array
+          items:
+            $ref: '#/components/schemas/Signal'
+
+    AckRequest:
+      type: object
+      description: Consume a signal.
+      required: [resume_token, applied]
+      additionalProperties: false
+      properties:
+        resume_token:
+          $ref: '#/components/schemas/ResumeToken'
+        applied:
+          type: boolean
+          description: |
+            Whether the runtime actually applied the decision. `false` is not an error — it records
+            that the decision arrived and could not be acted on, which is a fact the audit should hold
+            rather than swallow.
+        reason:
+          type: string
+          description: Required in practice when `applied` is false. What stopped the runtime from applying it.
+          maxLength: 500
+
+    AckResult:
+      type: object
+      description: Idempotent acknowledgement. `first_ack` distinguishes the write from the replay.
+      required: [acked_at, first_ack]
+      additionalProperties: false
+      properties:
+        acked_at:
+          type: string
+          format: date-time
+        first_ack:
+          type: boolean
+
+    CallbackAttempt:
+      type: object
+      description: One outbound callback attempt for a signal.
+      required: [n, started_at]
+      additionalProperties: false
+      properties:
+        n:
+          type: integer
+          minimum: 1
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        status_code:
+          anyOf:
+            - type: integer
+            - type: "null"
+          description: HTTP status the receiver returned. A 2xx marks the callback dispatched — not consumed.
+        duration_ms:
+          anyOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        outcome:
+          type: string
+          enum: [accepted, transient_failure, permanent_failure, timeout]
+        error:
+          anyOf:
+            - type: string
+            - type: "null"
+
+    CallbackAttemptList:
+      type: object
+      description: The attempt log for one signal, oldest first.
+      required: [data]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CallbackAttempt'
+
+    # ---------------------------------------------------------------- receipt
+
+    Receipt:
+      type: object
+      description: |
+        An immutable record, minted in the same transaction as the decision, that answers six
+        questions: what was decided, who decided it, when, **what they saw**, through what, and under
+        what authority. There is no update path — corrections are new receipts.
+      required: [id, request_id, org_id, kind, decision, actor, decided_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/ReceiptId'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        org_id:
+          $ref: '#/components/schemas/OrgId'
+        kind:
+          type: string
+          description: |
+            `decision` — a person decided. `policy` — an expiry policy decided, and the receipt says so
+            plainly. `correction` — this receipt amends the one named in `corrects`; the original stays
+            exactly as it was.
+          enum: [decision, policy, correction]
+        corrects:
+          anyOf:
+            - $ref: '#/components/schemas/ReceiptId'
+            - type: "null"
+        decision:
+          $ref: '#/components/schemas/ReceiptDecision'
+        actor:
+          $ref: '#/components/schemas/ReceiptActor'
+        decided_at:
+          type: string
+          format: date-time
+          description: Server clock at commit. Never a client-supplied time.
+        attempt_id:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Which attempt window the decision landed in.
+        request_version:
+          type: integer
+          description: The version of the request that was decided on.
+          minimum: 1
+        request_digest:
+          $ref: '#/components/schemas/Digest'
+        rendered:
+          $ref: '#/components/schemas/ReceiptRendered'
+        via:
+          $ref: '#/components/schemas/ReceiptVia'
+        authority:
+          $ref: '#/components/schemas/ReceiptAuthority'
+        steps:
+          type: array
+          description: |
+            The progressive-disclosure ladder as one intervention — "provided email and password at
+            14:02, provided the code at 14:03" — rather than as a series of unrelated asks.
+          items:
+            $ref: '#/components/schemas/ReceiptStep'
+        capabilities_exercised:
+          type: array
+          items:
+            $ref: '#/components/schemas/CapabilityExercised'
+        clearance:
+          $ref: '#/components/schemas/Clearance'
+        waiter_state_at_decision:
+          type: string
+          enum: [armed, signalled, orphaned]
+          description: >
+            Records that an answer arrived after the requester was already gone. A durable waiter
+            defaults to `keep` precisely so that this answer is still worth recording.
+        chain:
+          $ref: '#/components/schemas/ChainLink'
+      examples:
+        - id: rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE
+          request_id: req_01K3M7QW8ZC4YRXB2N6VD9FTHE
+          org_id: org_01K0A2XFV8C4YRXB2N6VD9FTHE
+          kind: decision
+          corrects: null
+          decision:
+            values:
+              decision: approve
+              note: Confirmed with Acme on the phone.
+            disposition: decide
+            note: Confirmed with Acme on the phone.
+          actor:
+            type: user
+            principal_id: usr_01J9ZP4KRTC4YRXB2N6VD9FTHE
+            display: Dana Okafor
+            role_at_decision: editor
+            auth_strength: session
+            reauth_at: null
+            mfa_at: null
+            ip_digest: "sha256:1b7e4c9a2f0d6e8b3a5c7d9f1e2b4a6c8d0f2e4a6c8b0d2f4e6a8c0b2d4f6e8a"
+            user_agent_digest: "sha256:3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a"
+            on_behalf_of: null
+          decided_at: "2026-07-30T14:07:44Z"
+          request_version: 1
+          request_digest: "sha256:9f2c4b1e77a0e56ff536d0ce8e108d8bd5257a869e7ecebeda32affa62cdca3f"
+          rendered:
+            digest: "sha256:5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd"
+            ref: "render:rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE"
+          via:
+            delivery_id: dlv_01K3M7QW9AC4YRXB2N6VD9FTHE
+            channel: inapp
+            target:
+              kind: role
+              value: "space:editor"
+            grade_reached: acted
+          authority:
+            required:
+              min_role: editor
+              auth_strength: session
+            satisfied: session
+          steps:
+            - n: 1
+              at: "2026-07-30T14:07:44Z"
+              fields_provided: [decision, note]
+              secret_fields: []
+              via_delivery_id: dlv_01K3M7QW9AC4YRXB2N6VD9FTHE
+          capabilities_exercised: []
+          clearance:
+            source: human_assertion
+            actor: usr_01J9ZP4KRTC4YRXB2N6VD9FTHE
+            at: "2026-07-30T14:07:44Z"
+          chain:
+            height: 4821
+            prev_digest: "sha256:0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d"
+            digest: "sha256:9f2c4b1e77a0e56ff536d0ce8e108d8bd5257a869e7ecebeda32affa62cdca3f"
+
+    ReceiptDecision:
+      type: object
+      description: |
+        What was decided. **`secret` fields appear only as `{"provided": true}`** — the receipt records
+        that a credential was supplied, never what it was.
+      additionalProperties: false
+      properties:
+        values:
+          type: object
+          additionalProperties: true
+        disposition:
+          type: string
+          enum: [decide, delegate, unable]
+        note:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The human's own words, verbatim.
+
+    ReceiptActor:
+      type: object
+      description: |
+        Who decided, with the attestation to back it. `policy` and `runtime` are first-class actor
+        types precisely so that a machine outcome can never be mistaken for consent — a record that
+        cannot distinguish a person from a policy from a passer-by is not a receipt.
+      required: [type]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [user, policy, runtime, anonymous_link]
+        principal_id:
+          anyOf:
+            - $ref: '#/components/schemas/PrincipalId'
+            - type: "null"
+        display:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Display name frozen at decision time, so a later rename does not rewrite history.
+        role_at_decision:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The role that justified the decision, frozen at the moment it was made.
+        auth_strength:
+          anyOf:
+            - type: string
+              enum: [link_only, session, reauth, mfa]
+            - type: "null"
+        reauth_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        mfa_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        ip_digest:
+          anyOf:
+            - $ref: '#/components/schemas/Digest'
+            - type: "null"
+          description: Salted digest, not an address — enough to correlate a disputed session, not a surveillance record.
+        user_agent_digest:
+          anyOf:
+            - $ref: '#/components/schemas/Digest'
+            - type: "null"
+          description: Salted digest, for the same reason.
+        on_behalf_of:
+          anyOf:
+            - $ref: '#/components/schemas/PrincipalId'
+            - type: "null"
+          description: Set when a service account acted for a named person, so delegation is visible rather than collapsed.
+
+    ReceiptRendered:
+      type: object
+      description: |
+        What this person actually saw. A digest plus a retained copy, not a re-derivation from the
+        current request — this is what converts "we have a log" into "the log cannot be quietly
+        rewritten to say something else was approved".
+      additionalProperties: false
+      properties:
+        digest:
+          $ref: '#/components/schemas/Digest'
+        ref:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Opaque pointer to the retained render. Never a public URL.
+
+    ReceiptVia:
+      type: object
+      description: Through which delivery the decision arrived, and how strong that evidence is.
+      additionalProperties: false
+      properties:
+        delivery_id:
+          anyOf:
+            - $ref: '#/components/schemas/DeliveryId'
+            - type: "null"
+        channel:
+          anyOf:
+            - type: string
+            - type: "null"
+        target:
+          anyOf:
+            - $ref: '#/components/schemas/Target'
+            - type: "null"
+        grade_reached:
+          anyOf:
+            - type: string
+              enum: [dispatched, delivered, seen, acted]
+            - type: "null"
+
+    ReceiptAuthority:
+      type: object
+      description: What the request demanded and what the answerer actually presented. Both, so the two can be compared later.
+      additionalProperties: false
+      properties:
+        required:
+          $ref: '#/components/schemas/Authority'
+        satisfied:
+          type: string
+          description: The strength actually established. `none` is what a policy receipt records — honestly.
+          enum: [none, link_only, session, reauth, mfa]
+
+    ReceiptStep:
+      type: object
+      description: One rung of a progressive-disclosure ladder. Names which fields were provided, never their values.
+      required: [n, at]
+      additionalProperties: false
+      properties:
+        n:
+          type: integer
+          minimum: 1
+        at:
+          type: string
+          format: date-time
+        fields_provided:
+          type: array
+          items:
+            type: string
+          description: Field names only.
+        secret_fields:
+          type: array
+          items:
+            type: string
+          description: Which of those were `secret`. Names only — the values went to the sink and were never here.
+        via_delivery_id:
+          anyOf:
+            - $ref: '#/components/schemas/DeliveryId'
+            - type: "null"
+
+    CapabilityExercised:
+      type: object
+      description: |
+        Presence and effect, never content. A person driving a live surface types real passwords into
+        it, so a keystroke log would recreate in the audit trail exactly the exposure the whole secret
+        design exists to prevent. "Who was handed control of what, when, and did they give it back" is
+        an authorization question, not a content question.
+      required: [handle, session_ref]
+      additionalProperties: false
+      properties:
+        handle:
+          $ref: '#/components/schemas/GrantHandle'
+        session_ref:
+          $ref: '#/components/schemas/GrantSessionRef'
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [view, drive]
+        resolved_at:
+          type: string
+          format: date-time
+        released_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        held_ms:
+          type: integer
+          minimum: 0
+          description: Derived from the lease record, so it reflects real presence rather than an optimistic claim.
+        input_events:
+          type: integer
+          minimum: 0
+          description: A **count**. No payloads, ever.
+        navigations:
+          type: array
+          items:
+            type: string
+          description: Ordered top-level **origins** visited. Origin-level by default; full URLs only under an explicit deployment policy.
+        blast_radius_digest:
+          $ref: '#/components/schemas/Digest'
+
+    Clearance:
+      type: object
+      description: |
+        How the system knows the human finished. A runtime may *infer* completion, but inference is
+        recorded as inference — `runtime_inference` with no actor — never laundered into a human fact.
+        A human action must be recorded, not detected.
+      required: [source]
+      additionalProperties: false
+      properties:
+        source:
+          type: string
+          enum: [human_assertion, runtime_inference, timeout]
+        actor:
+          anyOf:
+            - $ref: '#/components/schemas/PrincipalId'
+            - type: "null"
+          description: Null for anything but `human_assertion`. There is no principal to name.
+        at:
+          type: string
+          format: date-time
+
+    ChainLink:
+      type: object
+      description: |
+        This receipt's position in the org's hash chain. Re-walking the chain from a previously
+        exported head detects any rewrite, with no key management at all.
+      required: [height, digest]
+      additionalProperties: false
+      properties:
+        height:
+          type: integer
+          minimum: 0
+        prev_digest:
+          anyOf:
+            - $ref: '#/components/schemas/Digest'
+            - type: "null"
+          description: Null only for the first receipt in an org.
+        digest:
+          $ref: '#/components/schemas/Digest'
+
+    ReceiptList:
+      type: object
+      description: One page of receipts.
+      required: [data, has_more]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Receipt'
+        has_more:
+          type: boolean
+        next_cursor:
+          anyOf:
+            - type: string
+            - type: "null"
+
+    ChainHead:
+      type: object
+      description: The tamper-evidence anchor an external verifier records and later re-checks.
+      required: [org_id, height, head_digest, as_of]
+      additionalProperties: false
+      properties:
+        org_id:
+          $ref: '#/components/schemas/OrgId'
+        height:
+          type: integer
+          description: Number of receipts in the chain. It only ever increases.
+          minimum: 0
+        head_digest:
+          $ref: '#/components/schemas/Digest'
+        as_of:
+          type: string
+          format: date-time
+
+    # ---------------------------------------------------------------- authorization
+
+    Authorization:
+      type: object
+      description: |
+        What the agent spends. The receipt records what was decided; this is the thing that makes the
+        decision usable exactly once. Redemption is idempotent per `effect_key`, so a retried agent
+        turn cannot double-spend.
+      required: [id, receipt_id, request_id, single_use, state]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/AuthorizationId'
+        receipt_id:
+          $ref: '#/components/schemas/ReceiptId'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        grants:
+          type: object
+          description: The decided values this authorization carries — what was actually approved.
+          additionalProperties: true
+        single_use:
+          type: boolean
+          description: When true, a second **different** `effect_key` is `409 authorization_spent`.
+        expires_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: |
+            Defaults to 24 hours. An approval is a decision about a moment; spending it days later is a
+            different act, and the protocol says so instead of hoping.
+        bound_to:
+          type: object
+          description: What this authorization is tied to.
+          additionalProperties: false
+          properties:
+            waiter_ref:
+              anyOf:
+                - $ref: '#/components/schemas/WaiterRef'
+                - type: "null"
+            effect_digest:
+              anyOf:
+                - $ref: '#/components/schemas/Digest'
+                - type: "null"
+              description: |
+                Binds the authorization to the **shape** of the effect. An approval of "refund $2,400"
+                cannot be spent on "refund $24,000" — the mismatch is `409 effect_digest_mismatch`.
+        redemptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Redemption'
+        state:
+          type: string
+          enum: [open, spent, expired]
+
+    Redemption:
+      type: object
+      description: One spend, keyed by the caller's own effect key.
+      required: [effect_key, redeemed_at]
+      additionalProperties: false
+      properties:
+        effect_key:
+          type: string
+          maxLength: 256
+        redeemed_at:
+          type: string
+          format: date-time
+
+    RedeemRequest:
+      type: object
+      description: Spend the authorization against exactly one effect.
+      required: [effect_key]
+      additionalProperties: false
+      properties:
+        effect_key:
+          type: string
+          description: |
+            A stable identifier for the effect this decision authorizes — the same string on every
+            retry of the same effect. Choosing a key that varies per attempt defeats the entire
+            mechanism.
+          minLength: 1
+          maxLength: 256
+        effect_digest:
+          description: Digest of the effect's parameters, compared against `bound_to.effect_digest` when that is set.
+          allOf:
+            - $ref: '#/components/schemas/Digest'
+
+    RedeemResult:
+      type: object
+      description: |
+        `first_redemption` is the whole answer a caller needs: `true` means act, `false` means this
+        effect already happened and must not happen again.
+      required: [redeemed_at, first_redemption]
+      additionalProperties: false
+      properties:
+        redeemed_at:
+          type: string
+          format: date-time
+        first_redemption:
+          type: boolean
+
+    # ---------------------------------------------------------------- sink
+
+    SinkValuesRequest:
+      type: object
+      description: Secret values, on their way to a runtime-owned sink. Never logged, echoed, or placed in a URL.
+      required: [values]
+      additionalProperties: false
+      properties:
+        values:
+          type: object
+          description: |
+            Keys MUST be declared `requires.answer.fields` names on the owning request. Undeclared keys
+            are rejected outright — the allowlist is what stops a surface from smuggling arbitrary keys
+            through to the runtime.
+          additionalProperties: true
+
+    SinkValuesResult:
+      type: object
+      description: Names only. A response that echoed a value would defeat the point of the sink.
+      required: [accepted]
+      additionalProperties: false
+      properties:
+        accepted:
+          type: array
+          items:
+            type: string
+          description: Which declared field names the sink took.
+        state:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The sink's own opaque progress label, meaningful to the provider and the surface only.
+
+    # ---------------------------------------------------------------- meta
+
+    Meta:
+      type: object
+      description: |
+        What this deployment supports. A conformance runner reads this first so it can distinguish
+        "not implemented" from "failed", and a client reads it to learn whether a declaration it wants
+        to make will fail closed before it makes it.
+      required: [protocol_version, conformance_level, max_wait_seconds]
+      additionalProperties: true
+      properties:
+        protocol_version:
+          type: string
+          description: The wire contract version this server implements.
+          const: "0.1"
+        conformance_level:
+          type: integer
+          description: |
+            `1` — the full protocol without continuation state. `2` — additionally returns `resume_ref`
+            and `resume_payload` byte-identically in signals, and stores them nowhere else.
+          enum: [1, 2]
+        extensions:
+          type: array
+          items:
+            type: string
+          description: Named optional behaviours this deployment implements, for example `continuation`.
+        field_types:
+          type: array
+          items:
+            type: string
+          description: |
+            Answer field types this server will accept. Anything outside this list fails closed with
+            `400 unsupported_field_type`.
+        capability_types:
+          type: array
+          items:
+            type: string
+          description: |
+            Capability types this server will accept. Anything outside this list fails closed with
+            `400 unsupported_capability_type`.
+        max_wait_seconds:
+          type: integer
+          description: The largest long-poll window this server will honour. Larger values are clamped, not rejected.
+          const: 30
+
+    # ---------------------------------------------------------------- errors
+
+    ErrorCode:
+      type: string
+      description: |
+        The complete, stable error taxonomy. `code` is machine-readable and does not change within a
+        major version; `message` is for humans and may change at any time. Clients branch on `code`,
+        never on `message` and never on the HTTP status alone.
+      enum:
+        - invalid_request
+        - unsupported_field_type
+        - unsupported_capability_type
+        - unsupported_requires_version
+        - invalid_api_key
+        - authentication_required
+        - insufficient_scope
+        - product_not_entitled
+        - insufficient_authority
+        - requester_may_not_answer
+        - tenant_mismatch
+        - auth_strength_not_permitted
+        - request_not_found
+        - capability_not_found
+        - signal_not_found
+        - authorization_not_found
+        - already_answered
+        - request_expired
+        - request_cancelled
+        - request_superseded
+        - request_in_progress
+        - idempotency_key_reused
+        - authorization_spent
+        - effect_digest_mismatch
+        - blast_radius_mismatch
+        - grant_already_held
+        - presentation_stale
+        - capability_expired
+        - answer_validation_failed
+        - rate_limited
+        - delivery_unavailable
+
+    FieldError:
+      type: object
+      description: One field-level validation failure, so a surface can highlight the input in place.
+      required: [name, code]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: The declared field name that failed.
+        code:
+          type: string
+          description: Stable machine-readable reason — `required`, `not_an_option`, `out_of_range`, `secret_value_not_permitted`.
+        message:
+          type: string
+
+    ErrorBody:
+      type: object
+      description: The error itself. Extra keys are context for the specific code, and are absent otherwise.
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: Human-readable and subject to change. Never parse it.
+        request_id:
+          description: Present on `already_answered`, `delivery_unavailable`, and every other code that concerns a specific request.
+          anyOf:
+            - $ref: '#/components/schemas/RequestId'
+            - type: "null"
+        receipt_id:
+          description: Present on `already_answered` — the decision that already exists, so a client can show it rather than guess.
+          anyOf:
+            - $ref: '#/components/schemas/ReceiptId'
+            - type: "null"
+        superseded_by:
+          description: Present on `request_superseded` — where to send the human instead.
+          anyOf:
+            - $ref: '#/components/schemas/RequestId'
+            - type: "null"
+        fields:
+          type: array
+          description: Present on `answer_validation_failed`.
+          items:
+            $ref: '#/components/schemas/FieldError'
+        docs:
+          type: string
+          format: uri
+          description: A stable link explaining this code and what to do about it.
+
+    Error:
+      type: object
+      description: One envelope for every error in the protocol. There is never a second shape.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'

@@ -1,0 +1,178 @@
+id: C-15
+title: Storage itself refuses to update or delete a receipt, and the hash chain proves history
+level: 1
+invariants: [I2]
+spec:
+  - "§9.4 — immutability enforced in three layers: application, storage, chain"
+  - "§9.5 — a correction is a new receipt, never an edit"
+  - "§18 C-15 — must be asserted from the storage layer, not through the application"
+rationale: >
+  §9.4 is explicit that application-level immutability is insufficient, **because the threat
+  includes the application**. Asserting this over HTTP would only prove that the API has no update
+  route, which is the easy half. So this case is different in kind from every other case in the
+  suite: the deployment supplies the commands that attempt the mutation directly against its own
+  storage engine, and the suite asserts they were refused.
+
+  That is a deliberate seam, not a gap. The runner speaks only HTTP so that it can test an
+  implementation written in any language against any database; embedding a Postgres driver here
+  would make the suite an assertion about our storage choice rather than about the protocol.
+
+  ## What the deployment must supply
+
+  Four commands under `hooks:` in the deployment profile. Each receives its arguments as
+  environment variables named `HANDOFF_ARG_<KEY>` — here, `HANDOFF_ARG_RECEIPT_ID`.
+
+  - `storage_update_receipt` — attempt an `UPDATE` on the named receipt row **as the application's
+    own database role**, and exit with whatever the engine returns. A conforming deployment has a
+    rule, trigger, or grant that refuses it, so the command exits non-zero.
+  - `storage_delete_receipt` — the same for `DELETE`.
+  - `receipt_chain_verify` — re-walk the org's receipt chain from its first entry, recomputing each
+    `chain.digest` over the canonical form of the receipt including `prev_digest`, and exit zero
+    only if every link agrees with the stored head.
+  - `chain_tamper_is_detected` — alter one historical receipt **in a disposable copy of the store**,
+    re-run the same verification against the copy, and exit zero only when the head no longer
+    verifies. This proves the chain is load-bearing rather than decorative; it must never touch the
+    live store.
+
+requires:
+  principals: [machine_a, human_editor]
+  hooks:
+    - storage_update_receipt
+    - storage_delete_receipt
+    - receipt_chain_verify
+    - chain_tamper_is_detected
+
+steps:
+  - name: raise and answer, producing a receipt
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c15-${run_id}"
+      body:
+        waiter_ref: "run:c15-${run_id}"
+        prompt:
+          title: "Approve the vendor payment?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Pay it"}
+                  - {id: reject, label: "Hold"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a person decides
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c15-answer-${run_id}"
+      body:
+        values: {decision: approve}
+        note: "Invoice matches the purchase order."
+      expect:
+        status: 200
+      capture:
+        receipt: receipt.id
+        digest: receipt.digest
+
+  - name: record the chain head before anything is attempted
+    http:
+      method: GET
+      path: /receipts/chain-head
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: head_digest
+            matches: "^sha256:"
+          - path: height
+            exists: true
+      capture:
+        head: head_digest
+        height: height
+
+  - name: the storage engine refuses an UPDATE on the receipt
+    hook:
+      hook: storage_update_receipt
+      args:
+        receipt_id: "${receipt}"
+        request_id: "${req}"
+      expect:
+        exit_code_not: 0
+        because: >
+          §9.4.2 — the storage engine itself MUST reject mutation. This must be asserted from the
+          storage layer directly: an application that has no update route still fails this
+          requirement if its database role can write the row.
+
+  - name: the storage engine refuses a DELETE on the receipt
+    hook:
+      hook: storage_delete_receipt
+      args:
+        receipt_id: "${receipt}"
+      expect:
+        exit_code_not: 0
+        because: "§9.4.2 — deletion is rejected by storage for the same reason"
+
+  - name: the receipt is exactly what it was
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: receipt
+          - path: decision.values.decision
+            equals: approve
+          - path: chain.digest
+            same_as: digest
+          - path: chain.prev_digest
+            exists: true
+            because: "§9.4.3 — each receipt links to its predecessor in the same tenant"
+
+  - name: the chain head is unchanged
+    http:
+      method: GET
+      path: /receipts/chain-head
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: head_digest
+            same_as: head
+          - path: height
+            same_as: height
+
+  - name: the chain verifies over the full history
+    hook:
+      hook: receipt_chain_verify
+      args:
+        org_head: "${head}"
+      expect:
+        exit_code: 0
+        because: "§9.4.3 — the chain must verify over the full history, not just the newest entry"
+
+  - name: altering any historical entry invalidates the head
+    hook:
+      hook: chain_tamper_is_detected
+      args:
+        receipt_id: "${receipt}"
+      expect:
+        exit_code: 0
+        because: >
+          §9.4 — altering any historical receipt MUST invalidate the chain head. A chain that still
+          verifies after history is rewritten is tamper-evidence in name only. This hook must
+          operate on a disposable copy; it must never mutate the live store.

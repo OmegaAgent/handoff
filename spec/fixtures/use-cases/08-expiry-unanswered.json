@@ -1,0 +1,69 @@
+{
+  "pattern": "expiry-when-nobody-answers",
+  "note": "NOT a request shape either. It is the TTL policy of the request plus transitions R3 and R6. The waiter receives a typed terminal answer; it never receives silence. The receipt names the policy, so no audit can mistake it for consent.",
+  "raise": {
+    "waiter_ref": "run:0198f2b7",
+    "urgency": "normal",
+    "prompt": {
+      "title": "Approve the $180 overage on the Acme plan?"
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "decision",
+            "label": "Decision",
+            "type": "choice",
+            "required": true,
+            "options": [
+              {
+                "id": "approve",
+                "label": "Approve"
+              },
+              {
+                "id": "reject",
+                "label": "Reject"
+              }
+            ]
+          }
+        ]
+      },
+      "capabilities": [],
+      "authority": {
+        "min_role": "editor",
+        "auth_strength": "session",
+        "quorum": 1,
+        "forbid_requester": true
+      }
+    },
+    "ttl": "PT30M",
+    "attempt_ttl": "PT5M",
+    "ttl_policy": {
+      "on_expiry": "expire_and_deny"
+    },
+    "metadata": {
+      "hint": "approval"
+    }
+  },
+  "answer": null,
+  "expect": {
+    "at_attempt_lapse": {
+      "signal_type": "attempt_lapsed",
+      "signal_count": 1,
+      "state": "pending",
+      "urgency_state": "waiting",
+      "still_listed": true,
+      "still_answerable": true
+    },
+    "at_request_expiry": {
+      "state": "expired",
+      "signal_type": "expired",
+      "effective": "deny",
+      "receipt_kind": "policy",
+      "receipt_actor_type": "policy",
+      "receipt_authority_satisfied": "none"
+    },
+    "waiter_never_receives_silence": true
+  }
+}

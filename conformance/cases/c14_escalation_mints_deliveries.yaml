@@ -1,0 +1,156 @@
+id: C-14
+title: Three escalation rungs mint deliveries — still one request and one receipt
+level: 1
+invariants: [I3, I1]
+spec:
+  - "§7.4 — a ladder rung mints deliveries, never a request"
+  - "§6.6 — reassignment and escalation are operations, not state changes"
+  - "§2 — a request has many deliveries and at most one receipt"
+  - "§18 C-14"
+rationale: >
+  Escalation is the feature most likely to be implemented as "raise it again to someone else",
+  which quietly produces two receipts for one intervention and makes the audit trail
+  uncountable. Escalation must be invisible to the receipt except as metadata: one intervention,
+  one decision, one record, however many people were tried.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise with a three-rung ladder
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c14-${run_id}"
+      body:
+        waiter_ref: "run:c14-${run_id}"
+        urgency: high
+        prompt:
+          title: "The payment processor is rejecting every charge — retry or halt?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: retry, label: "Retry"}
+                  - {id: halt, label: "Halt"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+        routing:
+          targets:
+            - {kind: role, value: editor}
+          ladder:
+            - {after: PT0S, channels: [inapp]}
+            - {after: PT5M, channels: [email]}
+            - {after: PT15M, channels: [inapp], to: {kind: rotation, value: oncall}}
+      expect:
+        status: 201
+        body:
+          - path: state
+            equals: pending
+          - path: deliveries
+            length_at_least: 1
+            because: "§7.3 — a raise returns once the request is durable, with deliveries queued"
+      capture:
+        req: id
+
+  - name: advance the ladder one rung
+    http:
+      method: POST
+      path: /requests/${req}/escalate
+      as: machine_a
+      headers:
+        Idempotency-Key: "c14-esc-1-${run_id}"
+      body: {}
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: "§6.6 — escalation MUST NOT change the request's state"
+          - path: receipt
+            is_null: true
+            because: "§6.6 — escalation MUST NOT mint a receipt"
+
+  - name: advance another rung
+    http:
+      method: POST
+      path: /requests/${req}/escalate
+      as: machine_a
+      headers:
+        Idempotency-Key: "c14-esc-2-${run_id}"
+      body: {}
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: req
+            because: "§6.6 — escalation MUST NOT mint a new request"
+
+  - name: every rung produced deliveries, and only deliveries
+    http:
+      method: GET
+      path: /requests/${req}/deliveries
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data
+            length_at_least: 3
+            because: "I3 — a ladder rung mints deliveries"
+          - path: data[].request_id
+            all_equal: "${req}"
+            because: >
+              I3 — every delivery belongs to the one request. A delivery pointing at a second
+              request id is escalation implemented as re-raising.
+
+  - name: still exactly one request under this waiter
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c14-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${req}"]
+
+  - name: one person answers, through one delivery
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c14-answer-${run_id}"
+      body:
+        values: {decision: halt}
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+      capture:
+        receipt: receipt.id
+
+  - name: one intervention, one decision, one record
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: receipt
+          - path: kind
+            equals: decision
+          - path: via.grade_reached
+            one_of: [dispatched, delivered, seen, acted]
+            because: "§9.2 — the receipt records the grade the answering delivery reached"

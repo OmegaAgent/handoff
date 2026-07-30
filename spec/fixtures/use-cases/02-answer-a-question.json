@@ -1,0 +1,59 @@
+{
+  "pattern": "answer-a-question",
+  "note": "A free-text field and a declared fallback. The fallback makes silence produce a typed answer with actor.type = policy, never silence.",
+  "raise": {
+    "waiter_ref": "run:0198f2c3",
+    "urgency": "normal",
+    "prompt": {
+      "title": "What PO number should I put on the Acme invoice?",
+      "body": "Finance rejected the draft without one.",
+      "evidence": [
+        {
+          "kind": "document",
+          "label": "Draft invoice",
+          "ref": "doc_draft_8821"
+        }
+      ]
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "po_number",
+            "label": "PO number",
+            "type": "text",
+            "required": true,
+            "max_len": 40
+          }
+        ]
+      },
+      "capabilities": [],
+      "authority": {
+        "min_role": "viewer",
+        "auth_strength": "session",
+        "quorum": 1,
+        "forbid_requester": true
+      }
+    },
+    "ttl": "P1D",
+    "ttl_policy": {
+      "on_expiry": "default",
+      "default_answer": {
+        "po_number": "PENDING"
+      }
+    },
+    "metadata": {
+      "hint": "question"
+    }
+  },
+  "answer": {
+    "values": {
+      "po_number": "PO-4471"
+    }
+  },
+  "expect": {
+    "state": "answered",
+    "receipt_actor_type": "user"
+  }
+}

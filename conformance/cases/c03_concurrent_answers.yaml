@@ -1,0 +1,128 @@
+id: C-3
+title: Two simultaneous answers settle a request exactly once
+level: 1
+invariants: [I5]
+spec:
+  - "§6.2 R5 — the answer is a conditional write on state = 'pending'"
+  - "§6.2 R10 — a conflicting answer changes nothing"
+  - "§6.7 — duplicate answers, stated completely"
+  - "§18 C-3"
+rationale: >
+  This is where approval systems silently corrupt. Two people click at the same instant; a
+  read-then-write implementation mints two receipts, or last-write-wins overwrites the first
+  decision with the second, and nothing anywhere reports an error. The two answers below are
+  released off a barrier from separate threads, so they genuinely contend — a suite that fires them
+  in sequence proves only that the second call sees the first one's result, which is not the
+  property under test.
+
+requires:
+  principals: [machine_a, human_editor, human_editor_2]
+
+steps:
+  - name: raise a request two people can answer
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c03-${run_id}"
+      body:
+        waiter_ref: "run:c03-${run_id}"
+        prompt:
+          title: "Refund $2,400 to Acme Corp?"
+          body: "Invoice INV-8821 was double-charged."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Refund it"}
+                  - {id: reject, label: "Don't refund"}
+          capabilities: []
+          authority:
+            min_role: editor
+            auth_strength: session
+            assignees: []
+      expect:
+        status: 201
+        body:
+          - path: state
+            equals: pending
+      capture:
+        req: id
+
+  - name: two people answer at the same instant
+    concurrent:
+      calls:
+        - method: POST
+          path: /requests/${req}/answer
+          as: human_editor
+          headers:
+            Idempotency-Key: "c03-answer-a-${run_id}"
+          body:
+            values: {decision: approve}
+            disposition: decide
+        - method: POST
+          path: /requests/${req}/answer
+          as: human_editor_2
+          headers:
+            Idempotency-Key: "c03-answer-b-${run_id}"
+          body:
+            values: {decision: reject}
+            disposition: decide
+      expect_outcomes:
+        - count: 1
+          status: 200
+          because: "§6.2 R5 — exactly one conditional write affects the row"
+          body:
+            - path: receipt.id
+              matches: "^rcpt_"
+            - path: request.state
+              equals: answered
+        - count: 1
+          status: 409
+          because: >
+            §6.7.2 — when the conditional write affects no row the Server returns a specific 409
+            carrying the settling record, never a 2xx with a failure flag and never a silent
+            overwrite
+          body:
+            - path: error.code
+              equals: already_answered
+            - path: error.receipt_id
+              matches: "^rcpt_"
+
+  - name: the request settled once
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: answered
+          - path: receipt.id
+            matches: "^rcpt_"
+          - path: answered_at
+            is_null: false
+      capture:
+        receipt: receipt.id
+
+  - name: exactly one decision receipt exists for the request
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: receipt
+            because: "I1 — one request has at most one decision receipt"
+          - path: kind
+            equals: decision
+          - path: request_id
+            same_as: req

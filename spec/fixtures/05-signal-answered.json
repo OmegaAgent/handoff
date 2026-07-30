@@ -1,0 +1,25 @@
+{
+  "id": "sig_01K3MB2R4X8ZC4YRXB2N6VD9FT",
+  "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+  "waiter_ref": "run:0198f2a1",
+  "type": "answered",
+  "sequence": 1,
+  "resume_token": "rt_01K3MB2R558ZC4YRXB2N6VD9FT",
+  "decision": {
+    "outcome": "answered",
+    "values": {
+      "decision": "approve",
+      "note": "Confirmed with Acme on the phone."
+    },
+    "source": "human",
+    "effective": null,
+    "receipt_id": "rcpt_01K3MB2R4Y8ZC4YRXB2N6VD9FT",
+    "authorization_id": "auth_01K3MB2R4Z8ZC4YRXB2N6VD9FT",
+    "superseded_by": null
+  },
+  "resume_ref": null,
+  "resume_payload": null,
+  "attempts": 1,
+  "created_at": "2026-07-30T14:07:44Z",
+  "acked_at": null
+}

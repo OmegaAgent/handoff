@@ -1,0 +1,92 @@
+id: C-5
+title: A machine key calling /answer is refused by principal type
+level: 1
+invariants: [I15]
+spec:
+  - "§4.1 — a requester principal may never answer"
+  - "§4.2 — the requester ≠ decider rule, enforced by principal type"
+  - "§18 C-5"
+rationale: >
+  Without this rule an agent holding an API key can approve itself, and every other guarantee in the
+  specification is decoration. §4.2 is explicit that it is enforced by principal *type*, not by role
+  or scope or a deployment setting: there must be no configuration under which a machine can satisfy
+  a human-intervention request. That is why the case answers with the very key that raised the
+  request — the most privileged machine principal available — and still expects a refusal.
+
+requires:
+  principals: [machine_a]
+
+steps:
+  - name: raise a request as a machine principal
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c05-${run_id}"
+      body:
+        waiter_ref: "run:c05-${run_id}"
+        prompt:
+          title: "Approve your own refund?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: viewer, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: the same machine key tries to answer
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: machine_a
+      headers:
+        Idempotency-Key: "c05-answer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 403
+        body:
+          - path: error.code
+            equals: requester_may_not_answer
+            because: >
+              §4.2 — a Server MUST enforce this by principal type. `insufficient_authority` would be
+              the wrong code: it implies a role that could be granted, and no role may ever grant a
+              machine the power to answer.
+
+  - name: nothing was decided
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+          - path: receipt
+            is_null: true
+          - path: authorization
+            is_null: true
+
+  - name: no receipt exists
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: "§9 — a receipt exists only once a decision has been made"

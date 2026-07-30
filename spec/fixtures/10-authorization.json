@@ -1,0 +1,21 @@
+{
+  "id": "auth_01K3MB2R4Z8ZC4YRXB2N6VD9FT",
+  "receipt_id": "rcpt_01K3MB2R4Y8ZC4YRXB2N6VD9FT",
+  "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+  "grants": {
+    "decision": "approve"
+  },
+  "single_use": true,
+  "expires_at": "2026-07-31T14:07:44Z",
+  "bound_to": {
+    "waiter_ref": "run:0198f2a1",
+    "effect_digest": "sha256:1b7e4d9a0c3f5628be71d40a9c8f3e25b71d40a9c8f3e25b71d40a9c8f3e25b7"
+  },
+  "redemptions": [
+    {
+      "effect_key": "stripe:refund:ch_1B",
+      "redeemed_at": "2026-07-30T14:07:46Z"
+    }
+  ],
+  "state": "spent"
+}

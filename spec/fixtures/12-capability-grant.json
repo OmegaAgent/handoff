@@ -1,0 +1,38 @@
+{
+  "handle": "hg_01K3M7QW8ZC4YRXB2N6VD9FTHG",
+  "type": "interactive_surface",
+  "scope": "drive",
+  "provider": "example/browser",
+  "resource_ref": "opaque:bs_4KpQ",
+  "label": "the browser the agent is driving",
+  "purpose": "Finish sign-in yourself if the site uses single sign-on or a challenge.",
+  "optional": true,
+  "ttl": "PT15M",
+  "blast_radius_digest": "sha256:9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c",
+  "blast_radius": {
+    "summary": "Everything this workspace's browser is signed into",
+    "shared_with": "space",
+    "principals": 4,
+    "identities": [
+      {
+        "origin": "mail.example.com",
+        "label": "dana@example.com"
+      },
+      {
+        "origin": "app.hubspot.com",
+        "label": "Acme Corp"
+      }
+    ],
+    "reversible": false,
+    "note": "Actions you take here are indistinguishable from actions by the signed-in accounts."
+  },
+  "expires_at": "2026-07-30T14:17:11Z",
+  "revoked_at": null,
+  "max_holders": 1,
+  "bound_principal_id": null,
+  "constraints": {
+    "origins": [
+      "app.hubspot.com"
+    ]
+  }
+}

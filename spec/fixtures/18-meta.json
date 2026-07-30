@@ -1,0 +1,19 @@
+{
+  "protocol_version": "0.1",
+  "conformance_level": 1,
+  "extensions": [],
+  "field_types": [
+    "choice",
+    "text",
+    "number",
+    "boolean",
+    "secret",
+    "attestation",
+    "document",
+    "file_ref"
+  ],
+  "capability_types": [
+    "interactive_surface"
+  ],
+  "max_wait_seconds": 30
+}

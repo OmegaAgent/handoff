@@ -1,0 +1,59 @@
+{
+  "pattern": "reassign-or-escalate",
+  "note": "NOT a request shape. Modelling this as a kind would add a state and a renderer branch. It is an operation on an existing request, plus a disposition on an answer. Neither mints a receipt on its own and neither changes the request's state.",
+  "raise": null,
+  "operations": [
+    {
+      "method": "POST",
+      "path": "/v1/requests/{request_id}/reassign",
+      "body": {
+        "to": {
+          "kind": "principal",
+          "value": "usr_01J9M7QW8ZC4YRXB2N6VD9FTHE"
+        },
+        "reason": "Dana owns the Acme account"
+      },
+      "expect": {
+        "state": "pending",
+        "new_deliveries": true,
+        "receipt_minted": false,
+        "new_request_minted": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/requests/{request_id}/escalate",
+      "body": {
+        "rung": 2
+      },
+      "expect": {
+        "state": "pending",
+        "new_deliveries": true,
+        "receipt_minted": false,
+        "new_request_minted": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/requests/{request_id}/answer",
+      "body": {
+        "values": {},
+        "disposition": "delegate",
+        "delegate_to": {
+          "kind": "role",
+          "value": "admin"
+        },
+        "note": "Above my limit."
+      },
+      "expect": {
+        "state": "pending",
+        "receipt_minted": false,
+        "delegation_recorded": true
+      }
+    }
+  ],
+  "expect": {
+    "request_count": 1,
+    "receipt_count_after_final_answer": 1
+  }
+}

@@ -1,0 +1,40 @@
+# Profile for the 501 stub in `stub_501.py`.
+#
+# Its only job is to satisfy every case's *preconditions* — credentials exist, hooks exist — so that
+# each case proceeds to real HTTP and fails on what the server actually returned rather than on a
+# missing credential. That makes the all-red run a demonstration that the assertions work, not just
+# that the configuration is absent.
+#
+# Do not copy this to test a real deployment; use `profile.example.yaml`.
+
+principals:
+  machine_a: {kind: machine, token: "stub", org: org_a}
+  machine_b: {kind: machine, token: "stub", org: org_b}
+  human_editor: {kind: human_bearer, token: "stub", org: org_a}
+  human_editor_2: {kind: human_bearer, token: "stub", org: org_a}
+  human_viewer: {kind: human_bearer, token: "stub", org: org_a}
+  human_admin: {kind: human_bearer, token: "stub", org: org_a}
+  human_link_only: {kind: human_bearer, token: "stub", org: org_a}
+
+deployment:
+  link_only_permitted: false
+
+# Placeholders. A real deployment supplies commands that genuinely probe its storage and logs; these
+# only need to exist so the precondition check passes and the case reaches its HTTP steps.
+hooks:
+  logs: "true"
+  storage_update_receipt: "false"
+  storage_delete_receipt: "false"
+  receipt_chain_verify: "true"
+  chain_tamper_is_detected: "true"
+  channel_inbound: "true"
+  observe_page_state_change: "true"
+  events: "true"
+  crash_between_state_and_event: "true"
+
+callback:
+  bind: "127.0.0.1:0"
+  secret: "whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05"
+  secret_previous: "whsec_9d41c07be5a2f36819b4d0e7c5a81f62"
+
+max_real_sleep: PT30S

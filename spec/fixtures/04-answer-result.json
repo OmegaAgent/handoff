@@ -1,0 +1,16 @@
+{
+  "request": {
+    "id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+    "state": "answered",
+    "answered_at": "2026-07-30T14:07:44Z"
+  },
+  "receipt": {
+    "id": "rcpt_01K3MB2R4Y8ZC4YRXB2N6VD9FT",
+    "digest": "sha256:919f8870391849de4e7b1d5b249ccbaaa7d5a7d3f500f5571c5a92dd0c3909db"
+  },
+  "authorization": {
+    "id": "auth_01K3MB2R4Z8ZC4YRXB2N6VD9FT",
+    "single_use": true,
+    "expires_at": "2026-07-31T14:07:44Z"
+  }
+}

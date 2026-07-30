@@ -1,0 +1,158 @@
+id: C-1
+title: One Idempotency-Key raises one request — 201, then 200
+level: 1
+invariants: [I20]
+spec:
+  - "§3.1 — three keys, deliberately distinct"
+  - "§3.3 — what makes two raises the same request"
+  - "§3.5 — idempotency of mutating operations"
+  - "§18 C-1"
+rationale: >
+  The 201/200 distinction is contract, not decoration: it is how a caller tells "I asked" from
+  "I already asked". A runtime that retries a raise after a network timeout must not page a second
+  person, and the third step here is the one implementations usually miss — the same key with a
+  different body is a conflict, never a silent overwrite of what was already stored.
+
+requires:
+  principals: [machine_a]
+
+steps:
+  - name: raise a request with an idempotency key
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c01-${run_id}"
+      body:
+        waiter_ref: "run:c01-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Refund $2,400 to Acme Corp?"
+          body: "Invoice INV-8821 was double-charged on 2026-07-28."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                label: Decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Refund it"}
+                  - {id: reject, label: "Don't refund"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+        body:
+          - path: id
+            matches: "^req_[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$"
+            because: "§1.4 — identifiers are prefixed 26-character Crockford base32 ULIDs"
+          - path: state
+            equals: pending
+          - path: version
+            equals: 1
+      capture:
+        req: id
+        created: created_at
+
+  - name: replay the same key with the same body
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c01-${run_id}"
+      body:
+        waiter_ref: "run:c01-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Refund $2,400 to Acme Corp?"
+          body: "Invoice INV-8821 was double-charged on 2026-07-28."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                label: Decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Refund it"}
+                  - {id: reject, label: "Don't refund"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: req
+            because: "§3.3.1 — the same key and body digest is the same request, not a new one"
+          - path: created_at
+            same_as: created
+            because: "a replay returns the stored representation, so it cannot have been re-created"
+          - path: version
+            equals: 1
+            because: "a replay is not an amendment and must not bump the version"
+
+  - name: reuse the key with a different body
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c01-${run_id}"
+      body:
+        waiter_ref: "run:c01-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Refund $24,000 to Acme Corp?"
+          body: "A different amount entirely."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                label: Decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Refund it"}
+                  - {id: reject, label: "Don't refund"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 409
+        body:
+          - path: error.code
+            equals: idempotency_key_reused
+            because: "§3.3.2 — a reused key with a different digest is a conflict"
+
+  - name: the stored request was not modified by the rejected reuse
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: prompt.title
+            equals: "Refund $2,400 to Acme Corp?"
+            because: "§3.3.2 — the Server MUST NOT modify the stored request"
+          - path: version
+            equals: 1
+
+  - name: exactly one request exists under this waiter
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c01-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${req}"]
+            because: "three raises, one request — asserted on identity, not on a count alone"

@@ -1,0 +1,87 @@
+{
+  "pattern": "confirm-an-external-side-effect",
+  "note": "gated mode plus an effect digest. The authorization is bound to the SHAPE of the effect, so a decision about one amount cannot be spent on another.",
+  "raise": {
+    "waiter_ref": "run:0198f2e4",
+    "urgency": "high",
+    "prompt": {
+      "title": "Send the termination notice to 412 customers?",
+      "body": "This cannot be recalled once sent.",
+      "evidence": [
+        {
+          "kind": "table",
+          "label": "Recipients",
+          "value": {
+            "columns": [
+              "segment",
+              "count"
+            ],
+            "rows": [
+              [
+                "churn-risk",
+                "412"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "decision",
+            "label": "Decision",
+            "type": "choice",
+            "required": true,
+            "options": [
+              {
+                "id": "confirm",
+                "label": "Send it"
+              },
+              {
+                "id": "cancel",
+                "label": "Don't send"
+              }
+            ]
+          }
+        ]
+      },
+      "capabilities": [],
+      "authority": {
+        "min_role": "editor",
+        "auth_strength": "reauth",
+        "quorum": 1,
+        "forbid_requester": true,
+        "reason": "the send cannot be undone"
+      }
+    },
+    "mode": "gated",
+    "ttl": "PT2H",
+    "ttl_policy": {
+      "on_expiry": "expire_and_deny"
+    },
+    "metadata": {
+      "hint": "confirm"
+    }
+  },
+  "answer": {
+    "values": {
+      "decision": "confirm"
+    }
+  },
+  "redeem": {
+    "effect_key": "mailer:campaign:cmp_88213",
+    "effect_digest": "sha256:1b7e4d9a0c3f5628be71d40a9c8f3e25b71d40a9c8f3e25b71d40a9c8f3e25b7"
+  },
+  "expect": {
+    "state": "answered",
+    "first_redemption": true,
+    "second_redemption_same_effect_key": {
+      "first_redemption": false
+    },
+    "different_effect_key": "authorization_spent",
+    "mismatched_digest": "effect_digest_mismatch"
+  }
+}

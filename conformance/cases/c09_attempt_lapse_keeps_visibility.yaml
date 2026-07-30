@@ -1,0 +1,159 @@
+id: C-9
+title: A lapsed attempt nudges once, and the request stays pending, listed, and answerable
+level: 1
+invariants: [I4]
+spec:
+  - "§6.2 R3 — attempt lapse stamps once, ever"
+  - "§6.3 — two clocks: the request and the attempt"
+  - "§18 C-9"
+rationale: >
+  This is the specific failure the two-clock split exists to prevent: a data layer that remains
+  resumable behind a surface that shows nothing to click. A lapsed *attempt* changes
+  `urgency_state` from `attention` to `waiting` and nothing else — it must not filter the request
+  out of a listing, must not withdraw its notifications, and must not be able to fire twice. The
+  last step re-checks the signal queue after a second lapse window has passed, because "once, ever"
+  is the part implementations get wrong.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise with a short attempt window and no request TTL
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c09-${run_id}"
+      body:
+        waiter_ref: "run:c09-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Approve the invoice?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+        attempt_ttl: PT2S
+      expect:
+        status: 201
+        body:
+          - path: expires_at
+            is_null: true
+            because: "§6.3 — a request raised with no ttl never expires"
+      capture:
+        req: id
+
+  - name: arm the attempt clock
+    http:
+      method: POST
+      path: /requests/${req}/attempt
+      as: machine_a
+      headers:
+        Idempotency-Key: "c09-arm-${run_id}"
+      body:
+        ttl: PT2S
+      expect:
+        status: 200
+        body:
+          - path: attempt_expires_at
+            is_null: false
+          - path: urgency_state
+            equals: attention
+
+  - name: let the attempt window lapse
+    advance_clock:
+      by: PT5S
+
+  - name: exactly one attempt_lapsed signal is queued
+    poll:
+      timeout: PT30S
+      interval: PT2S
+      call:
+        method: GET
+        path: /waiters/run%3Ac09-${run_id}/signals
+        as: machine_a
+        expect:
+          status: 200
+          body:
+            - path: data
+              length: 1
+              because: "§6.2 R3 — the lapse is stamped once, ever"
+            - path: data[0].type
+              equals: attempt_lapsed
+            - path: data[0].decision
+              is_null: true
+              because: "§8.3 — attempt_lapsed decides nothing, so it carries no decision"
+
+  - name: the request is still pending and merely less urgent
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: "§6.3 — the attempt expires, the request does not"
+          - path: urgency_state
+            equals: waiting
+            because: "§6.3 — a lapse changes urgency, never visibility"
+
+  - name: and it is still listed
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c09-${run_id}"
+        state: pending
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${req}"]
+            because: >
+              I4 — a Server MUST NOT filter attempt-lapsed requests out of a listing. "Always
+              resumable" being true in the database and false in the inbox is the failure this
+              invariant names.
+
+  - name: wait past a second lapse window
+    advance_clock:
+      by: PT5S
+
+  - name: still exactly one attempt_lapsed signal, ever
+    http:
+      method: GET
+      path: /waiters/run%3Ac09-${run_id}/signals
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data
+            length: 1
+            because: "§6.2 R3 — the lapse has not already been notified is a guard, not a hint"
+
+  - name: and the request is still answerable at its canonical URL
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c09-answer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+            because: "I4 — a pending request is always answerable at its canonical URL"

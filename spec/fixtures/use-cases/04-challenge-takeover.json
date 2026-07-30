@@ -1,0 +1,81 @@
+{
+  "pattern": "challenge-or-takeover",
+  "note": "Zero typed fields is legal and means the whole request is an attestation. The capability is required, its blast radius is declared, and the accepted digest binds the resolve.",
+  "raise": {
+    "waiter_ref": "run:0198f2a1",
+    "urgency": "critical",
+    "prompt": {
+      "title": "A bot check is blocking checkout on app.example.com",
+      "body": "The agent cannot solve it. Take the wheel, clear the check, then confirm."
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "cleared",
+            "label": "I cleared it",
+            "type": "attestation",
+            "required": true
+          }
+        ]
+      },
+      "capabilities": [
+        {
+          "handle": "hg_01K3M7QW8ZC4YRXB2N6VD9FTHH",
+          "type": "interactive_surface",
+          "scope": "drive",
+          "provider": "example/browser",
+          "resource_ref": "opaque:bs_4KpQ",
+          "optional": false,
+          "ttl": "PT15M",
+          "label": "the browser the agent is driving",
+          "purpose": "Clear the challenge yourself.",
+          "blast_radius_digest": "sha256:9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c"
+        }
+      ],
+      "authority": {
+        "min_role": "admin",
+        "auth_strength": "session",
+        "quorum": 1,
+        "forbid_requester": true,
+        "reason": "driving this browser is indistinguishable from acting as every account it holds"
+      }
+    },
+    "attempt_ttl": "PT15M",
+    "ttl_policy": {
+      "on_expiry": "escalate"
+    },
+    "metadata": {
+      "hint": "takeover"
+    }
+  },
+  "resolve": {
+    "scopes": [
+      "view",
+      "drive"
+    ],
+    "accepted_blast_radius_digest": "sha256:9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c"
+  },
+  "answer": {
+    "values": {
+      "cleared": true
+    },
+    "note": "Cleared the bot check.",
+    "capability_uses": [
+      {
+        "handle": "hg_01K3M7QW8ZC4YRXB2N6VD9FTHH",
+        "session_ref": "hs_01K3MB2R4S8ZC4YRXB2N6VD9FT"
+      }
+    ]
+  },
+  "expect": {
+    "state": "answered",
+    "clearance_source": "human_assertion",
+    "capability_recorded": {
+      "input_content_recorded": false,
+      "held_ms_recorded": true
+    },
+    "page_state_change_alone_produces_no_receipt": true
+  }
+}

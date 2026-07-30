@@ -1,0 +1,27 @@
+{
+  "id": "dlv_01K3M7QW9A8ZC4YRXB2N6VD9FT",
+  "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+  "channel": "inapp",
+  "target": {
+    "kind": "role",
+    "value": "editor"
+  },
+  "rung": 0,
+  "state": "acted",
+  "grade_reached": "acted",
+  "max_grade": "acted",
+  "can_authenticate_person": true,
+  "attempts": [
+    {
+      "n": 1,
+      "started_at": "2026-07-30T14:02:11Z",
+      "ended_at": "2026-07-30T14:02:11Z",
+      "outcome": "accepted",
+      "transport_status": "200",
+      "error": null,
+      "next_attempt_at": null
+    }
+  ],
+  "created_at": "2026-07-30T14:02:11Z",
+  "updated_at": "2026-07-30T14:07:44Z"
+}
