@@ -186,10 +186,10 @@ impl Authorization {
         }
 
         if self.expires_at.is_some_and(|at| at.is_at_or_before(now)) {
-            // The taxonomy has no `authorization_expired`; see the crate documentation's spec
-            // defect D-4. Overloading `authorization_spent` would tell the caller something untrue.
+            // §10 rule 4. Its own code, because the decision was real and is on the record — it is
+            // only no longer spendable, which is neither "spent" nor "never existed".
             return Err(ProtocolError::new(
-                ErrorCode::InvalidRequest,
+                ErrorCode::AuthorizationExpired,
                 "this authorization is past its expiry and is no longer spendable",
             ));
         }

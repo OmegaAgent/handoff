@@ -95,10 +95,6 @@
 //!   step (§5.5) and a non-deciding disposition (§6.6) both leave the request `pending` and both
 //!   have prose but no number. They appear here as [`request::TransitionRule::ProgressiveStep`] and
 //!   [`request::TransitionRule::NonDecidingDisposition`] so nothing is silently unnumbered.
-//! * **D-4 — no error code for an expired authorization.** §10 rule 4 bounds how long a decision
-//!   stays spendable, and [`authorization::AuthorizationState`] has an `expired` member, but
-//!   `ErrorCode` has no `authorization_expired`. Overloading `authorization_spent` would tell a
-//!   caller something untrue, so this crate returns `invalid_request` and recommends adding a code.
 //! * **D-5 — the `Duration` pattern admits years and months.** `openapi.yaml` permits `P1Y` and
 //!   `P1M`, whose length depends on when you start. [`clock::IsoDuration`] rejects both; a deadline
 //!   that means something different in February is not a deadline.

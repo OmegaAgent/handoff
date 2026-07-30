@@ -35,13 +35,41 @@ fi
 # Rewrite history. The trigger that makes this impossible in the live store is dropped *here*,
 # in the copy, precisely because the point is to see what a successful rewrite would do to the head.
 psql "$CLEAN_URL" -q -c "drop trigger handoff_receipts_no_update on handoff_receipts" >/dev/null
-ALTERED=$(psql "$CLEAN_URL" -tA -c \
+
+# Alter the FIRST receipt of ONE tenant, and alter a member every receipt is required to carry.
+#
+# Two things went wrong in earlier versions of this probe and both produced a false pass.
+# `min(height)` without a tenant matches the first receipt of *every* tenant, because heights are
+# per-tenant and all of them start at 1. And `jsonb_set` on `{decision,values,decision}` is a no-op
+# when an intermediate member is absent — which it is on a policy receipt whose decision carries no
+# values — so the "tampered" copy was byte-identical to the original and of course still verified.
+# `decided_at` is required on every receipt by the schema, so setting it always changes the core
+# hash, and therefore always changes the digest and every digest after it.
+TENANT=$(psql "$CLEAN_URL" -qtA -c \
+  "select tenant_ref from handoff_receipts group by tenant_ref order by count(*) desc limit 1")
+if [ -z "$TENANT" ]; then
+  echo "there are no receipts, so there is no history to tamper with" >&2
+  exit 1
+fi
+
+# `-q` matters: without it psql prints the `UPDATE 1` command tag to stdout alongside the returned
+# id, and the row-count guard below then sees two lines and rejects a perfectly correct update.
+ALTERED=$(psql "$CLEAN_URL" -qtA -c \
   "update handoff_receipts
-     set body = jsonb_set(body, '{decision,values,decision}', '\"reject\"'::jsonb, true)
-   where height = (select min(height) from handoff_receipts)
+     set body = jsonb_set(body, '{decided_at}', '\"2000-01-01T00:00:00Z\"'::jsonb, true)
+   where tenant_ref = '$TENANT'
+     and height = (select min(height) from handoff_receipts where tenant_ref = '$TENANT')
    returning id")
-if [ -z "$ALTERED" ]; then
-  echo "nothing was altered; there is no history to tamper with yet" >&2
+if [ "$(printf '%s' "$ALTERED" | grep -c .)" != "1" ]; then
+  echo "expected to alter exactly one receipt, altered: [$ALTERED]" >&2
+  exit 1
+fi
+
+# The alteration has to have actually changed the bytes, or the rest of this proves nothing.
+if [ "$(psql "$CLEAN_URL" -qtA -c \
+      "select body->>'decided_at' from handoff_receipts where id = '$ALTERED'")" \
+     != "2000-01-01T00:00:00Z" ]; then
+  echo "the update did not change the stored receipt; the tamper check would prove nothing" >&2
   exit 1
 fi
 

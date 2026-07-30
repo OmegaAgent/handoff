@@ -51,57 +51,20 @@ impl IntoResponse for Api {
     }
 }
 
-/// A failure, rendered in the one error envelope.
-pub enum ApiError {
-    /// A code the frozen protocol crate knows about.
-    Protocol(ProtocolError),
-    /// A code `openapi.yaml` defines that `handoff-protocol`'s `ErrorCode` does not yet carry.
-    ///
-    /// There is exactly one of these today — `authorization_expired`, which `openapi.yaml` lists in
-    /// `ErrorCode` and documents as a `409`, while the protocol crate still records it as a spec
-    /// defect and returns `invalid_request`. The three codes it would otherwise collapse into each
-    /// assert something false: `authorization_spent` says the decision was used when it was not,
-    /// `authorization_not_found` says it never existed, and `invalid_request` says the caller sent
-    /// something malformed. A decision that was real, is on the record, and is no longer spendable
-    /// is none of those.
-    ///
-    /// This variant is a **seam, not a habit**: it exists so the wire matches the published
-    /// contract while the crate catches up, and it should disappear the moment `ErrorCode` gains
-    /// the variant.
-    Raw {
-        /// HTTP status.
-        status: StatusCode,
-        /// The `openapi.yaml` code string.
-        code: &'static str,
-        /// Message for people.
-        message: String,
-    },
-}
+/// A failure, rendered in the one error envelope §13 requires across the whole surface.
+pub struct ApiError(pub ProtocolError);
 
 impl From<ProtocolError> for ApiError {
     fn from(value: ProtocolError) -> Self {
-        Self::Protocol(value)
+        Self(value)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, body) = match self {
-            Self::Protocol(error) => (
-                StatusCode::from_u16(error.http_status())
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                crate::wire::error(&error),
-            ),
-            Self::Raw {
-                status,
-                code,
-                message,
-            } => (
-                status,
-                serde_json::json!({"error": {"code": code, "message": message}}),
-            ),
-        };
-        let mut response = (status, axum::Json(body)).into_response();
+        let status =
+            StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let mut response = (status, axum::Json(crate::wire::error(&self.0))).into_response();
         rate_limit_headers(response.headers_mut());
         response
     }

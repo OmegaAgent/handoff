@@ -24,7 +24,7 @@ deployment:
   link_only_permitted: false
 
 hooks:
-  logs: "tail -n 5000 core/dev/.run/handoffd.log"
+  logs: "tail -n 5000 \"${HANDOFF_RUN_DIR:-core/dev/.run}/handoffd.log\""
 
   # C-15. These run as the application's own database role and must be REFUSED by the storage
   # engine itself, because §9.4 puts the application inside the threat model.

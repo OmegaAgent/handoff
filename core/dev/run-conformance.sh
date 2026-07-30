@@ -12,8 +12,12 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-RUN_DIR="$HERE/.run"
+# Scratch for this run: the server log, and the private copy of the binaries the hooks exec.
+# Overridable because two runs sharing one directory overwrite each other's `handoffd` mid-suite,
+# and a hook that execs a half-written binary reports a conformance failure that is really a race.
+RUN_DIR="${HANDOFF_RUN_DIR:-$HERE/.run}"
 mkdir -p "$RUN_DIR"
+export HANDOFF_RUN_DIR="$RUN_DIR"
 
 PG_HOST="${PGHOST:-localhost}"
 PG_PORT="${PGPORT:-5432}"
@@ -25,12 +29,12 @@ DB="${HANDOFF_DB:-handoff_conf_$(date +%s)}"
 export PG_ADMIN_URL="postgres://$PG_USER@$PG_HOST:$PG_PORT/postgres"
 export HANDOFF_DATABASE_URL="postgres://$PG_USER@$PG_HOST:$PG_PORT/$DB"
 export HANDOFF_BOOTSTRAP="$HERE/bootstrap.json"
-export HANDOFF_BIND="${HANDOFF_BIND:-127.0.0.1:8080}"
+export HANDOFF_BIND="${HANDOFF_BIND:-127.0.0.1:8130}"
 export HANDOFF_PUBLIC_BASE="http://$HANDOFF_BIND"
 export HANDOFF_LINK_ONLY_PERMITTED=false
 export HANDOFF_CALLBACK_SECRETS="whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05,whsec_9d41c07be5a2f36819b4d0e7c5a81f62"
 export HANDOFF_SWEEP_INTERVAL_MS=250
-export HANDOFF_CRASH_PORT="${HANDOFF_CRASH_PORT:-8091}"
+export HANDOFF_CRASH_PORT="${HANDOFF_CRASH_PORT:-8131}"
 export CARGO_INCREMENTAL=0
 
 # A guard, not a courtesy: these are somebody else's databases and this script creates and drops.
@@ -39,11 +43,31 @@ case "$DB" in
 esac
 
 echo "building…"
-( cd "$ROOT/core" && cargo build --quiet --bin handoffd --bin handoff-conformance )
+# Scoped with -p, not just --bin. In a virtual workspace a bare `cargo build --bin` still builds
+# every member, so an unrelated crate that is mid-edit stops this suite from producing any number
+# at all. The two packages named here are the only ones a conformance run needs.
+( cd "$ROOT/core" \
+  && cargo build --quiet -p handoff-server --bin handoffd \
+  && cargo build --quiet -p handoff-conformance --bin handoff-conformance )
+
+# Point at the built binary directly, NOT at a copy.
+#
+# An earlier revision copied it here to survive a concurrent `cargo build` relinking it. That made
+# things worse: on macOS a freshly linked binary carries an ad-hoc code signature, and copying it
+# while the linker is still writing produces a file whose signature does not verify — the kernel
+# then SIGKILLs it on exec. The hooks reported `exited -1` with no output, which looks like
+# anything except a code-signing failure. The real fix for build races is not to run cargo against
+# this target directory while a suite is in flight.
 export HANDOFFD="$ROOT/core/target/debug/handoffd"
 
 cleanup() {
-  [ -n "${SERVER:-}" ] && kill "$SERVER" 2>/dev/null || true
+  # Wait for it to actually go. A kill that is not waited on leaves the port held for long enough
+  # that the next run trips the pre-flight check above — or, before that check existed, silently
+  # measured the corpse.
+  if [ -n "${SERVER:-}" ]; then
+    kill "$SERVER" 2>/dev/null || true
+    wait "$SERVER" 2>/dev/null || true
+  fi
   if [ "${KEEP:-0}" != "1" ]; then
     psql "$PG_ADMIN_URL" -q -c "drop database if exists \"$DB\" with (force)" >/dev/null 2>&1 || true
   else
@@ -51,6 +75,19 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# Refuse to run against a server this script did not start.
+#
+# This is not hypothetical tidiness. An orphaned handoffd from an earlier run keeps the port, our
+# own server then fails to bind and exits, and the readiness probe below happily gets a 200 from
+# the stranger — so the suite measures a different build against a different database and reports a
+# number that means nothing. Whichever way that lands, green or red, it is not a measurement.
+if lsof -nP -iTCP:"${HANDOFF_BIND##*:}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "something is already listening on $HANDOFF_BIND:" >&2
+  lsof -nP -iTCP:"${HANDOFF_BIND##*:}" -sTCP:LISTEN >&2
+  echo "refusing to run, because the suite would measure that server and not this build" >&2
+  exit 1
+fi
 
 psql "$PG_ADMIN_URL" -q -c "drop database if exists \"$DB\" with (force)" >/dev/null 2>&1 || true
 psql "$PG_ADMIN_URL" -q -c "create database \"$DB\"" >/dev/null
@@ -60,13 +97,16 @@ echo "database: $DB"
 "$HANDOFFD" serve >>"$RUN_DIR/handoffd.log" 2>&1 &
 SERVER=$!
 
+# Our own process first, the HTTP probe second. The other order is how a stale server gets
+# mistaken for a healthy start: it answers, we break out of the loop, and nobody notices that the
+# server we launched is already dead.
 for _ in $(seq 1 80); do
-  if curl -sf "http://$HANDOFF_BIND/v1/meta" >/dev/null 2>&1; then break; fi
   if ! kill -0 "$SERVER" 2>/dev/null; then
     echo "handoffd exited during startup:" >&2
     tail -n 40 "$RUN_DIR/handoffd.log" >&2
     exit 1
   fi
+  if curl -sf "http://$HANDOFF_BIND/v1/meta" >/dev/null 2>&1; then break; fi
   sleep 0.25
 done
 echo "handoffd: $($HANDOFFD --version)"

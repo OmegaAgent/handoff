@@ -11,9 +11,9 @@ set -eu
 
 : "${HANDOFF_DATABASE_URL:?}" "${HANDOFFD:?}" "${HANDOFF_BOOTSTRAP:?}"
 
-PORT="${HANDOFF_CRASH_PORT:-8091}"
+PORT="${HANDOFF_CRASH_PORT:-8131}"
 BASE="http://127.0.0.1:$PORT/v1"
-RUN_DIR="$(dirname "$0")/../.run"
+RUN_DIR="${HANDOFF_RUN_DIR:-$(dirname "$0")/../.run}"
 LOG="$RUN_DIR/crash-instance.log"
 MACHINE="omg_handoff_test_ka_conformance"
 HUMAN="hs_editor_one_conformance"

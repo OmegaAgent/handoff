@@ -76,6 +76,14 @@ pub enum ErrorCode {
     IdempotencyKeyReused,
     /// A single-use authorization was redeemed with a second, different `effect_key` (§10, I10).
     AuthorizationSpent,
+    /// A redemption arrived after the authorization's `expires_at` (§10 rule 4).
+    ///
+    /// Distinct from [`Self::AuthorizationSpent`] on purpose, and the distinction is the whole
+    /// reason the code exists: the decision was real, it is on the record, and it is simply no
+    /// longer spendable. Saying "spent" would claim it was used, and saying "not found" would claim
+    /// it never happened. Both are untrue, and a caller that has to tell a stale approval from a
+    /// double-spend cannot do it from either.
+    AuthorizationExpired,
     /// A redemption's `effect_digest` disagreed with the digest the authorization was bound to.
     /// This is what stops an approval of "refund $2,400" being spent on "refund $24,000" (§10).
     EffectDigestMismatch,
@@ -127,6 +135,7 @@ impl ErrorCode {
             Self::RequestInProgress => "request_in_progress",
             Self::IdempotencyKeyReused => "idempotency_key_reused",
             Self::AuthorizationSpent => "authorization_spent",
+            Self::AuthorizationExpired => "authorization_expired",
             Self::EffectDigestMismatch => "effect_digest_mismatch",
             Self::BlastRadiusMismatch => "blast_radius_mismatch",
             Self::GrantAlreadyHeld => "grant_already_held",
@@ -166,6 +175,7 @@ impl ErrorCode {
             | Self::RequestInProgress
             | Self::IdempotencyKeyReused
             | Self::AuthorizationSpent
+            | Self::AuthorizationExpired
             | Self::EffectDigestMismatch
             | Self::BlastRadiusMismatch
             | Self::GrantAlreadyHeld
@@ -204,6 +214,7 @@ impl ErrorCode {
         Self::RequestInProgress,
         Self::IdempotencyKeyReused,
         Self::AuthorizationSpent,
+        Self::AuthorizationExpired,
         Self::EffectDigestMismatch,
         Self::BlastRadiusMismatch,
         Self::GrantAlreadyHeld,
@@ -431,8 +442,8 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), total, "duplicate error code in ErrorCode::ALL");
-        // openapi.yaml `ErrorCode` enumerates exactly 31 members.
-        assert_eq!(total, 31);
+        // openapi.yaml `ErrorCode` enumerates exactly 32 members.
+        assert_eq!(total, 32);
     }
 
     #[test]

@@ -497,6 +497,51 @@ end
 $rls10$;
 "#,
     },
+    Migration {
+        number: 11,
+        name: "delivery scheduling, so a queued delivery is actually attempted",
+        sql: r#"
+-- §7 makes delivery a first-class tracked entity rather than a side effect of a notification
+-- sweep. Minting a row in `queued` and never touching it again satisfies the shape of that and
+-- none of the substance, so these are the columns that let a worker pick one up, attempt it,
+-- back off, and give up — each of them a fact §7.3 requires a delivery to own.
+alter table handoff_deliveries add column if not exists next_attempt_at    timestamptz;
+alter table handoff_deliveries add column if not exists attempt_count      integer     not null default 0;
+alter table handoff_deliveries add column if not exists lease_until        timestamptz;
+alter table handoff_deliveries add column if not exists suppression_reason text;
+
+-- Who the target actually resolved to. §7.5: a Server SHOULD address deliveries to individual
+-- people rather than to a place, because read state shared across a workspace means one person
+-- clearing a notification clears everyone's. Null means the rung named a place and nobody was
+-- resolved from it — which is itself the honest reason a delivery was suppressed.
+alter table handoff_deliveries add column if not exists principal_ref      text;
+
+-- Deliveries already minted by an earlier build are due now rather than never.
+update handoff_deliveries set next_attempt_at = created_at
+  where next_attempt_at is null and state = 'queued';
+
+create index if not exists handoff_deliveries_due
+  on handoff_deliveries (next_attempt_at)
+  where next_attempt_at is not null and state in ('queued','retrying');
+"#,
+    },
+    Migration {
+        number: 12,
+        name: "a callback delivery identity that survives its own retries",
+        sql: r#"
+-- `signing.md` §1.1 makes `Handoff-Idempotency-Key` the delivery identifier "so a receiver can
+-- dedupe without parsing the body", and §1.3 rule 7 requires that dedupe to stop a repeated
+-- delivery applying a decision twice. A delivery id minted per *attempt* makes both impossible:
+-- every retry looks like a new delivery, so a receiver that dedupes exactly as specified still
+-- applies the same decision on every redelivery. The identity therefore belongs to the push, not
+-- to the attempt, and it is minted once and stored here.
+alter table handoff_signals add column if not exists callback_delivery_id text;
+
+-- §15.5: an endpoint that fails every attempt MUST eventually be disabled and the tenant
+-- notified. Silent permanent retry is how queues die.
+alter table handoff_signals add column if not exists callback_disabled_at timestamptz;
+"#,
+    },
 ];
 
 /// The row-level-security helper, applied before the migrations that use it.
@@ -511,7 +556,10 @@ mod tests {
         for (i, m) in MIGRATIONS.iter().enumerate() {
             assert_eq!(m.number, i as i32 + 1, "{} is out of order", m.name);
         }
-        assert_eq!(MIGRATIONS.len(), 10);
+        // Bump this deliberately when a migration lands. The count is here so that two changes
+        // adding a migration in parallel collide in this assertion rather than silently agreeing
+        // on a number — which is exactly what it caught.
+        assert_eq!(MIGRATIONS.len(), 12);
     }
 
     #[test]
