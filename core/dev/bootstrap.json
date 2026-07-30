@@ -1,0 +1,31 @@
+{
+  "principals": [
+    {"id": "sa_01K3M7QW8ZC4YRXB2N6VD9FTH1", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "machine", "token": "omg_handoff_test_ka_conformance", "role": "admin",
+     "auth_strength": "session", "display": "tenant A runtime", "scopes": ["*"]},
+
+    {"id": "usr_01K3M7QW8ZC4YRXB2N6VD9FTH3", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "human", "token": "hs_editor_one_conformance", "role": "editor",
+     "auth_strength": "session", "display": "Dana Okafor", "scopes": ["*"]},
+
+    {"id": "usr_01K3M7QW8ZC4YRXB2N6VD9FTH4", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "human", "token": "hs_editor_two_conformance", "role": "editor",
+     "auth_strength": "session", "display": "Sam Adeyemi", "scopes": ["*"]},
+
+    {"id": "usr_01K3M7QW8ZC4YRXB2N6VD9FTH5", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "human", "token": "hs_viewer_conformance", "role": "viewer",
+     "auth_strength": "session", "display": "Robin Vale", "scopes": ["*"]},
+
+    {"id": "usr_01K3M7QW8ZC4YRXB2N6VD9FTH6", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "human", "token": "hs_admin_conformance", "role": "admin",
+     "auth_strength": "session", "display": "Priya Raman", "scopes": ["*"]},
+
+    {"tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "anonymous_link", "token": "lnk_single_use_conformance", "role": "viewer",
+     "auth_strength": "link_only", "scopes": ["*"]},
+
+    {"id": "sa_01K3M7QW8ZC4YRXB2N6VD9FTH2", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHB",
+     "kind": "machine", "token": "omg_handoff_test_kb_conformance", "role": "admin",
+     "auth_strength": "session", "display": "tenant B runtime", "scopes": ["*"]}
+  ]
+}

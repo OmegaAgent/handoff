@@ -15,8 +15,7 @@
   "files": [
     "index.d.ts",
     "scripts/check-drift.mjs",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "keywords": [
     "handoff",

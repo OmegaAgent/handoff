@@ -13,13 +13,21 @@
 //! - **A durable wait survives process death.** "The wait outlives a `kill -9`" is decidable with
 //!   one Postgres and a terminal, and the conformance suite decides it that way.
 //!
-//! # Status
+//! # Layout
 //!
-//! Skeleton only. Schema and queries land in milestone H2.
+//! [`migrations`] holds the nine migrations, embedded and applied at startup. [`store`] holds the
+//! transactions. There is no query builder and no ORM: every statement is written out, because the
+//! two properties this store exists to guarantee — the tenant predicate and the state-conditional
+//! write — are properties of the SQL, and hiding the SQL hides them.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
+
+pub mod migrations;
+pub mod store;
+
+pub use store::PgStore;
 
 /// Version of this crate, as published to crates.io.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");

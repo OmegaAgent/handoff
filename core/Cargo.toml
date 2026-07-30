@@ -27,5 +27,22 @@ handoff-core = { version = "0.1.0", path = "crates/handoff-core" }
 handoff-store-postgres = { version = "0.1.0", path = "crates/handoff-store-postgres" }
 handoff-adapters = { version = "0.1.0", path = "crates/handoff-adapters" }
 
+# Shared third-party versions, pinned once so the crates cannot drift apart.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+sha2 = "0.10"
+hmac = "0.12"
+chrono = { version = "0.4", features = ["std", "serde", "clock"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8"
+tower = "0.5"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "chrono", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+getrandom = "0.2"
+
 [profile.release]
 lto = "thin"

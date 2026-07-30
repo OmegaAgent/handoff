@@ -21,3 +21,21 @@ handoff-adapters.workspace = true
 handoff-core.workspace = true
 handoff-protocol.workspace = true
 handoff-store-postgres.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

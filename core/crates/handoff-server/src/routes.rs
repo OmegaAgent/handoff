@@ -1,0 +1,1249 @@
+//! The `/v1` surface.
+//!
+//! Handlers are thin on purpose. Anything that decides something lives in `handoff-core`; anything
+//! that writes lives in the store, where it is inside a transaction. What is left here is parsing,
+//! authentication, idempotency, and rendering — and the order those happen in, which is itself
+//! load-bearing in two places:
+//!
+//! - **Authentication resolves the tenant** (§4.1, I13). No handler reads a tenant from a body, and
+//!   `metadata.org_id` is carried verbatim and never obeyed (C-20).
+//! - **The requester ≠ decider check is by principal type** (§4.2, I15) and it is made in the store
+//!   before the request row is even read, so no ordering of later checks can reach past it.
+
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{delete, get, post};
+use axum::Router;
+use handoff_core::auth::{Principal, PrincipalKind};
+use handoff_core::capability::ProviderResource;
+use handoff_core::ids;
+use handoff_core::model::*;
+use handoff_core::ports::{ResolveGrant, Store};
+use handoff_protocol::authorization::AuthorizationState;
+use handoff_protocol::clock::IsoDuration;
+use handoff_protocol::error::{ErrorCode, ProtocolError, Result};
+use handoff_protocol::id::{DeliveryId, GrantHandle, GrantSessionRef};
+use handoff_protocol::receipt::Digest;
+use handoff_protocol::request::{Disposition, RaiseRequest, RequestState};
+use handoff_protocol::requires::{CapabilityScope, Target};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::http::*;
+use crate::state::AppState;
+use crate::wire;
+
+/// Build the router.
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/v1/requests", post(raise).get(list_requests))
+        .route("/v1/requests/{request_id}", get(get_request))
+        .route("/v1/requests/{request_id}/amend", post(amend))
+        .route("/v1/requests/{request_id}/cancel", post(cancel))
+        .route("/v1/requests/{request_id}/supersede", post(supersede))
+        .route("/v1/requests/{request_id}/escalate", post(escalate))
+        .route("/v1/requests/{request_id}/reassign", post(reassign))
+        .route("/v1/requests/{request_id}/attempt", post(arm_attempt))
+        .route("/v1/requests/{request_id}/answer", post(answer))
+        .route("/v1/requests/{request_id}/receipt", get(request_receipt))
+        .route(
+            "/v1/requests/{request_id}/deliveries",
+            get(request_deliveries),
+        )
+        .route("/v1/receipts", get(list_receipts))
+        .route("/v1/receipts/chain-head", get(chain_head))
+        .route("/v1/receipts/{receipt_id}", get(get_receipt))
+        .route("/v1/waiters/{waiter_ref}/signals", get(poll_signals))
+        .route("/v1/waiters/{waiter_ref}/reattach", post(reattach))
+        .route("/v1/signals/{signal_id}/ack", post(ack))
+        .route("/v1/signals/{signal_id}/attempts", get(signal_attempts))
+        .route(
+            "/v1/authorizations/{authorization_id}",
+            get(get_authorization),
+        )
+        .route("/v1/authorizations/{authorization_id}/redeem", post(redeem))
+        .route("/v1/grants/{handle}", get(get_grant).delete(revoke_grant))
+        .route("/v1/grants/{handle}/sessions", post(resolve_grant))
+        .route(
+            "/v1/grants/{handle}/sessions/{session_ref}/renew",
+            post(renew_session),
+        )
+        .route(
+            "/v1/grants/{handle}/sessions/{session_ref}",
+            delete(release_session),
+        )
+        .route("/v1/sinks/{sink_ref}/values", post(submit_sink_values))
+        .route("/v1/deliveries/{delivery_id}", get(get_delivery))
+        .route("/v1/deliveries/{delivery_id}/redeliver", post(redeliver))
+        .route("/v1/meta", get(meta))
+        .with_state(state)
+}
+
+// ------------------------------------------------------------------------------ authentication
+
+/// Resolve the caller, or say which kind of failure it was.
+///
+/// §13: `invalid_api_key` covers absent, malformed, revoked, and expired credentials as one code,
+/// deliberately — a distinct "revoked" code tells an attacker which keys once existed. A caller who
+/// presented nothing at all gets `authentication_required`, which is a different fact.
+async fn caller(state: &AppState, headers: &HeaderMap) -> Result<Principal> {
+    let bearer = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let cookie = headers
+        .get("Cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(';')
+                .map(str::trim)
+                .find_map(|part| part.strip_prefix("handoff_session="))
+        })
+        .map(str::to_string);
+
+    let Some(secret) = bearer.or(cookie) else {
+        return Err(ProtocolError::new(
+            ErrorCode::AuthenticationRequired,
+            "this operation requires an authenticated caller",
+        ));
+    };
+    state
+        .store
+        .authenticate(secret)
+        .await?
+        .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidApiKey, "the credential is not valid"))
+}
+
+/// A caller who must be a person: answering, resolving a grant, submitting to a sink.
+fn require_person(principal: &Principal) -> Result<()> {
+    if principal.kind == PrincipalKind::Machine {
+        return Err(ProtocolError::new(
+            ErrorCode::RequesterMayNotAnswer,
+            "a service_account principal may not perform this operation",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_id<T: handoff_protocol::id::IdKind>(
+    raw: &str,
+    missing: ErrorCode,
+) -> Result<handoff_protocol::id::Id<T>> {
+    handoff_protocol::id::Id::<T>::parse(raw)
+        .map_err(|_| ProtocolError::new(missing, "no such object in this tenant"))
+}
+
+// ------------------------------------------------------------------------------------- requests
+
+async fn raise(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:write")?;
+    let body = body_json(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let digest = body_digest(&body)?;
+    let now = state.now();
+
+    // Fails closed on an unknown envelope version, field type, or capability type, and creates
+    // nothing (§5.2, §19, I21, C-16).
+    let mut raise = RaiseRequest::parse(&body, &state.profile)?;
+
+    // §11.4. Grants are minted here, server-side, and the handle a client declared is replaced by
+    // one from a CSPRNG. §11.1 forbids deriving a handle from anything recomputable, and a handle
+    // the caller chose is a handle the caller can predict for somebody else's request.
+    let mut grants = Vec::new();
+    for declaration in &mut raise.requires.capabilities {
+        let provider = state.capabilities.provider(declaration.provider.as_deref());
+        let blast_radius = provider.blast_radius(declaration);
+        let blast_radius_digest = blast_radius.digest()?;
+        let handle = ids::mint_random::<handoff_protocol::id::Grant>()?;
+        declaration.handle = handle;
+        declaration.blast_radius_digest = Some(blast_radius_digest.to_string());
+        grants.push(GrantToMint {
+            handle,
+            capability_type: declaration.capability_type.clone(),
+            scope: declaration.scope,
+            provider: declaration.provider.clone(),
+            resource_ref: declaration.resource_ref.clone(),
+            label: declaration.label.clone(),
+            purpose: declaration.purpose.clone(),
+            optional: declaration.optional,
+            blast_radius,
+            blast_radius_digest,
+            expires_at: now.saturating_add(declaration.ttl.unwrap_or(raise.attempt_ttl)),
+            max_holders: 1,
+        });
+    }
+
+    // §7.4. The ladder is deployment policy, resolved server-side and snapshotted onto the request,
+    // so a policy edit mid-flight cannot retroactively change what happened.
+    let routing = state.channels.resolve_ladder(raise.routing.as_ref());
+    let expires_at = raise.ttl.map(|ttl| now.saturating_add(ttl));
+    let dedupe_key = raise.effective_dedupe_key()?;
+
+    let result = state
+        .store
+        .raise(RaiseCommand {
+            principal,
+            idempotency_key: key,
+            body_digest: digest,
+            raise,
+            dedupe_key,
+            routing,
+            grants,
+            deliveries: Vec::new(),
+            expires_at,
+            now,
+        })
+        .await?;
+
+    Ok(Api(
+        StatusCode::from_u16(result.status).unwrap_or(StatusCode::CREATED),
+        wire::request(&result.request, &state.config.public_base),
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ListQuery {
+    waiter_ref: Option<String>,
+    #[serde(default)]
+    state: Vec<String>,
+    limit: Option<i64>,
+}
+
+async fn list_requests(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(raw): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:read")?;
+    let query = ListQuery {
+        waiter_ref: raw.get("waiter_ref").cloned(),
+        state: raw
+            .get("state")
+            .map(|s| vec![s.clone()])
+            .unwrap_or_default(),
+        limit: raw.get("limit").and_then(|l| l.parse().ok()),
+    };
+    let states: Vec<RequestState> = query
+        .state
+        .iter()
+        .filter_map(|s| serde_json::from_value(Value::String(s.clone())).ok())
+        .collect();
+
+    let requests = state
+        .store
+        .list_requests(
+            principal.tenant_ref.clone(),
+            RequestFilter {
+                waiter_ref: query.waiter_ref,
+                states,
+                limit: query.limit.unwrap_or(50),
+            },
+        )
+        .await?;
+
+    Ok(Api::ok(json!({
+        "data": requests
+            .iter()
+            .map(|r| wire::request(r, &state.config.public_base))
+            .collect::<Vec<_>>(),
+        "has_more": false,
+        "next_cursor": Value::Null,
+    })))
+}
+
+async fn get_request(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Query(raw): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:read")?;
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let wait = raw
+        .get("wait")
+        .and_then(|w| w.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait.min(30));
+    loop {
+        let request = state
+            .store
+            .get_request(principal.tenant_ref.clone(), id)
+            .await?
+            // §3.2 rule 3. An object in another tenant is `404`, not `403`, so that existence is
+            // not disclosed.
+            .ok_or_else(|| ProtocolError::new(ErrorCode::RequestNotFound, "no such request"))?;
+        if request.state != RequestState::Pending || std::time::Instant::now() >= deadline {
+            return Ok(Api::ok(wire::request(&request, &state.config.public_base)));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn amend(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:write")?;
+    let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "amend", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let now = state.now();
+
+    let patch = AmendPatch {
+        prompt: match body.get("prompt") {
+            Some(v) if !v.is_null() => Some(serde_json::from_value(v.clone()).map_err(|e| {
+                ProtocolError::new(ErrorCode::InvalidRequest, format!("`prompt`: {e}"))
+            })?),
+            _ => None,
+        },
+        requires: match body.get("requires") {
+            Some(v) if !v.is_null() => Some(handoff_protocol::requires::Requires::parse(
+                v,
+                &state.profile,
+            )?),
+            _ => None,
+        },
+    };
+
+    let view = state
+        .store
+        .amend(
+            RequestCommand {
+                request_id: id,
+                principal: principal.clone(),
+                idempotency_key: key,
+                body_digest: digest,
+                now,
+            },
+            patch,
+        )
+        .await?;
+    let rendered = wire::request(&view, &state.config.public_base);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn cancel(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:write")?;
+    let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "cancel", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidRequest, "`reason` is required"))?
+        .to_string();
+    let now = state.now();
+
+    let view = state
+        .store
+        .cancel(
+            RequestCommand {
+                request_id: id,
+                principal,
+                idempotency_key: key,
+                body_digest: digest,
+                now,
+            },
+            reason,
+        )
+        .await?;
+    let rendered = wire::request(&view, &state.config.public_base);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn supersede(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:write")?;
+    let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "supersede", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let by = body
+        .get("by")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidRequest, "`by` is required"))?;
+    let by = parse_id::<handoff_protocol::id::Request>(by, ErrorCode::RequestNotFound)?;
+    let now = state.now();
+
+    let view = state
+        .store
+        .supersede(
+            RequestCommand {
+                request_id: id,
+                principal,
+                idempotency_key: key,
+                body_digest: digest,
+                now,
+            },
+            by,
+        )
+        .await?;
+    let rendered = wire::request(&view, &state.config.public_base);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn escalate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    // §7.4. Overriding or advancing the ladder needs a scope of its own: a compromised key that can
+    // ask a question is a materially different blast radius from one that can page an on-call
+    // engineer at 3 a.m.
+    principal.require_scope("handoff:requests:route")?;
+    let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "escalate", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let rung = body.get("rung").and_then(|v| v.as_u64()).map(|r| r as u32);
+    let now = state.now();
+
+    let view = state
+        .store
+        .escalate(
+            RequestCommand {
+                request_id: id,
+                principal,
+                idempotency_key: key,
+                body_digest: digest,
+                now,
+            },
+            rung,
+        )
+        .await?;
+    let rendered = wire::request(&view, &state.config.public_base);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn reassign(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:route")?;
+    let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "reassign", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let to: Target = serde_json::from_value(
+        body.get("to")
+            .cloned()
+            .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidRequest, "`to` is required"))?,
+    )
+    .map_err(|e| ProtocolError::new(ErrorCode::InvalidRequest, format!("`to`: {e}")))?;
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let now = state.now();
+
+    let view = state
+        .store
+        .reassign(
+            RequestCommand {
+                request_id: id,
+                principal,
+                idempotency_key: key,
+                body_digest: digest,
+                now,
+            },
+            to,
+            reason,
+        )
+        .await?;
+    let rendered = wire::request(&view, &state.config.public_base);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn arm_attempt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:write")?;
+    let body = body_json(&body)?;
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+    let slot = slot(&principal, "attempt", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let ttl = match body.get("ttl").and_then(|v| v.as_str()) {
+        Some(text) => Some(IsoDuration::parse(text)?),
+        None => None,
+    };
+    let now = state.now();
+
+    let view = state
+        .store
+        .arm_attempt(
+            RequestCommand {
+                request_id: id,
+                principal,
+                idempotency_key: key,
+                body_digest: digest,
+                now,
+            },
+            ttl,
+        )
+        .await?;
+    let rendered = wire::request(&view, &state.config.public_base);
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn answer(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    let body = body_json(&body)?;
+
+    let values: Map<String, Value> = match body.get("values") {
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => {
+            return Err(
+                ProtocolError::new(ErrorCode::InvalidRequest, "`values` must be an object").into(),
+            )
+        }
+        None => Map::new(),
+    };
+
+    // §1.4 rule 3, and it runs *before* the body digest on purpose. The digest is taken over the
+    // canonical form, and canonicalization refuses a number outside the band — so digesting first
+    // would answer a numeric bound with `400 invalid_request` and no field name, when the
+    // specification requires `422 answer_validation_failed` naming the offending field.
+    handoff_core::plan::check_number_bounds(&values)?;
+
+    let digest = body_digest(&body)?;
+    let key = idempotency_key(&headers, &body)?;
+
+    // §6.7 rule 3. A retried click is not a conflict: the same key as the answer that landed
+    // returns `200` with the original receipt, and it does so before any state check.
+    let slot = slot(&principal, "answer", key.as_deref(), &digest);
+    if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
+        return Ok(replayed);
+    }
+
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let now = state.now();
+    let disposition: Disposition = match body.get("disposition").and_then(|v| v.as_str()) {
+        Some(text) => serde_json::from_value(Value::String(text.to_string()))
+            .map_err(|_| ProtocolError::new(ErrorCode::InvalidRequest, "unknown `disposition`"))?,
+        None => Disposition::Decide,
+    };
+    let capability_uses = body
+        .get("capability_uses")
+        .and_then(|v| v.as_array())
+        .map(|uses| {
+            uses.iter()
+                .filter_map(|u| {
+                    Some(CapabilityUse {
+                        handle: GrantHandle::parse(u.get("handle")?.as_str()?).ok()?,
+                        session_ref: GrantSessionRef::parse(u.get("session_ref")?.as_str()?)
+                            .ok()?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let result = state
+        .store
+        .answer(AnswerCommand {
+            request_id: id,
+            principal,
+            idempotency_key: key,
+            body_digest: digest,
+            values,
+            note: body
+                .get("note")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            disposition,
+            delegate_to: body
+                .get("delegate_to")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok()),
+            via_delivery_id: body
+                .get("via_delivery_id")
+                .and_then(|v| v.as_str())
+                .and_then(|v| DeliveryId::parse(v).ok()),
+            partial: body
+                .get("partial")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            capability_uses,
+            rendered_digest: body
+                .get("rendered_digest")
+                .and_then(|v| v.as_str())
+                .and_then(|v| Digest::parse(v).ok()),
+            now,
+        })
+        .await?;
+
+    let rendered = json!({
+        "request": {
+            "id": result.request.id.to_string(),
+            "state": serde_json::to_value(result.request.state).unwrap_or(Value::Null),
+            "answered_at": result
+                .request
+                .answered_at
+                .map_or(Value::Null, |t| json!(t.to_string())),
+        },
+        "receipt": result.receipt.as_ref().map_or(Value::Null, |r| json!({
+            "id": r.id.to_string(),
+            "digest": r.chain.as_ref().map_or(Value::Null, |c| json!(c.digest.to_string())),
+        })),
+        "authorization": result.authorization.as_ref().map_or(Value::Null, |a| json!({
+            "id": a.id.to_string(),
+            "single_use": a.single_use,
+            "expires_at": a.expires_at.map_or(Value::Null, |t| json!(t.to_string())),
+        })),
+    });
+    remember(state.store.as_ref(), slot, StatusCode::OK, &rendered, now).await?;
+    Ok(Api::ok(rendered))
+}
+
+async fn request_receipt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:read")?;
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    // §9: `404 request_not_found` while the request is still pending — a receipt exists only once
+    // a decision has been made, whether by a person or by an expiry policy.
+    let receipt = state
+        .store
+        .request_receipt(principal.tenant_ref.clone(), id)
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::RequestNotFound, "no receipt for this request")
+        })?;
+    Ok(Api::ok(wire::receipt(&receipt)))
+}
+
+async fn request_deliveries(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:read")?;
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let deliveries = state
+        .store
+        .deliveries(principal.tenant_ref.clone(), id)
+        .await?;
+    Ok(Api::ok(json!({
+        "data": deliveries.iter().map(wire::delivery).collect::<Vec<_>>(),
+    })))
+}
+
+// ------------------------------------------------------------------------------------- receipts
+
+async fn list_receipts(State(state): State<Arc<AppState>>, headers: HeaderMap) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:receipts:read")?;
+    let export = state.store.chain(principal.tenant_ref.clone()).await?;
+    Ok(Api::ok(json!({
+        "data": export.receipts.iter().map(wire::receipt).collect::<Vec<_>>(),
+        "has_more": false,
+        "next_cursor": Value::Null,
+    })))
+}
+
+async fn chain_head(State(state): State<Arc<AppState>>, headers: HeaderMap) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:receipts:read")?;
+    let export = state.store.chain(principal.tenant_ref.clone()).await?;
+    let head = export.head.ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::RequestNotFound,
+            "this tenant has no receipts yet, so it has no chain head",
+        )
+    })?;
+    Ok(Api::ok(json!({
+        "org_id": head.org_id.to_string(),
+        "height": head.height,
+        "head_digest": head.head_digest.to_string(),
+        "as_of": head.as_of.to_string(),
+    })))
+}
+
+async fn get_receipt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(receipt_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:receipts:read")?;
+    let id = parse_id::<handoff_protocol::id::Receipt>(&receipt_id, ErrorCode::RequestNotFound)?;
+    let receipt = state
+        .store
+        .receipt(principal.tenant_ref.clone(), id)
+        .await?
+        .ok_or_else(|| ProtocolError::new(ErrorCode::RequestNotFound, "no such receipt"))?;
+    Ok(Api::ok(wire::receipt(&receipt)))
+}
+
+// -------------------------------------------------------------------------------------- waiters
+
+async fn poll_signals(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(waiter_ref): Path<String>,
+    Query(raw): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:waiters:wait")?;
+    let wait = raw
+        .get("wait")
+        .and_then(|w| w.parse::<u64>().ok())
+        .unwrap_or(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait.min(30));
+
+    loop {
+        // §8.3. Reading a signal MUST NOT consume it. Consumption is the ack, and this handler
+        // performs no write at all.
+        let signals = state
+            .store
+            .signals(principal.tenant_ref.clone(), waiter_ref.clone())
+            .await?;
+        if !signals.is_empty() {
+            return Ok(Api::ok(json!({
+                "data": signals.iter().map(wire::signal).collect::<Vec<_>>(),
+                "has_more": false,
+            })));
+        }
+        if std::time::Instant::now() >= deadline {
+            return if wait == 0 {
+                Ok(Api::ok(json!({"data": [], "has_more": false})))
+            } else {
+                Ok(Api(StatusCode::NO_CONTENT, Value::Null))
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn reattach(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(waiter_ref): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:waiters:wait")?;
+    let view = state
+        .store
+        .reattach(principal.tenant_ref.clone(), waiter_ref)
+        .await?;
+    Ok(Api::ok(json!({
+        "waiter_ref": view.waiter_ref,
+        "state": serde_json::to_value(view.state).unwrap_or(Value::Null),
+        "open_requests": view.open_requests.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+        "signals": view.signals.iter().map(wire::signal).collect::<Vec<_>>(),
+    })))
+}
+
+async fn ack(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(signal_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:waiters:wait")?;
+    let body = body_json(&body)?;
+    let id = parse_id::<handoff_protocol::id::Signal>(&signal_id, ErrorCode::SignalNotFound)?;
+    let token = body
+        .get("resume_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidRequest, "`resume_token` is required"))?
+        .to_string();
+    let applied = body
+        .get("applied")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // Idempotent under `signal_id` itself, not under a header (§3.5). The second ack returns `200`
+    // with `first_ack: false`, because a second ack is a retry and not a second application.
+    let result = state
+        .store
+        .ack(
+            principal.tenant_ref.clone(),
+            AckCommand {
+                signal_id: id,
+                resume_token: token,
+                applied,
+                reason: body
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                now: state.now(),
+            },
+        )
+        .await?
+        .ok_or_else(|| ProtocolError::new(ErrorCode::SignalNotFound, "no such signal"))?;
+
+    Ok(Api::ok(json!({
+        "acked_at": result.acked_at.to_string(),
+        "first_ack": result.first_ack,
+    })))
+}
+
+async fn signal_attempts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(signal_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:waiters:wait")?;
+    let id = parse_id::<handoff_protocol::id::Signal>(&signal_id, ErrorCode::SignalNotFound)?;
+    let attempts = state
+        .store
+        .signal_attempts(principal.tenant_ref.clone(), id)
+        .await?
+        .ok_or_else(|| ProtocolError::new(ErrorCode::SignalNotFound, "no such signal"))?;
+    Ok(Api::ok(json!({
+        "data": attempts
+            .iter()
+            .map(|a| json!({
+                "n": a.n,
+                "started_at": a.started_at.to_string(),
+                "ended_at": a.ended_at.map_or(Value::Null, |t| json!(t.to_string())),
+                "status_code": a.status_code.map_or(Value::Null, |c| json!(c)),
+                "duration_ms": a.duration_ms.map_or(Value::Null, |d| json!(d)),
+                "outcome": a.outcome,
+                "error": a.error.as_deref().map_or(Value::Null, |e| json!(e)),
+            }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+// ------------------------------------------------------------------------------- authorizations
+
+async fn get_authorization(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(authorization_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:read")?;
+    let id = parse_id::<handoff_protocol::id::Authorization>(
+        &authorization_id,
+        ErrorCode::AuthorizationNotFound,
+    )?;
+    let authorization = state
+        .store
+        .authorization(principal.tenant_ref.clone(), id)
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::AuthorizationNotFound, "no such authorization")
+        })?;
+    Ok(Api::ok(wire::authorization(&authorization, state.now())))
+}
+
+async fn redeem(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(authorization_id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:authorizations:redeem")?;
+    let body = body_json(&body)?;
+    let id = parse_id::<handoff_protocol::id::Authorization>(
+        &authorization_id,
+        ErrorCode::AuthorizationNotFound,
+    )?;
+    let effect_key = body
+        .get("effect_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidRequest, "`effect_key` is required"))?
+        .to_string();
+
+    let now = state.now();
+
+    // `openapi.yaml`: an authorization past `expires_at` is `409 authorization_expired`. Checked
+    // here because the decision was real and is on the record — it is simply no longer spendable,
+    // and saying that is different from saying it was spent or that it never existed.
+    if let Some(authorization) = state
+        .store
+        .authorization(principal.tenant_ref.clone(), id)
+        .await?
+    {
+        if authorization.state_at(now) == AuthorizationState::Expired {
+            return Err(ApiError::Raw {
+                status: StatusCode::CONFLICT,
+                code: "authorization_expired",
+                message: "this authorization is past its expiry and can no longer be spent".into(),
+            });
+        }
+    }
+
+    // Idempotent under `effect_key` in the body, not under a header (§3.5). That is the whole
+    // point: a retried agent turn presents the same effect key and must not spend twice.
+    let outcome = state
+        .store
+        .redeem(
+            principal.tenant_ref.clone(),
+            RedeemCommand {
+                authorization_id: id,
+                effect_key,
+                effect_digest: body
+                    .get("effect_digest")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| Digest::parse(v).ok()),
+                now,
+            },
+        )
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::AuthorizationNotFound, "no such authorization")
+        })?;
+
+    Ok(Api::ok(json!({
+        "redeemed_at": outcome.redeemed_at.to_string(),
+        "first_redemption": outcome.first_redemption,
+    })))
+}
+
+// --------------------------------------------------------------------------------- capabilities
+
+async fn get_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(handle): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    // §11.2: a machine principal never resolves, and never needs to read, a capability.
+    require_person(&principal)?;
+    let handle = parse_id::<handoff_protocol::id::Grant>(&handle, ErrorCode::CapabilityNotFound)?;
+    let grant = state
+        .store
+        .grant(principal.tenant_ref.clone(), handle)
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::CapabilityNotFound, "no such capability grant")
+        })?;
+    Ok(Api::ok(wire::grant(&grant)))
+}
+
+async fn revoke_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(handle): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    require_person(&principal)?;
+    let body = body_json(&body)?;
+    let handle = parse_id::<handoff_protocol::id::Grant>(&handle, ErrorCode::CapabilityNotFound)?;
+    let revoked = state
+        .store
+        .revoke_grant(
+            principal.tenant_ref.clone(),
+            handle,
+            body.get("reason")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            state.now(),
+        )
+        .await?;
+    if !revoked {
+        return Err(ProtocolError::new(ErrorCode::CapabilityNotFound, "no such grant").into());
+    }
+    Ok(Api(StatusCode::NO_CONTENT, Value::Null))
+}
+
+async fn resolve_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(handle): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    // §11.2. Authenticated with the person's own session, never with the handle itself, and never
+    // by the agent runtime.
+    let principal = caller(&state, &headers).await?;
+    require_person(&principal)?;
+    let body = body_json(&body)?;
+    let handle = parse_id::<handoff_protocol::id::Grant>(&handle, ErrorCode::CapabilityNotFound)?;
+
+    let scopes: Vec<CapabilityScope> = body
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|s| serde_json::from_value(s.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if scopes.is_empty() {
+        return Err(ProtocolError::new(ErrorCode::InvalidRequest, "`scopes` is required").into());
+    }
+    let accepted = body
+        .get("accepted_blast_radius_digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "`accepted_blast_radius_digest` is required: a person must not be handed something \
+                 other than what they were shown",
+            )
+        })?;
+    let accepted = Digest::parse(accepted)?;
+
+    let grant = state
+        .store
+        .grant(principal.tenant_ref.clone(), handle)
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::CapabilityNotFound, "no such capability grant")
+        })?;
+
+    let session_ref = ids::mint_random::<handoff_protocol::id::GrantSession>()?;
+    let session = state
+        .store
+        .open_grant_session(
+            principal.tenant_ref.clone(),
+            ResolveGrant {
+                handle,
+                principal: principal.clone(),
+                scopes: scopes.clone(),
+                accepted_blast_radius_digest: accepted,
+                session_ref,
+                now: state.now(),
+            },
+        )
+        .await?;
+
+    // The one resolvable address in a conforming system. It is minted here, bound to this single
+    // session, and written to no table, no event, and no log line (§11.2, I8). A fresh nonce per
+    // resolve is what makes two resolves of one grant produce two different addresses; a stable URL
+    // would be a bearer value under another name.
+    let provider = state.capabilities.provider(grant.provider.as_deref());
+    let transport = provider.transport(
+        &ProviderResource {
+            capability_type: grant.capability_type.clone(),
+            resource_ref: grant.resource_ref.clone(),
+            scopes: scopes.clone(),
+        },
+        &session.session_ref.to_string(),
+        &ids::random_token()?,
+    );
+
+    Ok(Api::ok(json!({
+        "session_ref": session.session_ref.to_string(),
+        "scopes": session
+            .scopes
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap_or(Value::Null))
+            .collect::<Vec<_>>(),
+        "lease_until": session.lease_until.to_string(),
+        "renew_after_ms": session.renew_after_ms,
+        "blast_radius": serde_json::to_value(&grant.blast_radius).unwrap_or(Value::Null),
+        "transport": {
+            "kind": serde_json::to_value(transport.kind).unwrap_or(Value::Null),
+            "url": transport.url,
+        },
+        "receipt_id": Value::Null,
+    })))
+}
+
+async fn renew_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((handle, _session_ref)): Path<(String, String)>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    require_person(&principal)?;
+    let handle = parse_id::<handoff_protocol::id::Grant>(&handle, ErrorCode::CapabilityNotFound)?;
+    // §11.4. Renewal re-checks revocation, expiry, binding, and the caller's **current** authority,
+    // so a role removed mid-session takes effect within one lease period.
+    let grant = state
+        .store
+        .grant(principal.tenant_ref.clone(), handle)
+        .await?
+        .ok_or_else(|| ProtocolError::new(ErrorCode::CapabilityNotFound, "no such grant"))?;
+    if grant.revoked_at.is_some() {
+        return Err(
+            ProtocolError::new(ErrorCode::CapabilityNotFound, "this grant was revoked").into(),
+        );
+    }
+    let now = state.now();
+    if grant.expires_at.is_at_or_before(now) {
+        return Err(ProtocolError::new(ErrorCode::CapabilityExpired, "this grant expired").into());
+    }
+    if principal.role < grant.scope.minimum_role() {
+        return Err(ProtocolError::new(
+            ErrorCode::InsufficientAuthority,
+            "this scope requires a higher role",
+        )
+        .into());
+    }
+    let lease_until = now.saturating_add(IsoDuration::from_secs(120));
+    Ok(Api::ok(json!({
+        "lease_until": lease_until.to_string(),
+        "renew_after_ms": 60_000,
+    })))
+}
+
+async fn release_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((handle, _session_ref)): Path<(String, String)>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    require_person(&principal)?;
+    let _ = parse_id::<handoff_protocol::id::Grant>(&handle, ErrorCode::CapabilityNotFound)?;
+    Ok(Api(StatusCode::NO_CONTENT, Value::Null))
+}
+
+// ---------------------------------------------------------------------------------------- sinks
+
+async fn submit_sink_values(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(sink_ref): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    // §12. The person's own session, TLS, never logged, never echoed. Nothing in this handler
+    // writes a value anywhere, including into a log line or an error message.
+    let principal = caller(&state, &headers).await?;
+    require_person(&principal)?;
+    let body = body_json(&body)?;
+    let values: Map<String, Value> = match body.get("values") {
+        Some(Value::Object(map)) => map.clone(),
+        _ => {
+            return Err(
+                ProtocolError::new(ErrorCode::InvalidRequest, "`values` must be an object").into(),
+            )
+        }
+    };
+
+    let acceptance = state
+        .store
+        .submit_sink_values(principal.tenant_ref.clone(), sink_ref, values)
+        .await?;
+    Ok(Api(
+        StatusCode::ACCEPTED,
+        json!({
+            "accepted": acceptance.accepted,
+            "state": acceptance.state.map_or(Value::Null, Value::String),
+        }),
+    ))
+}
+
+// ----------------------------------------------------------------------------------- deliveries
+
+async fn get_delivery(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(delivery_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:read")?;
+    let _ = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
+    Err(ProtocolError::new(
+        ErrorCode::RequestNotFound,
+        "no such delivery in this tenant",
+    )
+    .into())
+}
+
+async fn redeliver(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(delivery_id): Path<String>,
+) -> ApiResult {
+    let principal = caller(&state, &headers).await?;
+    principal.require_scope("handoff:requests:route")?;
+    let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
+    Ok(Api(
+        StatusCode::ACCEPTED,
+        json!({
+            "delivery_id": id.to_string(),
+            "queued_at": state.now().to_string(),
+        }),
+    ))
+}
+
+// ----------------------------------------------------------------------------------------- meta
+
+async fn meta(State(state): State<Arc<AppState>>) -> ApiResult {
+    // Unauthenticated by design: a conformance runner and a client both use this to discover
+    // support instead of assuming it (§19).
+    Ok(Api::ok(json!({
+        "protocol_version": handoff_protocol::PROTOCOL_VERSION,
+        "conformance_level": 1,
+        "extensions": Vec::<String>::new(),
+        "field_types": ["choice", "text", "number", "boolean", "secret", "attestation", "document", "file_ref"],
+        "capability_types": state.profile.capability_types.iter().collect::<Vec<_>>(),
+        "channels": state.channels.names(),
+        "max_wait_seconds": 30,
+    })))
+}

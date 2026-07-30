@@ -51,6 +51,23 @@ for (const path of signingFixtures) {
   });
 }
 
+test("the round-trip assertion is byte-level, not parse-level", () => {
+  // The guard on the guard. A reformatted document parses to an equal object but is a different
+  // byte sequence, so a suite that compared parsed objects would pass here — and the fixtures would
+  // quietly stop being a cross-language contract. `deepEqual` on two Uint8Arrays compares elements,
+  // which is to say bytes; this test proves that distinction is load-bearing rather than assumed.
+  const raw = read(join(FIXTURES, "05-signal-answered.json"));
+  const parsed = JSON.parse(new TextDecoder().decode(raw));
+  const reformatted = new TextEncoder().encode(JSON.stringify(parsed, null, 4) + "\n");
+
+  assert.deepEqual(
+    JSON.parse(new TextDecoder().decode(reformatted)),
+    parsed,
+    "a parse-level comparison cannot tell these two apart",
+  );
+  assert.notDeepEqual(reformatted, raw, "a byte-level comparison can, and that is what we assert");
+});
+
 test("signing fixture hashes match the worked vectors", async () => {
   // signing.md §1.6 and §2.5 publish these lengths and hashes. They are the check on whether this
   // implementation canonicalizes correctly.

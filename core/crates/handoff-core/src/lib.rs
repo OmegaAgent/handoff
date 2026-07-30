@@ -17,10 +17,17 @@
 //! The engine knows nothing about organizations. Tenancy is an opaque reference that defaults to a
 //! single tenant, so a self-hosted deployment carries no vestigial multi-tenant machinery.
 //!
-//! # Status
+//! # How the pieces fit
 //!
-//! Skeleton only. The ports and the engine land in milestone H2, driven by the conformance suite
-//! written in H1.
+//! - [`auth`] holds the requester ≠ decider rule, enforced by principal **type** (§4.2, I15).
+//! - [`plan`] holds the decisions as **pure functions**: what a receipt says, whether an answer
+//!   settles anything, what an expiry mints. They take a snapshot and return rows, so the rules
+//!   that matter most are decidable in a unit test rather than only against a database.
+//! - [`ports`] holds the store, and its shape is a consequence of I12: every method that changes
+//!   state is one transaction named for the transition it performs, and there is no method that
+//!   writes a state without its event.
+//! - [`channel`] and [`capability`] are registries, never matches. Adding a channel or a capability
+//!   provider is an entry in a map and zero branches anywhere else (§7.4, §11.1).
 //!
 //! [`handoff-protocol`]: https://docs.rs/handoff-protocol
 
@@ -29,6 +36,15 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub use handoff_protocol as protocol;
+
+pub mod auth;
+pub mod capability;
+pub mod channel;
+pub mod events;
+pub mod ids;
+pub mod model;
+pub mod plan;
+pub mod ports;
 
 /// Version of this crate, as published to crates.io.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
