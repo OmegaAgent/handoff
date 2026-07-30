@@ -36,6 +36,14 @@ pub struct Principal {
     /// The principal identity, absent for [`PrincipalKind::AnonymousLink`] — a Server MUST NOT
     /// record an identity it does not have.
     pub id: Option<PrincipalId>,
+    /// The credential this caller presented, as an opaque per-credential reference.
+    ///
+    /// Distinct from [`Self::id`] and required for every kind, including the anonymous link that
+    /// has no `id` at all. It exists because §3.1 scopes an `Idempotency-Key` to a **principal**,
+    /// and an anonymous link with no identity would otherwise fall back to a tenant-wide namespace
+    /// — which makes one link holder's key collide with another's. A collision there is not a
+    /// retry, it is one person receiving another person's decision.
+    pub credential_ref: String,
     /// Which kind of subject this is.
     pub kind: PrincipalKind,
     /// The tenant, resolved from stored state bound to the credential and never from a request
@@ -131,6 +139,7 @@ mod tests {
     fn principal(kind: PrincipalKind) -> Principal {
         Principal {
             id: None,
+            credential_ref: "cred_test".into(),
             kind,
             tenant_ref: "org_00000000000000000000000000".into(),
             role: Role::Admin,

@@ -485,6 +485,7 @@ mod tests {
     fn principal(tenant: &str) -> Principal {
         Principal {
             id: None,
+            credential_ref: format!("{tenant}::test-credential"),
             kind: crate::auth::PrincipalKind::Human,
             tenant_ref: tenant.to_string(),
             role: Role::Viewer,

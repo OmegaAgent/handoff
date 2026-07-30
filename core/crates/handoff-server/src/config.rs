@@ -35,6 +35,17 @@ pub struct Config {
     pub bootstrap_file: Option<String>,
     /// How often the sweep runs.
     pub sweep_interval_ms: u64,
+    /// Whether this deployment can honour the Level 2 `continuation` extension (§14).
+    ///
+    /// **False, and it is derived rather than declared.** §14 requires a Server that stores
+    /// `resume_payload` to encrypt it at rest, and this deployment implements no encryption at
+    /// rest — `grep -rn encrypt` over the store returns nothing. So the field is refused rather
+    /// than kept in the clear, and `GET /meta` reports Level 1, from this same value.
+    ///
+    /// The point of computing it here is that the advertised level and the implemented behaviour
+    /// cannot drift: a hardcoded `"conformance_level": 1` beside a code path that happily stored
+    /// payloads is how a Server ends up advertising something nobody measured.
+    pub continuation_supported: bool,
     /// Size of the store's connection pool.
     ///
     /// A serving process wants a real pool; a one-shot subcommand wants one or two connections and
@@ -78,6 +89,9 @@ impl Config {
             sweep_interval_ms: env("HANDOFF_SWEEP_INTERVAL_MS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
+            // Deliberately not an environment switch. Turning this on means implementing
+            // encryption at rest with a documented key source, not setting a variable.
+            continuation_supported: false,
             max_connections: env("HANDOFF_MAX_CONNECTIONS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(16),

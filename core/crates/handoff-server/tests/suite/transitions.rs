@@ -320,3 +320,219 @@ fn urlencode(text: &str) -> String {
         })
         .collect()
 }
+
+/// An `Idempotency-Key` is retry safety for one call against **one object**.
+///
+/// §3.1 makes the key mean "a repeat returns the identical request *and its stored response*". If
+/// the object is missing from the key's scope, answering request B with the key already used on
+/// request A returns A's receipt and A's authorization with `200`, and B is never answered — the
+/// caller is handed a decision about a different thing and told it succeeded. The agent then spends
+/// A's authorization on an effect named for B.
+///
+/// `README.md` states the property this protects: "The answer is bound to the specific thing it was
+/// shown against. It does not generalize to the next call, the next run, or a similar-looking
+/// request."
+#[tokio::test]
+async fn one_key_reused_on_a_different_request_does_not_replay_the_first_answer() {
+    let deployment = Deployment::start("idemobj", 18108).await;
+
+    let mut ids = Vec::new();
+    for n in ["one", "two"] {
+        let (status, raised) = post(
+            &deployment.base,
+            "/requests",
+            MACHINE_A,
+            &format!("idemobj-raise-{n}"),
+            raise_body(&format!("run:idemobj-{n}"), "Refund $2,400 to Acme Corp?"),
+        )
+        .await;
+        assert_eq!(status, 201, "{raised}");
+        ids.push(raised["id"].as_str().unwrap().to_string());
+    }
+    let (first, second) = (&ids[0], &ids[1]);
+    assert_ne!(first, second);
+
+    // Identical key, identical body — the only thing that differs is the request being answered.
+    let answer = serde_json::json!({"values": {"decision": "approve"}});
+
+    let (status, one) = post(
+        &deployment.base,
+        &format!("/requests/{first}/answer"),
+        EDITOR_A,
+        "SHARED-ACROSS-OBJECTS",
+        answer.clone(),
+    )
+    .await;
+    assert_eq!(status, 200, "{one}");
+    let first_receipt = one["receipt"]["id"].as_str().unwrap().to_string();
+
+    let (status, two) = post(
+        &deployment.base,
+        &format!("/requests/{second}/answer"),
+        EDITOR_A,
+        "SHARED-ACROSS-OBJECTS",
+        answer,
+    )
+    .await;
+    assert_eq!(status, 200, "{two}");
+    assert_eq!(
+        two["request"]["id"].as_str(),
+        Some(second.as_str()),
+        "the second answer must settle the second request, not replay the first"
+    );
+    assert_ne!(
+        two["receipt"]["id"].as_str().unwrap(),
+        first_receipt,
+        "each request has its own receipt (I1); replaying the first one here would let an agent \
+         spend the first decision on an effect named for the second"
+    );
+
+    // The assertion that actually catches the bug: the second request really did settle.
+    let (_, settled) = get(&deployment.base, &format!("/requests/{second}"), MACHINE_A).await;
+    assert_eq!(
+        settled["state"], "answered",
+        "before the object was in the idempotency scope this request stayed `pending` while the \
+         caller was told the answer had landed"
+    );
+
+    // And the retry that the key does exist for still works, on the object it was used against.
+    let (status, retried) = post(
+        &deployment.base,
+        &format!("/requests/{first}/answer"),
+        EDITOR_A,
+        "SHARED-ACROSS-OBJECTS",
+        serde_json::json!({"values": {"decision": "approve"}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{retried}");
+    assert_eq!(
+        retried["receipt"]["id"].as_str().unwrap(),
+        first_receipt,
+        "a genuine retry of the same call against the same object still replays (§6.7 rule 3)"
+    );
+}
+
+/// The same, for a withdrawal — where the consequence is an operator believing a request is off.
+#[tokio::test]
+async fn one_key_reused_on_a_different_cancel_does_not_replay_the_first() {
+    let deployment = Deployment::start("idemcancel", 18109).await;
+
+    let mut ids = Vec::new();
+    for n in ["one", "two"] {
+        let (status, raised) = post(
+            &deployment.base,
+            "/requests",
+            MACHINE_A,
+            &format!("idemcancel-raise-{n}"),
+            raise_body(&format!("run:idemcancel-{n}"), "Send the contract?"),
+        )
+        .await;
+        assert_eq!(status, 201, "{raised}");
+        ids.push(raised["id"].as_str().unwrap().to_string());
+    }
+
+    let reason = serde_json::json!({"reason": "no longer needed"});
+    for id in &ids {
+        let (status, cancelled) = post(
+            &deployment.base,
+            &format!("/requests/{id}/cancel"),
+            MACHINE_A,
+            "SHARED-CANCEL-KEY",
+            reason.clone(),
+        )
+        .await;
+        assert_eq!(status, 200, "{cancelled}");
+        assert_eq!(
+            cancelled["id"].as_str(),
+            Some(id.as_str()),
+            "each cancel must return the request it cancelled"
+        );
+    }
+
+    for id in &ids {
+        let (_, request) = get(&deployment.base, &format!("/requests/{id}"), MACHINE_A).await;
+        assert_eq!(
+            request["state"], "cancelled",
+            "an operator who called this request off must find it called off, not still live"
+        );
+    }
+}
+
+/// §14 requires a Server that stores `resume_payload` to encrypt it at rest.
+///
+/// This deployment implements no encryption at rest, so it refuses the field instead of keeping a
+/// runtime's private state in the clear. §14 sanctions exactly that: a Level 1 Server MUST accept
+/// and ignore these fields, or reject them with `400 invalid_request`.
+///
+/// The second half is the part worth having a test for at all: `GET /meta` must report the level
+/// this build actually implements. A hardcoded level beside a code path that stored payloads
+/// anyway is how a Server advertises something nobody measured.
+#[tokio::test]
+async fn continuation_state_is_refused_rather_than_stored_unprotected() {
+    let deployment = Deployment::start("continuation", 18110).await;
+
+    let (status, meta) = get(&deployment.base, "/meta", MACHINE_A).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        meta["conformance_level"], 1,
+        "§1.2 — a Server MUST NOT advertise Level 2 unless it passes C-17"
+    );
+    assert_eq!(
+        meta["extensions"].as_array().map(Vec::len),
+        Some(0),
+        "the continuation extension is not implemented, so it is not advertised"
+    );
+
+    let mut body = raise_body("run:continuation", "Approve the batch?");
+    body["resume_payload"] = serde_json::json!("Q09ORk9STUFOQ0UtT1BBUVVFLUJMT0I=");
+    let (status, refused) = post(
+        &deployment.base,
+        "/requests",
+        MACHINE_A,
+        "continuation-payload",
+        body,
+    )
+    .await;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["error"]["code"], "invalid_request");
+
+    // Nothing was created: §19's fail-closed rule applies here too.
+    let (_, listed) = get(
+        &deployment.base,
+        "/requests?waiter_ref=run%3Acontinuation",
+        MACHINE_A,
+    )
+    .await;
+    assert_eq!(
+        listed["data"].as_array().map(Vec::len),
+        Some(0),
+        "a refused raise creates nothing"
+    );
+
+    // And the store holds no payload for anyone, which is the property the refusal buys.
+    let pool = deployment.pool().await;
+    let stored: i64 = sqlx::query_scalar(
+        "select count(*) from handoff_requests where resume_payload is not null",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count stored payloads");
+    assert_eq!(
+        stored, 0,
+        "no continuation payload is persisted in the clear"
+    );
+
+    // `resume_ref` is a pointer the runtime owns. It carries no secret and §14 places no
+    // encryption requirement on it, so it is still accepted.
+    let mut body = raise_body("run:continuation-ref", "Approve the batch?");
+    body["resume_ref"] = serde_json::json!("s3://checkpoints/run/step-14.msgpack");
+    let (status, accepted) = post(
+        &deployment.base,
+        "/requests",
+        MACHINE_A,
+        "continuation-ref",
+        body,
+    )
+    .await;
+    assert_eq!(status, 201, "{accepted}");
+}

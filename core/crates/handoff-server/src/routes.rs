@@ -158,6 +158,24 @@ async fn raise(
     // nothing (§5.2, §19, I21, C-16).
     let mut raise = RaiseRequest::parse(&body, &state.profile)?;
 
+    // §14 requires a Server that stores `resume_payload` to encrypt it at rest, and this
+    // deployment implements no encryption at rest. §14 also states the alternative plainly: a
+    // Level 1 Server MUST accept and ignore these fields, or reject them with
+    // `400 invalid_request`. Rejecting is the honest one — accepting and quietly keeping a
+    // runtime's private state in the clear, under a comment claiming otherwise, is the failure
+    // this refusal exists to prevent. `resume_ref` is a pointer the runtime owns, carries no
+    // secret, and has no such requirement, so it is still accepted and returned verbatim.
+    if raise.continuation.resume_payload.is_some() && !state.config.continuation_supported {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidRequest,
+            "this deployment does not implement encryption at rest for `resume_payload`, which \
+             §14 requires of any Server that stores it, so the field is refused rather than kept \
+             in the clear. `GET /meta` reports the conformance level and extensions this build \
+             actually implements.",
+        )
+        .into());
+    }
+
     // §11.4. Grants are minted here, server-side, and the handle a client declared is replaced by
     // one from a CSPRNG. §11.1 forbids deriving a handle from anything recomputable, and a handle
     // the caller chose is a handle the caller can predict for somebody else's request.
@@ -305,11 +323,17 @@ async fn amend(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "amend", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "amend",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let now = state.now();
 
     let patch = AmendPatch {
@@ -357,11 +381,17 @@ async fn cancel(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "cancel", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "cancel",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let reason = body
         .get("reason")
         .and_then(|v| v.as_str())
@@ -398,11 +428,17 @@ async fn supersede(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "supersede", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "supersede",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let by = body
         .get("by")
         .and_then(|v| v.as_str())
@@ -442,11 +478,17 @@ async fn escalate(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "escalate", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "escalate",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let rung = body.get("rung").and_then(|v| v.as_u64()).map(|r| r as u32);
     let now = state.now();
 
@@ -479,11 +521,17 @@ async fn reassign(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "reassign", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "reassign",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let to: Target = serde_json::from_value(
         body.get("to")
             .cloned()
@@ -526,11 +574,17 @@ async fn arm_attempt(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "attempt", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "attempt",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let ttl = match body.get("ttl").and_then(|v| v.as_str()) {
         Some(text) => Some(IsoDuration::parse(text)?),
         None => None,
@@ -583,14 +637,24 @@ async fn answer(
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
 
+    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
+
     // §6.7 rule 3. A retried click is not a conflict: the same key as the answer that landed
     // returns `200` with the original receipt, and it does so before any state check.
-    let slot = slot(&principal, "answer", key.as_deref(), &digest);
+    //
+    // Scoped to **this** request. The same key against a different request is not a retry of this
+    // answer, and replaying one here would hand the caller a decision about something else.
+    let slot = slot(
+        &principal,
+        "answer",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
 
-    let id = parse_id::<handoff_protocol::id::Request>(&request_id, ErrorCode::RequestNotFound)?;
     let now = state.now();
     let disposition: Disposition = match body.get("disposition").and_then(|v| v.as_str()) {
         Some(text) => serde_json::from_value(Value::String(text.to_string()))
@@ -1304,11 +1368,17 @@ async fn record_grade(
     let body = body_json(&body)?;
     let digest = body_digest(&body)?;
     let key = idempotency_key(&headers, &body)?;
-    let slot = slot(&principal, "delivery_grade", key.as_deref(), &digest);
+    let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
+    let slot = slot(
+        &principal,
+        "delivery_grade",
+        &id.to_string(),
+        key.as_deref(),
+        &digest,
+    );
     if let Some(replayed) = replay(state.store.as_ref(), &slot).await? {
         return Ok(replayed);
     }
-    let id = parse_id::<handoff_protocol::id::Delivery>(&delivery_id, ErrorCode::RequestNotFound)?;
 
     let grade = match body.get("grade").and_then(|value| value.as_str()) {
         Some("delivered") => handoff_protocol::delivery::DeliveryGrade::Delivered,
@@ -1389,8 +1459,14 @@ async fn meta(State(state): State<Arc<AppState>>) -> ApiResult {
     // support instead of assuming it (§19).
     Ok(Api::ok(json!({
         "protocol_version": handoff_protocol::PROTOCOL_VERSION,
-        "conformance_level": 1,
-        "extensions": Vec::<String>::new(),
+        // §1.2 makes the advertised level normative, and a Server MUST NOT advertise Level 2
+        // unless it passes C-17. Derived from what this build actually does, never a literal.
+        "conformance_level": if state.config.continuation_supported { 2 } else { 1 },
+        "extensions": if state.config.continuation_supported {
+            vec!["continuation".to_string()]
+        } else {
+            Vec::<String>::new()
+        },
         "field_types": ["choice", "text", "number", "boolean", "secret", "attestation", "document", "file_ref"],
         "capability_types": state.profile.capability_types.iter().collect::<Vec<_>>(),
         "channels": state.channels.names(),

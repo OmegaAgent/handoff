@@ -21,6 +21,25 @@ deliverable. These are the things a reader might reasonably expect to find and w
   suite reports red against a stub implementing nothing — and it fails the build if the suite ever
   reports conformance against that stub.
 
+- **No encryption at rest for `resume_payload`, so the field is refused.** §14 requires a Server
+  that stores continuation state to encrypt it at rest. `handoff-store-postgres` implements no
+  encryption — `resume_payload` is a plain `text` column and `grep -rn encrypt` over the store
+  returns nothing. Rather than keep a runtime's private state in the clear, `handoffd` **rejects a
+  raise carrying `resume_payload` with `400 invalid_request`**, which §14 explicitly permits of a
+  Level 1 Server, and `GET /meta` reports Level 1 with no extensions — derived from that same
+  capability rather than hardcoded. `resume_ref` is still accepted: it is a pointer the runtime
+  owns, carries no secret, and §14 places no encryption requirement on it.
+
+  Closing this means implementing encryption at rest **with a documented key source** — where the
+  key lives, who can read it, how it rotates, and what happens to stored payloads when it does.
+  That is a design decision, not a code change, and inventing one to make a field work would be
+  the same shortcut this entry exists to avoid. Until then the continuation extension is
+  unimplemented and unadvertised, and C-17 is correctly out of scope.
+
+  An earlier revision of `handoff-protocol`'s `Continuation::resume_payload` doc comment said
+  "encrypted at rest by the Server" as though it were a property of the type. It is corrected;
+  a comment asserting a guarantee no code provides is worse than no comment.
+
 ## Open now — H0, publish the contract
 
 Landed in H0:

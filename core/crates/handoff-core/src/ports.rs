@@ -287,6 +287,13 @@ pub struct IdempotencySlot {
     pub principal: String,
     /// Which operation the key was presented against.
     pub operation: String,
+    /// The object the operation acts on, empty for an operation that creates one.
+    ///
+    /// Without this, a key is scoped to `(tenant, principal, operation)` and a caller answering a
+    /// **different** request with the same key and the same body receives the first request's
+    /// receipt while the second is never answered. An answer is bound to the thing it was shown
+    /// against; it does not generalize to a similar-looking request.
+    pub object: String,
     /// The caller's key.
     pub key: String,
     /// Digest of the body, so the same key with a different body is a conflict (§3.3 rule 2).

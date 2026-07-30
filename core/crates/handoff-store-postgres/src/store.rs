@@ -994,10 +994,15 @@ struct StepToAppend<'a> {
 
 /// The principal reference stored on an idempotency row.
 fn principal_ref(principal: &Principal) -> String {
+    // Falls back to the credential rather than to a tenant-wide literal. An anonymous link has no
+    // identity by construction (§4.4), but it does have a credential, and two link holders in one
+    // tenant must not share a namespace — for an idempotency key that would hand one person
+    // another person's decision, and for a grant binding it would let one take a surface bound to
+    // the other.
     principal
         .id
         .map(|id| id.to_string())
-        .unwrap_or_else(|| format!("{}::anonymous", principal.tenant_ref))
+        .unwrap_or_else(|| principal.credential_ref.clone())
 }
 
 // ------------------------------------------------------------------------------ the store port
@@ -1016,7 +1021,8 @@ impl Store for PgStore {
             if let Some(key) = command.idempotency_key.as_deref() {
                 let row = sqlx::query(
                     "select body_digest, request_id from handoff_idempotency \
-                     where tenant_ref = $1 and principal_ref = $2 and operation = 'raise' and key = $3",
+                     where tenant_ref = $1 and principal_ref = $2 and operation = 'raise' \
+                       and object = '' and key = $3",
                 )
                 .bind(&tenant)
                 .bind(&principal)
@@ -2945,6 +2951,7 @@ impl Store for PgStore {
             };
             Ok(Some(Principal {
                 id,
+                credential_ref: row.get::<String, _>("id"),
                 kind,
                 tenant_ref: row.get("tenant_ref"),
                 role: parse_role(&row.get::<String, _>("role")),
@@ -2962,11 +2969,13 @@ impl Store for PgStore {
         Box::pin(async move {
             let row = sqlx::query(
                 "select body_digest, response_status, response_body from handoff_idempotency \
-                 where tenant_ref = $1 and principal_ref = $2 and operation = $3 and key = $4",
+                 where tenant_ref = $1 and principal_ref = $2 and operation = $3 \
+                   and object = $4 and key = $5",
             )
             .bind(&slot.tenant)
             .bind(&slot.principal)
             .bind(&slot.operation)
+            .bind(&slot.object)
             .bind(&slot.key)
             .fetch_optional(&self.pool)
             .await
@@ -2994,13 +3003,14 @@ impl Store for PgStore {
         Box::pin(async move {
             sqlx::query(
                 "insert into handoff_idempotency \
-                 (tenant_ref, principal_ref, operation, key, body_digest, response_status, \
-                  response_body, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8) \
-                 on conflict (tenant_ref, principal_ref, operation, key) do nothing",
+                 (tenant_ref, principal_ref, operation, object, key, body_digest, \
+                  response_status, response_body, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
+                 on conflict (tenant_ref, principal_ref, operation, object, key) do nothing",
             )
             .bind(&slot.tenant)
             .bind(&slot.principal)
             .bind(&slot.operation)
+            .bind(&slot.object)
             .bind(&slot.key)
             .bind(slot.body_digest.to_string())
             .bind(response.status as i32)
@@ -3396,9 +3406,9 @@ async fn remember_raise(
 ) -> Result<()> {
     sqlx::query(
         "insert into handoff_idempotency \
-         (tenant_ref, principal_ref, operation, key, body_digest, response_status, response_body, \
-          request_id, created_at) values ($1,$2,'raise',$3,$4,200,'',$5,$6) \
-         on conflict (tenant_ref, principal_ref, operation, key) do nothing",
+         (tenant_ref, principal_ref, operation, object, key, body_digest, response_status, \
+          response_body, request_id, created_at) values ($1,$2,'raise','',$3,$4,200,'',$5,$6) \
+         on conflict (tenant_ref, principal_ref, operation, object, key) do nothing",
     )
     .bind(tenant)
     .bind(principal)

@@ -116,19 +116,34 @@ pub fn idempotency_key(headers: &HeaderMap, body: &Value) -> Result<Option<Strin
 }
 
 /// Which idempotency slot this call occupies.
+/// Which idempotency slot this call occupies.
+///
+/// `object` is the id from the path, and leaving it out is not a detail. §3.1 makes an
+/// `Idempotency-Key` **retry safety for one call**: "a repeat returns the identical request *and
+/// its stored response*". Scoped only to `(tenant, principal, operation)`, a caller answering
+/// request B with the key they already used on request A gets back A's receipt and A's
+/// authorization, with `200`, while B is never answered — and the agent then spends A's decision on
+/// an effect named for B. An answer is bound to the thing it was shown against.
+///
+/// A raise passes an empty `object`, because it is the call that creates one; there its scope is
+/// exactly the `(org_id, principal_id)` §3.1 specifies.
 pub fn slot(
     principal: &Principal,
     operation: &str,
+    object: &str,
     key: Option<&str>,
     digest: &Digest,
 ) -> Option<IdempotencySlot> {
     key.map(|key| IdempotencySlot {
         tenant: principal.tenant_ref.clone(),
+        // The credential, not the identity: an anonymous link has no identity but must still not
+        // share a namespace with every other link in the tenant (§4.4).
         principal: principal
             .id
             .map(|id| id.to_string())
-            .unwrap_or_else(|| format!("{}::anonymous", principal.tenant_ref)),
+            .unwrap_or_else(|| principal.credential_ref.clone()),
         operation: operation.to_string(),
+        object: object.to_string(),
         key: key.to_string(),
         body_digest: digest.clone(),
     })

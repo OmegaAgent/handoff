@@ -542,6 +542,35 @@ alter table handoff_signals add column if not exists callback_delivery_id text;
 alter table handoff_signals add column if not exists callback_disabled_at timestamptz;
 "#,
     },
+    Migration {
+        number: 13,
+        name: "idempotency keys are scoped to the object they act on",
+        sql: r#"
+-- An `Idempotency-Key` is retry safety for **one call against one object**, and the object was
+-- missing from the key's scope. §3.1 scopes the key to `(org_id, principal_id)`, which is right for
+-- a raise — it creates the object — but for every per-object mutation the object has to be in the
+-- scope too. Without it, answering request B with the key already used on request A replays A's
+-- receipt, and B is never answered at all: the caller is handed a decision about a different thing
+-- and told it succeeded.
+alter table handoff_idempotency add column if not exists object text not null default '';
+
+do $idem$
+begin
+  if exists (
+    select 1 from pg_constraint
+    where conname = 'handoff_idempotency_pkey'
+      and conrelid = 'handoff_idempotency'::regclass
+      and array_length(conkey, 1) = 4
+  ) then
+    alter table handoff_idempotency drop constraint handoff_idempotency_pkey;
+    alter table handoff_idempotency
+      add constraint handoff_idempotency_pkey
+      primary key (tenant_ref, principal_ref, operation, object, key);
+  end if;
+end
+$idem$;
+"#,
+    },
 ];
 
 /// The row-level-security helper, applied before the migrations that use it.
@@ -559,7 +588,7 @@ mod tests {
         // Bump this deliberately when a migration lands. The count is here so that two changes
         // adding a migration in parallel collide in this assertion rather than silently agreeing
         // on a number — which is exactly what it caught.
-        assert_eq!(MIGRATIONS.len(), 12);
+        assert_eq!(MIGRATIONS.len(), 13);
     }
 
     #[test]

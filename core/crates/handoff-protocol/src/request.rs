@@ -282,7 +282,14 @@ pub struct Callback {
 pub struct Continuation {
     /// A URI the runtime owns. Stored verbatim, never dereferenced.
     pub resume_ref: Option<String>,
-    /// Opaque bytes, at most 64 KiB. Base64 on the wire; encrypted at rest by the Server.
+    /// Opaque bytes, at most 64 KiB. Base64 on the wire.
+    ///
+    /// §14 requires a Server that stores this to **encrypt it at rest**. This crate performs no
+    /// I/O and therefore stores nothing, so it neither satisfies nor violates that — the obligation
+    /// falls entirely on whatever persists the value, and a Server that cannot meet it must reject
+    /// the field rather than keep the bytes in the clear. An earlier revision of this comment
+    /// asserted "encrypted at rest by the Server" as though it were a property of the type, which
+    /// stated a guarantee no code here provides.
     pub resume_payload: Option<Vec<u8>>,
 }
 

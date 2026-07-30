@@ -1,0 +1,178 @@
+id: C-25
+title: One key reused on a different request settles both, and mints two receipts
+level: 1
+invariants: [I20, I10, I1]
+spec:
+  - "§3.1 — Idempotency-Key is scoped (org_id, principal_id), and a mutation is scoped to the object it acts on"
+  - "§3.5 — every mutating operation is idempotent under a caller-supplied key"
+  - "§6.7 rule 3 — a repeat of the same answer, with the same key, replays the receipt that landed"
+  - "§10 — one answer mints one authorization"
+rationale: >
+  C-1 and C-19 both use one key per object, so between them they establish that a repeated call is
+  idempotent and that two tenants do not collide — and neither notices if the replay scope omits the
+  object being acted on. That omission is the shape a suite written the obvious way will not catch,
+  and it was live in the reference implementation until a hostile review pass reproduced it.
+
+  The failure is silent in both directions. The second answer returns `200` with a receipt, so the
+  caller believes the human decided. The document names the *first* request, so only a client that
+  compares `request.id` against the one it asked about notices. Meanwhile the second request is never
+  answered and its waiter is still parked. The agent then spends an authorization it believes belongs
+  to the second request on an effect named for it — which is precisely the generalization the
+  protocol's headline claim says cannot happen: an answer is bound to the thing it was shown against
+  and does not carry to a similar-looking request.
+
+  Reusing a key across two calls is not exotic. Any responder surface or SDK deriving its key from a
+  workflow step, a session, or a constant does it, and `{"decision":"approve"}` makes the bodies
+  identical — which defeats a body-digest guard, because the bodies genuinely are the same. The
+  object is the only thing that differs, so the object is what the scope must carry.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise the first request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c25-raise-1-${run_id}"
+      body:
+        waiter_ref: "run:c25-one-${run_id}"
+        dedupe_key: "c25-one-${run_id}"
+        prompt:
+          title: "Refund the first invoice?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        r1: id
+
+  - name: raise the second request, a different object entirely
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c25-raise-2-${run_id}"
+      body:
+        waiter_ref: "run:c25-two-${run_id}"
+        dedupe_key: "c25-two-${run_id}"
+        prompt:
+          title: "Refund the second invoice?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        r2: id
+
+  - name: answer the first, with a key the responder will reuse
+    http:
+      method: POST
+      path: /requests/${r1}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c25-shared-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: request.id
+            same_as: r1
+      capture:
+        receipt1: receipt.id
+        auth1: authorization.id
+
+  - name: answer the second with the same key and an identical body
+    http:
+      method: POST
+      path: /requests/${r2}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c25-shared-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: request.id
+            same_as: r2
+            because: >
+              §3.1 — the replay scope includes the object. A response naming the first request here
+              means the second was never answered and the caller was told it was.
+          - path: receipt.id
+            not_equals: "${receipt1}"
+            because: "§9 — one intervention, one receipt. Two answers are two receipts."
+          - path: authorization.id
+            not_equals: "${auth1}"
+            because: >
+              §10 — one answer mints one authorization. Replaying the first here hands the agent a
+              grant bound to a different request's waiter, which it then spends.
+
+  - name: the second request really is answered, not merely reported so
+    http:
+      method: GET
+      path: /requests/${r2}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: answered
+          - path: receipt.id
+            not_equals: "${receipt1}"
+
+  - name: and the first is untouched by any of it
+    http:
+      method: GET
+      path: /requests/${r1}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: answered
+          - path: receipt.id
+            equals: "${receipt1}"
+
+  - name: a genuine retry of the first still replays, because that is what the key is for
+    http:
+      method: POST
+      path: /requests/${r1}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c25-shared-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: receipt.id
+            equals: "${receipt1}"
+            because: >
+              §6.7 rule 3 — scoping the key to the object must not break replay *on* that object.
+              A fix that made every retry mint a second receipt would trade this defect for a worse
+              one.

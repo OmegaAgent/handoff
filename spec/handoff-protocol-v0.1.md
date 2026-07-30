@@ -1408,8 +1408,8 @@ Additions take the next free number.
 
 ## 18. Conformance suite
 
-A Server is **Handoff v0.1 Level 1 compliant** when it passes all 24 Level 1 cases: C-1 through
-C-16, plus C-6b and C-18 through C-24. Level 2 adds C-17. Each test is black-box,
+A Server is **Handoff v0.1 Level 1 compliant** when it passes all 25 Level 1 cases: C-1 through
+C-16, plus C-6b and C-18 through C-25. Level 2 adds C-17. Each test is black-box,
 against the HTTP API.
 
 **Case identifiers are stable and MUST NOT be renumbered.** A case that is withdrawn keeps its
@@ -1448,6 +1448,7 @@ Level 1 invariant, and C-17 is the only such case.
 | C-22 | 1 | All eight interaction patterns in `fixtures/use-cases/` are accepted and answerable with **no request-kind field anywhere in the wire traffic**. A page-state change alone produces no clearance receipt | I14, I16 |
 | C-23 | 1 | Drive every transition in §6.2 and §8.2. For each one, the state change and its event are observable together: no state exists whose event is missing, and no event exists whose state change was rolled back. Kill the Server between the state write and the event write → after restart, either both are present or neither is | I12 |
 | C-24 | 1 | Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `9007199254740991` (2^53 − 1) → accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
+| C-25 | 1 | Answer request A with a key, then answer request B with the **same** key and an identical body → B is answered, naming B, with its own receipt and its own authorization. A retry of A with that key still replays A's receipt | I20, I10, I1 |
 
 Four notes for implementers:
 
