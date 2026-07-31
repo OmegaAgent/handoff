@@ -74,6 +74,14 @@ steps:
       expect:
         status: 200
         body:
+          # The positive control first. Three of this case's assertions are absences, and an absence
+          # is satisfied by any document that is not the one the case means — an error envelope, an
+          # empty page, a body that did not parse. So each of them now sits next to a statement that
+          # this IS the request, which fails if the read went somewhere else.
+          - path: id
+            same_as: req
+          - path: state
+            equals: pending
           - path: resume_ref
             exists: false
             because: "§14 — returned in every signal for that request, and nowhere else"
@@ -90,6 +98,13 @@ steps:
       expect:
         status: 200
         body:
+          - path: data
+            length_at_least: 1
+            because: >
+              The control. An empty listing contains no continuation state and no request either,
+              so the assertion below would hold over a page that never showed this request at all.
+          - path: data[0].id
+            same_as: req
           - path: ""
             not_contains_text: "Q09ORk9STUFOQ0UtQzE3"
             because: "§14 — not in a listing"
@@ -134,6 +149,11 @@ steps:
       expect:
         status: 200
         body:
+          - path: request_id
+            same_as: req
+            because: "The control: this is the receipt for the request the case raised."
+          - path: chain.digest
+            matches: "^sha256:"
           - path: ""
             not_contains_text: "Q09ORk9STUFOQ0UtQzE3"
             because: "§14 — not in a receipt"

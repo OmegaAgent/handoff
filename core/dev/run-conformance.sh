@@ -8,6 +8,12 @@
 #
 #   core/dev/run-conformance.sh              # create, run, tear down
 #   KEEP=1 core/dev/run-conformance.sh       # leave the database and server up for inspection
+#   PROFILE=… core/dev/run-conformance.sh    # run against another profile, same server
+#
+# `PROFILE` exists for one caller: the lying-hooks gate in
+# `core/crates/handoff-conformance/dev/`, which stands up this same deployment and points the suite
+# at a profile whose hooks implement nothing. A suite that cannot be run against a hostile profile
+# cannot be shown to reject one.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -137,7 +143,7 @@ cd "$ROOT"
 set +e
 "$ROOT/core/target/debug/handoff-conformance" \
   --base-url "http://$HANDOFF_BIND/v1" \
-  --profile "$HERE/conformance-profile.yaml" \
+  --profile "${PROFILE:-$HERE/conformance-profile.yaml}" \
   "$@"
 STATUS=$?
 set -e

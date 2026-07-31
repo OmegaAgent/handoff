@@ -52,6 +52,28 @@ impl Response {
         serde_json::from_str(&self.body).unwrap_or(serde_json::Value::Null)
     }
 
+    /// The body as a document to assert against, or the reason it is not one.
+    ///
+    /// [`Response::json`] answers `null` for a body that does not parse, which is right for a
+    /// reader and wrong for a matcher: every path resolves to nothing against `null`, so every
+    /// negative assertion — `not_contains_text`, `exists: false` — passes against a stack trace,
+    /// an HTML error page, or a truncated response. A step that asserts on members therefore parses
+    /// through here, where a body that is not JSON is the failure it obviously is.
+    pub fn document(&self) -> Result<serde_json::Value, String> {
+        let raw = self.body.trim();
+        if raw.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(raw).map_err(|e| {
+            let head: String = raw.chars().take(200).collect();
+            format!(
+                "the response body is not JSON ({e}), and this step asserts against its members. \
+                 Against a body that did not parse every path resolves to nothing, which satisfies \
+                 every assertion about something being absent.\n      body: {head}"
+            )
+        })
+    }
+
     /// Headers as a JSON object, so the same matchers work on them.
     pub fn headers_json(&self) -> serde_json::Value {
         serde_json::Value::Object(
@@ -291,5 +313,27 @@ mod tests {
             body: "<html>gateway</html>".into(),
         };
         assert!(r.json().is_null());
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_a_failure_for_a_step_that_asserts_on_members() {
+        // `null` satisfies every assertion of the form "this is not there", so a gateway error page
+        // silently passes a case built out of negatives. Reading it as a document says so.
+        let r = Response {
+            status: 502,
+            headers: BTreeMap::new(),
+            body: "<html>gateway</html>".into(),
+        };
+        let err = r.document().unwrap_err();
+        assert!(err.contains("not JSON"), "{err}");
+        assert!(err.contains("<html>gateway</html>"), "{err}");
+
+        // A 204 has no body and no members to assert against, and that is not an error.
+        let empty = Response {
+            status: 204,
+            headers: BTreeMap::new(),
+            body: String::new(),
+        };
+        assert!(empty.document().unwrap().is_null());
     }
 }

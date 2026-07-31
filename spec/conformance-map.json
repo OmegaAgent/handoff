@@ -71,7 +71,7 @@
   {
    "id": "C-5",
    "level": 1,
-   "title": "A machine key calls `/answer` \u2192 `403 requester_may_not_answer`",
+   "title": "A machine key calls `/answer` \u2192 `403 requester_may_not_answer`, for the machine that raised the request and for a second machine in the same tenant that did not; a person answering the same request succeeds",
    "invariants": [
     "I15"
    ]
@@ -253,6 +253,14 @@
     "I10",
     "I1"
    ]
+  },
+  {
+   "id": "C-26",
+   "level": 1,
+   "title": "Mint a receipt through the ordinary answer path whose answer carries non-ASCII object keys, a nested document, and 2^53 \u2212 1, then recompute its core hash and chain digest in an implementation that shares no code with the Server \u2192 the stored digest and the recomputed one agree, the receipt verifies standing alone from its own stored `prev_digest`, and the exported head is the head of the chain the deployment serves",
+   "invariants": [
+    "I2"
+   ]
   }
  ],
  "invariants": [
@@ -271,7 +279,8 @@
    "cases": [
     "C-6b",
     "C-15",
-    "C-24"
+    "C-24",
+    "C-26"
    ]
   },
   {

@@ -7,8 +7,9 @@
 use crate::callback::Receiver;
 use crate::case::{
     Action, CallbackAssert, CallbackReceiver, Case, Concurrent, ForEachFixture, ForbidKeys, Hook,
-    HttpCall, Matcher, Poll, Scan, ScanSource, Step,
+    HttpCall, Matcher, MutationOutcome, Poll, Scan, ScanSource, Step, StorageMutation, VerifyChain,
 };
+use crate::chain;
 use crate::expect;
 use crate::http::{Client, Response};
 use crate::profile::Profile;
@@ -78,6 +79,7 @@ impl<'a> Runner<'a> {
             receivers: Vec::new(),
         };
         scope.vars.insert("run_id".to_string(), vars::run_id());
+        scope.vars.insert("nonce".to_string(), vars::nonce());
         scope.vars.insert(
             "case_id".to_string(),
             case.id.to_lowercase().replace('-', ""),
@@ -168,6 +170,8 @@ impl<'a> Runner<'a> {
             Action::Scan(s) => self.do_scan(s, scope),
             Action::ForbidKeys(f) => self.do_forbid_keys(f),
             Action::Hook(h) => self.do_hook(h, scope),
+            Action::VerifyChain(v) => self.do_verify_chain(v, scope),
+            Action::StorageMutation(m) => self.do_storage_mutation(m, scope),
             Action::CallbackReceiver(r) => self.do_callback_receiver(r, scope),
             Action::CallbackAssert(a) => self.do_callback_assert(a, scope),
             Action::ForEachFixture(f) => self.do_for_each_fixture(f, case, scope),
@@ -248,7 +252,9 @@ impl<'a> Runner<'a> {
                 context()
             ));
         }
-        check_all(&response.json(), &call.expect.body, vars)?;
+        if !call.expect.body.is_empty() {
+            check_all(&response.document()?, &call.expect.body, vars)?;
+        }
         check_all(&response.headers_json(), &call.expect.headers, vars)
     }
 
@@ -683,6 +689,219 @@ impl<'a> Runner<'a> {
             scope.vars.insert(name.clone(), output.trim().to_string());
         }
         Ok(())
+    }
+
+    // ------------------------------------------------------- the chain, walked here
+
+    fn get(&self, path: &str, alias: &str) -> Result<Response, String> {
+        let principal = self.profile.principal(alias)?;
+        let response = self.client.call(
+            "GET",
+            path,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            &principal,
+        )?;
+        if response.status >= 400 {
+            return Err(format!(
+                "GET {path} returned {}, and this step has to read it: {}",
+                response.status,
+                first_line(&response.body)
+            ));
+        }
+        Ok(response)
+    }
+
+    fn do_verify_chain(&self, v: &VerifyChain, scope: &Scope) -> Result<(), String> {
+        let because = v
+            .because
+            .as_deref()
+            .map(|w| format!("\n      because: {w}"))
+            .unwrap_or_default();
+        let fail = |reason: String| Err(format!("{reason}{because}"));
+
+        let listing_path = vars::interpolate(&v.receipts, &scope.vars)?;
+        let listing = self.get(&listing_path, &v.r#as)?;
+        let doc = listing.document()?;
+        let Some(receipts) = doc.get("data").and_then(|d| d.as_array()) else {
+            return fail(format!(
+                "GET {listing_path} carries no `data` array, so there are no receipts to walk\n\
+                 \x20     body: {}",
+                first_line(&listing.body)
+            ));
+        };
+
+        if receipts.len() < v.at_least {
+            return fail(format!(
+                "GET {listing_path} served {} receipt(s) and this walk needs at least {}. A walk \
+                 over fewer receipts than the case minted is a walk over the wrong history.",
+                receipts.len(),
+                v.at_least
+            ));
+        }
+        for wanted in &v.must_include {
+            let wanted = vars::interpolate(wanted, &scope.vars)?;
+            let present = receipts
+                .iter()
+                .any(|r| r.get("id").and_then(|i| i.as_str()) == Some(wanted.as_str()));
+            if !present {
+                return fail(format!(
+                    "{wanted} is not in the {} receipt(s) GET {listing_path} served, so the chain \
+                     this walk verified is not the one this case wrote to",
+                    receipts.len()
+                ));
+            }
+        }
+
+        // The walk itself. Nothing here asks the deployment for an answer: every digest is
+        // recomputed from the receipt's own content by this crate's implementation of §2.2.
+        let walked = match chain::verify(receipts) {
+            Ok(head) => head,
+            Err(why) => {
+                return fail(format!(
+                    "the chain does not verify when it is recomputed from the receipts \
+                     GET {listing_path} served:\n      {why}"
+                ))
+            }
+        };
+
+        for wanted in &v.standalone {
+            let wanted = vars::interpolate(wanted, &scope.vars)?;
+            let receipt = receipts
+                .iter()
+                .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(wanted.as_str()))
+                .ok_or_else(|| {
+                    format!("{wanted} is not in what GET {listing_path} served{because}")
+                })?;
+            if let Err(why) = chain::verify_standalone(receipt) {
+                return fail(format!(
+                    "this receipt does not verify on its own: {why}\n      A receipt is the record \
+                     that outlives the system that minted it, so it has to be checkable by someone \
+                     holding nothing else."
+                ));
+            }
+        }
+
+        let head_path = vars::interpolate(&v.head, &scope.vars)?;
+        let head = self.get(&head_path, &v.r#as)?.json();
+        let exported_digest = head.get("head_digest").and_then(|d| d.as_str());
+        let exported_height = head.get("height").and_then(|h| h.as_u64());
+        if exported_digest != Some(walked.head_digest.as_str())
+            || exported_height != Some(walked.height)
+        {
+            return fail(format!(
+                "GET {head_path} exports head_digest={} height={}, and walking the receipts it \
+                 serves arrives at head_digest={} height={}. The head a deployment publishes is the \
+                 anchor an auditor records; one that is not the head of its own chain anchors \
+                 nothing.",
+                exported_digest.unwrap_or("<absent>"),
+                exported_height.map_or("<absent>".to_string(), |h| h.to_string()),
+                walked.head_digest,
+                walked.height
+            ));
+        }
+
+        // The guard, scoped to the same unit as the assertion it protects: not "the walk can fail
+        // in principle" but "each of these receipts, rewritten, breaks this walk". A guard covering
+        // a loop is not a guard covering its iterations, and the property §9.4 claims is per-entry.
+        for index in 0..receipts.len() {
+            let rewritten = chain::rewrite_one(receipts, index)
+                .map_err(|why| format!("the tamper guard could not run: {why}{because}"))?;
+            if chain::verify(&rewritten).is_ok() {
+                return fail(format!(
+                    "rewriting receipt {} of {} left the chain verifying, so the walk above \
+                     proved nothing: a chain that still verifies after its history is rewritten is \
+                     tamper-evidence in name only",
+                    index + 1,
+                    receipts.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------ mutations below the API, observed above it
+
+    fn do_storage_mutation(&self, m: &StorageMutation, scope: &mut Scope) -> Result<(), String> {
+        let because = m
+            .because
+            .as_deref()
+            .map(|w| format!("\n      because: {w}"))
+            .unwrap_or_default();
+        let fail = |reason: String| Err(format!("{reason}{because}"));
+
+        let path = vars::interpolate(&m.observe.path, &scope.vars)?;
+        let before = self.get(&path, &m.observe.r#as)?;
+
+        let command = self.profile.hook(&m.hook)?;
+        let args = self.fill_map(&m.args, scope)?;
+        let (code, output) = run_command(&command, &args)?;
+
+        match m.expect {
+            MutationOutcome::Refused if code == 0 => {
+                return fail(format!(
+                    "the `{}` hook exited 0, so the mutation it attempted was not refused\n      \
+                     output: {}",
+                    m.hook,
+                    head_lines(&output)
+                ))
+            }
+            MutationOutcome::Applied if code != 0 => {
+                return fail(format!(
+                    "the `{}` hook exited {code}, and this mutation is the control that has to \
+                     succeed — a deployment whose storage hook cannot write anything has not shown \
+                     that the refusals above are refusals rather than a command that never ran\n\
+                     \x20     output: {}",
+                    m.hook,
+                    head_lines(&output)
+                ))
+            }
+            _ => {}
+        }
+        for pattern in &m.output_matches {
+            let filled = vars::interpolate_regex(pattern, &scope.vars)?;
+            let re = regex::Regex::new(&filled)
+                .map_err(|e| format!("case defect: `{pattern}` is not a valid regex ({e})"))?;
+            if !re.is_match(&output) {
+                return fail(format!(
+                    "the `{}` hook's output does not match /{filled}/\n      output: {}",
+                    m.hook,
+                    head_lines(&output)
+                ));
+            }
+        }
+
+        let after = self.get(&path, &m.observe.r#as)?;
+        match m.expect {
+            // The whole point of the round trip. A refusal is not a sentence a hook printed: it is
+            // this object, read over HTTP after the attempt, being the bytes it was before.
+            MutationOutcome::Refused if after.body != before.body => {
+                return fail(format!(
+                    "GET {path} does not serve what it served before the attempt, so the mutation \
+                     was not refused — it landed.\n      before: {}\n      after:  {}",
+                    first_line(&before.body),
+                    first_line(&after.body)
+                ))
+            }
+            // And the control is not a sentence either: a hook that touched no storage leaves this
+            // read exactly as it found it, which is the failure that makes the refusals mean
+            // something.
+            MutationOutcome::Applied if after.body == before.body => {
+                return fail(format!(
+                    "the `{}` hook reported success and GET {path} serves the same bytes it served \
+                     before, so nothing was written. This step exists to show that the deployment's \
+                     storage hook reaches the store this API reads from; without it, a hook that \
+                     does nothing at all is indistinguishable from a storage engine refusing a \
+                     mutation.\n      output: {}",
+                    m.hook,
+                    head_lines(&output)
+                ))
+            }
+            _ => {}
+        }
+        check_all(&after.document()?, &m.observe.body, &scope.vars)
+            .map_err(|reason| format!("after the attempt, GET {path}: {reason}{because}"))
     }
 
     // ---------------------------------------------------------------- callbacks

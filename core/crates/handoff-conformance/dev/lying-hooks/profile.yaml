@@ -1,0 +1,47 @@
+# The hostile profile: every hook implements nothing and says everything.
+#
+# `conformance/README.md` says that if you have never seen a check go red, you have not tested the
+# check. This file is that test for the part of the suite a deployment writes. It is the same
+# credentials and the same deployment choices as `core/dev/conformance-profile.yaml` — so the HTTP
+# half of every case runs against the honest reference server exactly as usual — with every hook
+# replaced by a script in `lying-hooks/` that performs no work and prints whatever its case matches
+# on.
+#
+# Run it with `core/crates/handoff-conformance/dev/run-lying-hooks.sh`, which stands up the
+# reference deployment and asserts that the cases whose properties live below the HTTP API go RED.
+# A suite that cannot be shown rejecting this file is not evidence of anything.
+#
+# The principals here must stay in step with the honest profile; a test in this crate
+# (`the_hostile_profile_matches_the_honest_one_except_for_its_hooks`) asserts they do, because a
+# hostile profile that has quietly stopped authenticating would go red for the wrong reason and the
+# gate would look like it was working.
+
+principals:
+  machine_a:       {kind: machine,      token: "omg_handoff_test_ka_conformance",  org: org_a}
+  machine_a2:      {kind: machine,      token: "omg_handoff_test_ka2_conformance", org: org_a}
+  human_editor:    {kind: human_bearer, token: "hs_editor_one_conformance",        org: org_a}
+  human_editor_2:  {kind: human_bearer, token: "hs_editor_two_conformance",        org: org_a}
+  human_viewer:    {kind: human_bearer, token: "hs_viewer_conformance",            org: org_a}
+  human_admin:     {kind: human_bearer, token: "hs_admin_conformance",             org: org_a}
+  human_link_only: {kind: human_bearer, token: "lnk_single_use_conformance",       org: org_a}
+  machine_b:       {kind: machine,      token: "omg_handoff_test_kb_conformance",  org: org_b}
+
+deployment:
+  link_only_permitted: false
+
+hooks:
+  logs: "core/crates/handoff-conformance/dev/lying-hooks/logs.sh"
+  storage_mutate: "core/crates/handoff-conformance/dev/lying-hooks/storage-mutate.sh"
+  channel_inbound: "core/crates/handoff-conformance/dev/lying-hooks/channel-inbound.sh"
+  observe_page_state_change: "core/crates/handoff-conformance/dev/lying-hooks/observe-page-change.sh"
+  events: "core/crates/handoff-conformance/dev/lying-hooks/events.sh"
+  crash_between_state_and_event: "core/crates/handoff-conformance/dev/lying-hooks/crash-between-writes.sh"
+  canonicalize: "core/crates/handoff-conformance/dev/lying-hooks/canonicalize.sh"
+
+callback:
+  bind: "127.0.0.1:0"
+  secret: "whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05"
+  secret_previous: "whsec_9d41c07be5a2f36819b4d0e7c5a81f62"
+
+max_real_sleep: PT30S
+fixtures_root: spec/fixtures

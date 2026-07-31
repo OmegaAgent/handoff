@@ -121,9 +121,17 @@ pub enum Action {
     ForbidKeys(ForbidKeys),
 
     /// Invoke a deployment-supplied command. The runner speaks only HTTP; anything below the API —
-    /// a storage-level mutation (C-15), a log dump (C-7), an inbound channel message (C-21) — is a
-    /// hook the deployment provides and this suite merely calls.
+    /// a log dump (C-7), an inbound channel message (C-21) — is a hook the deployment provides and
+    /// this suite merely calls.
     Hook(Hook),
+
+    /// Read the tenant's receipts over HTTP and **recompute the chain here**, then require the
+    /// deployment's exported head to be the head that walk arrived at (C-15, C-26).
+    VerifyChain(VerifyChain),
+
+    /// Attempt a mutation below the API through a deployment hook, and decide the step on what the
+    /// HTTP surface shows afterwards rather than on what the hook said (C-15).
+    StorageMutation(StorageMutation),
 
     /// Bind a local HTTP listener and expose its URL, so callbacks the Server sends can be captured
     /// (C-18).
@@ -434,6 +442,111 @@ pub struct HookExpect {
     /// What the expectation proves.
     #[serde(default)]
     pub because: Option<String>,
+}
+
+/// Walk the receipt chain in the suite's own implementation of `signing.md` §2.2.
+///
+/// This action asks the deployment for nothing but receipts. It reads the listing, recomputes every
+/// `chain.digest` from the receipt's own content, requires the exported head to be the head that
+/// walk arrived at, and then rewrites each receipt in turn and requires the walk to break — the
+/// guard that keeps a green walk from being a walk over nothing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyChain {
+    /// Principal alias to read as.
+    #[serde(default = "default_principal")]
+    pub r#as: String,
+
+    /// Path of the receipt listing — `/receipts`. Written in the case rather than assumed, because
+    /// every other path in this format is.
+    pub receipts: String,
+
+    /// Path of the exported head — `/receipts/chain-head`. The walk must arrive at what it serves.
+    pub head: String,
+
+    /// Receipt ids that must appear in the walk. A chain the case's own receipt is missing from is
+    /// not the chain the case is talking about.
+    #[serde(default)]
+    pub must_include: Vec<String>,
+
+    /// Fail unless the walk covers at least this many receipts.
+    #[serde(default)]
+    pub at_least: usize,
+
+    /// Receipt ids that must also verify **on their own**, from the receipt's own stored
+    /// `chain.prev_digest` rather than from a walk.
+    ///
+    /// §2.2 stores the predecessor's digest on every receipt rather than implying it, so that a
+    /// party holding one receipt — an auditor, a customer after they have left — can verify it
+    /// without being handed the chain. That is a different claim from "the chain verifies", and
+    /// nothing else in the suite makes it.
+    #[serde(default)]
+    pub standalone: Vec<String>,
+
+    /// What the walk proves.
+    #[serde(default)]
+    pub because: Option<String>,
+}
+
+/// What a storage-level mutation attempt must have done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOutcome {
+    /// The storage engine refused it: the command failed, and the object is byte-identical
+    /// afterwards to what the suite read before the attempt.
+    Refused,
+    /// The storage engine applied it: the command succeeded, and the HTTP surface now shows the
+    /// change. This is the positive control — the same command, aimed at a row the engine permits,
+    /// proving the hook reaches the store this API serves from.
+    Applied,
+}
+
+/// Attempt a mutation below the HTTP API, and judge it by what HTTP shows afterwards.
+///
+/// §9.4 puts the application inside the threat model, so C-15 cannot ask the API to mutate a
+/// receipt: the attempt must be made against the storage engine directly, and only the deployment
+/// can do that. What the *suite* can do is refuse to take the hook's word for the outcome. It reads
+/// the object over HTTP before and after, and the step is decided by the difference.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageMutation {
+    /// Hook name, looked up under `hooks:` in the deployment profile.
+    pub hook: String,
+
+    /// Arguments, exported as `HANDOFF_ARG_<UPPERCASE_KEY>` after interpolation.
+    #[serde(default)]
+    pub args: BTreeMap<String, String>,
+
+    /// Whether the engine must have refused this mutation or applied it.
+    pub expect: MutationOutcome,
+
+    /// Regular expressions the command's output must match — the engine's own refusal, typically.
+    /// Secondary evidence: the assertion that decides the step is the observation below.
+    #[serde(default)]
+    pub output_matches: Vec<String>,
+
+    /// What to read over HTTP, before and after.
+    pub observe: Observation,
+
+    /// What the outcome proves.
+    #[serde(default)]
+    pub because: Option<String>,
+}
+
+/// The HTTP read that decides a [`StorageMutation`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    /// Path to read, before the attempt and again after it.
+    pub path: String,
+
+    /// Principal alias to read as.
+    #[serde(default = "default_principal")]
+    pub r#as: String,
+
+    /// Assertions against the body read **after** the attempt.
+    #[serde(default)]
+    pub body: Vec<Matcher>,
 }
 
 /// Start capturing callbacks on a local listener.

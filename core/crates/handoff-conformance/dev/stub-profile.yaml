@@ -9,6 +9,7 @@
 
 principals:
   machine_a: {kind: machine, token: "stub", org: org_a}
+  machine_a2: {kind: machine, token: "stub", org: org_a}
   machine_b: {kind: machine, token: "stub", org: org_b}
   human_editor: {kind: human_bearer, token: "stub", org: org_a}
   human_editor_2: {kind: human_bearer, token: "stub", org: org_a}
@@ -23,10 +24,8 @@ deployment:
 # only need to exist so the precondition check passes and the case reaches its HTTP steps.
 hooks:
   logs: "true"
-  storage_update_receipt: "false"
-  storage_delete_receipt: "false"
-  receipt_chain_verify: "true"
-  chain_tamper_is_detected: "true"
+  canonicalize: "true"
+  storage_mutate: "false"
   channel_inbound: "true"
   observe_page_state_change: "true"
   events: "true"

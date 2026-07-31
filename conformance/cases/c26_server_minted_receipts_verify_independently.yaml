@@ -1,0 +1,157 @@
+id: C-26
+title: A receipt this Server minted verifies under an implementation that shares none of its code
+level: 1
+invariants: [I2]
+spec:
+  - "§9.4 — the chain is the tamper-evidence, and it is verifiable by a party holding no secret"
+  - "§1.4 — digest-covered content carries integer literals only"
+  - "signing.md §2.2 — the receipt core and the chain digest"
+  - "signing.md §3 — canonical JSON, and the two traps that produce digests stable in one
+    implementation and wrong across two"
+rationale: >
+  `signing.md` opens by saying what a receipt is for: a record *"verifiable by a party who was never
+  given a secret and must not be able to forge one — an auditor, a regulator, a customer after they
+  have left."* Every other receipt case in this suite reads what the Server says about its own
+  receipts. This one does the arithmetic.
+
+  ## The failure this case exists to catch
+
+  A hostile review found two receipts that the reference server minted through the ordinary answer
+  path, stored, and served — and that the project's **own published Python SDK** reported as forged.
+  Once because the two canonicalizers disagreed about member ordering above U+D7FF, and once because
+  a float reached a digest-covered position. Both were invisible from the HTTP surface: the Server
+  verified its own receipts perfectly, because a verifier that shares code with the producer proves
+  only self-consistency. The chain "worked" and nobody outside could check it.
+
+  Nothing in the suite would have caught either, so both were found by a person reading code. That
+  is the gap this case closes.
+
+  ## How it is checked
+
+  The suite recomputes the digests itself, in its own implementation of `signing.md` §2.2 that
+  depends on no protocol crate and is checked against the published vectors in
+  `spec/fixtures/signing/`. There is no hook here, and nothing for a deployment to assert: a
+  disagreement about canonical bytes is a different digest, and a different digest is a red case.
+
+  ## Why the payload looks like that
+
+  A `document` field accepts any non-null JSON value (§5.3), so caller-chosen object keys travel
+  into `decision.values` and from there into the hashed receipt core. The answer below carries the
+  shapes where independent canonicalizers actually diverge, rather than the shapes that are easy to
+  agree on:
+
+  - `😀` (U+1F600) and `！` (U+FF01) as **object keys**. RFC 8785 orders members by UTF-16 code
+    units, so the emoji — a surrogate pair beginning 0xD83D — sorts *below* `！`, while by code point
+    it sorts above. An implementation using a code-point sort emits different bytes for this exact
+    object and computes a different digest. That was the live defect.
+  - A nested object and an array, so ordering is exercised below the top level.
+  - Strings carrying non-ASCII text and a quote: JCS emits UTF-8 as itself and escapes only what
+    RFC 8785 §3.2.2.2 requires.
+  - `9007199254740991` — 2^53 − 1, the largest integer §1.4 admits, at the boundary where a
+    canonicalizer that routes numbers through a float loses the last digit silently.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise a request whose answer carries a document
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c26-${run_id}"
+      body:
+        waiter_ref: "run:c26-${run_id}"
+        prompt:
+          title: "Confirm the reconciliation payload?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: payload
+                type: document
+                required: true
+              - name: reference
+                type: text
+                required: true
+              - name: amount_minor
+                type: number
+                required: true
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a person answers with content that puts the canonicalizers to work
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c26-answer-${run_id}"
+      body:
+        values:
+          payload:
+            "😀": 2
+            "！": 1
+            "a": 0
+            "zürich":
+              "😀 nested": ["ß", "日本語", 17]
+              "b": {"！": true}
+          amount_minor: 9007199254740991
+          reference: "vendor \"Ω\" — invoice 12/07, Zürich"
+        note: "Matches the statement line for line."
+      expect:
+        status: 200
+      capture:
+        receipt: receipt.id
+        digest: receipt.digest
+
+  - name: the Server kept what it was given, key for key
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: receipt
+          - path: decision.values.payload
+            contains_text: "😀"
+            because: >
+              A Server that dropped or transliterated the keys would mint a perfectly verifiable
+              receipt of content nobody submitted, and the digest check below would pass. What the
+              receipt records has to be what the person actually answered (§9.2).
+          - path: decision.values.amount_minor
+            equals: 9007199254740991
+            because: >
+              §1.4 — 2^53 − 1 is admitted exactly. A canonicalizer that took this through a float
+              would return 9007199254740992 here, which is the kind of defect that shows up years
+              later in somebody else's audit.
+          - path: chain.digest
+            same_as: digest
+          - path: chain.prev_digest
+            exists: true
+
+  - name: an implementation that shares no code with this Server recomputes the same digests
+    verify_chain:
+      as: machine_a
+      receipts: /receipts
+      head: /receipts/chain-head
+      must_include: ["${receipt}"]
+      standalone: ["${receipt}"]
+      at_least: 1
+      because: >
+        `signing.md` §2.2, computed here rather than asked for. The receipt just minted is
+        recomputed from its own content — canonical bytes, core hash, chain digest — by the suite's
+        own implementation of the specification, which is checked against the published vectors and
+        shares nothing with any server. If this deployment's canonicalization disagrees with the
+        specification in any of the ways `signing.md` §3 warns about, the digest it stored is not
+        the digest that comes back, and this case is red.
+
+        `standalone` is the auditor's position stated exactly: one receipt, no chain, no secret,
+        and the record either verifies or it does not.

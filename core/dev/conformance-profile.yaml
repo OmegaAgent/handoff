@@ -7,6 +7,12 @@
 principals:
   # Tenant A: org_01K3M7QW8ZC4YRXB2N6VD9FTHA
   machine_a:       {kind: machine,      token: "omg_handoff_test_ka_conformance", org: org_a}
+  # A SECOND machine in the same tenant, which C-5 needs and nothing else does. Without it the only
+  # machine that ever calls /answer is the one that raised the request, so "refused because it is a
+  # machine" and "refused because it is the requester" are the same observation — and a Server that
+  # checked identity instead of principal type would pass the whole suite while letting one agent
+  # approve another agent's refund.
+  machine_a2:      {kind: machine,      token: "omg_handoff_test_ka2_conformance", org: org_a}
   human_editor:    {kind: human_bearer, token: "hs_editor_one_conformance",       org: org_a}
   human_editor_2:  {kind: human_bearer, token: "hs_editor_two_conformance",       org: org_a}
   human_viewer:    {kind: human_bearer, token: "hs_viewer_conformance",           org: org_a}
@@ -26,27 +32,19 @@ deployment:
 hooks:
   logs: "tail -n 5000 \"${HANDOFF_RUN_DIR:-core/dev/.run}/handoffd.log\""
 
-  # C-15. These run as the application's own database role and must be REFUSED by the storage
-  # engine itself, because §9.4 puts the application inside the threat model.
+  # C-15. One mutation, aimed where the suite says, as the application's own database role. The
+  # receipt targets must be REFUSED by the storage engine itself, because §9.4 puts the application
+  # inside the threat model; the request target must be APPLIED, which is how the suite tells a
+  # refusal apart from a command that never ran.
   #
-  # The `echo` is not decoration. C-15 requires the refusal to name the receipt it refused, so that
-  # a hook stubbed with `false` — which exits non-zero exactly as a refused mutation does — cannot
-  # satisfy the case. What the engine says is the other half, and psql prints that on stderr.
-  storage_update_receipt: >
-    echo "attempted=update receipt=$HANDOFF_ARG_RECEIPT_ID" &&
-    psql "$HANDOFF_DATABASE_URL" -v ON_ERROR_STOP=1 -c
-    "update handoff_receipts set decision = '{\"values\":{\"decision\":\"reject\"}}'::jsonb
-     where id = '$HANDOFF_ARG_RECEIPT_ID'"
-  storage_delete_receipt: >
-    echo "attempted=delete receipt=$HANDOFF_ARG_RECEIPT_ID" &&
-    psql "$HANDOFF_DATABASE_URL" -v ON_ERROR_STOP=1 -c
-    "delete from handoff_receipts where id = '$HANDOFF_ARG_RECEIPT_ID'"
+  # There is no chain hook here any more. The suite walks the chain itself, over the receipts it
+  # reads from this deployment's HTTP surface, in its own implementation of signing.md §2.2 — so
+  # `receipt_chain_verify` and `chain_tamper_is_detected` are gone rather than tightened. A
+  # deployment cannot narrate a digest it did not compute.
+  storage_mutate: "core/dev/scripts/storage-mutate.sh"
 
   # C-24. RFC 8785 canonicalization, checked against the published signing fixtures.
   canonicalize: "core/dev/scripts/canonicalize.sh"
-
-  receipt_chain_verify: "core/dev/scripts/verify-receipt-chain.sh"
-  chain_tamper_is_detected: "core/dev/scripts/chain-tamper-check.sh"
 
   # C-21. The protocol defines the outbound delivery model but no inbound channel-adapter surface,
   # so the deployment injects the message.

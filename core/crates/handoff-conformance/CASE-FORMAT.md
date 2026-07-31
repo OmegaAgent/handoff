@@ -143,13 +143,66 @@ with `sh -c`; arguments arrive as `HANDOFF_ARG_<UPPERCASE_KEY>`.
 
 ```yaml
 hook:
-  hook: storage_update_receipt
-  args: {receipt_id: "${receipt}"}
+  hook: channel_inbound
+  args: {request_id: "${req}", channel: email}
   expect:
-    exit_code_not: 0            # or exit_code: 0
-    output_matches: ["refused"]
+    exit_code: 0                # or exit_code_not: 0
+    output_matches: ["channel_message=\\S+"]
     because: "..."
   capture_stdout: some_var
+```
+
+**A hook's output is the weakest evidence in this format, and the number of hooks is meant to go
+down.** Two hostile reviews defeated hook-based assertions in a row: the first stubbed every hook
+with `true` and `false`, the second printed the exact evidence the cases required, because every
+value a case can demand is either handed to the hook as an argument or small enough to guess — and
+the claimant writes the hook. Before adding a case that needs a hook, check whether the claim can be
+computed from what the suite already read over HTTP (`verify_chain`) or decided by an observation the
+suite makes afterwards (`storage_mutation`). Those are not conveniences; they are the two shapes that
+survive a hostile profile.
+
+### `verify_chain` — the suite recomputes the receipt chain
+
+Reads the receipt listing over HTTP and walks it in the runner's own implementation of
+`signing.md` §2.2 — canonical bytes, core hash, chain digest — which shares no code with any server
+and is checked against the published vectors in `spec/fixtures/signing/`. The exported head must be
+the head that walk arrives at. Then it rewrites each receipt in turn and requires the walk to break,
+so a green walk is never a walk over nothing.
+
+```yaml
+verify_chain:
+  as: machine_a
+  receipts: /receipts               # the listing to walk
+  head: /receipts/chain-head        # the exported head it must agree with
+  must_include: ["${receipt}"]      # ids that must be in the walk
+  standalone: ["${receipt}"]        # ids that must also verify alone, from their own prev_digest
+  at_least: 1
+  because: "..."
+```
+
+### `storage_mutation` — a mutation below the API, judged above it
+
+Attempts a mutation through a deployment hook and decides the step on what HTTP shows afterwards.
+The suite reads the object before and after; `refused` requires the bytes to be identical, `applied`
+requires them to differ and the `observe.body` matchers to hold.
+
+`applied` is how a case gets a **positive control** for a refusal: "the engine refused my write" and
+"I never wrote" are the same observation from outside, so C-15 first aims the same command at a row
+the engine permits and requires the value to appear over HTTP.
+
+```yaml
+storage_mutation:
+  hook: storage_mutate
+  args: {target: receipt, operation: update, id: "${receipt}", value: "${nonce}"}
+  expect: refused                   # refused | applied
+  output_matches: ["(?i)append.?only"]
+  observe:
+    path: /requests/${req}/receipt
+    as: machine_a
+    body:
+      - path: chain.digest
+        same_as: digest
+  because: "..."
 ```
 
 ### `callback_receiver` / `callback_assert` — C-18
@@ -219,6 +272,28 @@ A matcher is a path, one operator, and a `because` explaining what the specifica
 Values carried by an operator are `${var}`-interpolated, so `none_equal: "${signal_id}"` means the
 id an earlier step captured.
 
+### Every operator, against a path that resolves to nothing
+
+An assertion over an empty match set is the quietest way for a case to measure nothing: a path that
+resolves to no values and a path that does not resolve at all are the same thing from the operator's
+side, and both satisfy anything phrased as an absence. Three of the four set-shaped operators had a
+guard for this and the fourth did not, which is a failure of the audit rather than of the operator —
+so the audit is a test now
+(`expect.rs`, `every_operator_is_audited_against_a_path_that_resolves_to_nothing`), and adding an
+operator will not compile until its row here is true of it.
+
+| Operator | Path matched nothing | Path matched many |
+|---|---|---|
+| `equals`, `not_equals`, `is_null`, `matches`, `length`, `length_at_least`, `one_of`, `same_as`, `differs_from`, `contains_text`, `not_contains_text` | **fails** — "`path` is absent" | **fails** — these compare one value; use a set operator or name the index |
+| `exists: true` | **fails** | passes if any hit exists |
+| `exists: false` | **passes**, and only this one does — but its container must resolve, or the absence is a fact about the case file rather than about the Server | n/a |
+| `all_equal`, `none_equal` | **fails** — "matched nothing, so this proves nothing" | the assertion, applied to every hit |
+| `set_equals` | **fails** — to assert a collection is empty, assert the collection's own `length: 0` | the assertion, over the whole set |
+
+A body that is not JSON fails any step asserting on members, for the same reason: every path
+resolves to nothing against an unparseable body, so a gateway error page would satisfy a case built
+out of negatives.
+
 ### Use `set_equals`, not "contains", for anything tenant-scoped
 
 §18 is explicit about this and the reason is worth repeating: a query missing its tenant predicate
@@ -233,7 +308,9 @@ error, never an empty string — substituting nothing silently is how a test sta
 `/requests//answer` and passing for the wrong reason.
 
 Bound automatically: `${run_id}` (unique per invocation, so reruns do not collide on idempotency
-keys), `${case_id}`, `${base_url}`.
+keys), `${case_id}`, `${base_url}`, and `${nonce}` — a value no deployment can have seen before,
+which is what makes "this value appeared in the store" an observation about *this* attempt rather
+than about a row an earlier run left behind.
 
 A string of the form `!json:<text>` is parsed as JSON rather than kept as a string, which is how a
 whole fixture body becomes a request body.

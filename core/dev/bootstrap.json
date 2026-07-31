@@ -4,6 +4,10 @@
      "kind": "machine", "token": "omg_handoff_test_ka_conformance", "role": "admin",
      "auth_strength": "session", "display": "tenant A runtime", "scopes": ["*"]},
 
+    {"id": "sa_01K3M7QW8ZC4YRXB2N6VD9FTH7", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+     "kind": "machine", "token": "omg_handoff_test_ka2_conformance", "role": "admin",
+     "auth_strength": "session", "display": "tenant A second runtime", "scopes": ["*"]},
+
     {"id": "usr_01K3M7QW8ZC4YRXB2N6VD9FTH3", "tenant_ref": "org_01K3M7QW8ZC4YRXB2N6VD9FTHA",
      "kind": "human", "token": "hs_editor_one_conformance", "role": "editor",
      "auth_strength": "session", "display": "Dana Okafor", "scopes": ["*"]},

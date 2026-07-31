@@ -18,28 +18,34 @@ rather than the residue of the last one.
 
 ## What is below the HTTP API, and why
 
-Ten requirements cannot be asserted over HTTP by construction, and the suite expresses each as a
-hook the deployment supplies (`conformance-profile.yaml`). Ten hooks, and the table below lists all
-ten — the count and the table disagreeing is how `logs` went unlisted here for a while:
+Some requirements cannot be asserted over HTTP by construction, and the suite expresses each as a
+hook the deployment supplies (`conformance-profile.yaml`). The table lists every hook this profile
+defines; a hook missing from it is how `logs` went unlisted here for a while.
 
 | Hook | Case | Why it cannot be HTTP |
 |---|---|---|
 | `logs` | C-7, C-17 | §12.3 makes "no secret in a log line" normative, and a log line is not a response body. A hook that fails, or that prints nothing, fails the case: there is no version of "we could not show you" that is a pass. |
-| `storage_update_receipt`, `storage_delete_receipt` | C-15 | §9.4 puts the application inside the threat model, so immutability must be attempted **as the application's own database role** and refused by the engine. |
-| `receipt_chain_verify`, `chain_tamper_is_detected` | C-15 | Re-walking the chain, and proving a rewrite invalidates the head. The tamper check operates on a **disposable copy** and never touches the live store. |
+| `storage_mutate` | C-15 | §9.4 puts the application inside the threat model, so a mutation must be attempted **as the application's own database role**. One command, parameterized by target and operation: the receipt targets must be refused by the engine, and the request target must succeed — that control is what tells a refusal apart from a command that never ran. |
 | `channel_inbound` | C-21 | The protocol defines the outbound delivery model but deliberately **no inbound channel-adapter surface**. |
 | `observe_page_state_change` | C-22 | A runtime observation is not an API call, and §9.7 requires it to produce no receipt. |
 | `events`, `crash_between_state_and_event` | C-23 | The protocol publishes no endpoint listing events, and killing a process between two writes is not an HTTP operation. |
 | `canonicalize` | C-24 | RFC 8785 canonicalization is a pure function over bytes, checked against the published signing fixtures. |
 
-Each is a real operator tool rather than a test fixture: `logs` is however you already read your
-logs, and the rest are `handoffd` subcommands. An operator who wants to know whether their receipts
-still verify runs `handoffd verify-chain` — the same command the suite does.
+**The chain is no longer on this list.** `receipt_chain_verify` and `chain_tamper_is_detected` were
+deleted rather than tightened, along with the two scripts behind them. A hostile review passed C-15
+against a deployment with no verifier at all by echoing the chain head the suite had handed the hook
+as an argument, and the answer to that is not a longer required output: the suite now reads the
+receipts over HTTP and walks the chain in its own implementation of `signing.md` §2.2. There is
+nothing left for a deployment to assert. `handoffd verify-chain` remains as an operator tool — it is
+how you check your own receipts still verify — but nothing in the suite asks it anything.
 
-A hook is also never satisfied by its exit code alone. Each one has a one-word shell command that
-exits the way its case wants while doing nothing, so every hook step additionally requires evidence
-in the output that the hook did the thing — and where that evidence can be tied to something the
-suite read independently over HTTP, it is. The required lines are in `conformance/README.md`.
+Each remaining hook is a real operator tool rather than a test fixture: `logs` is however you
+already read your logs, and the rest are `handoffd` subcommands or one SQL statement.
+
+A hook is never satisfied by its exit code alone, and — since the second review — a hook's own words
+are never the last thing a case looks at either. `storage_mutate` is judged by re-reading the object
+over HTTP after the attempt. What each of the others must print is in `conformance/README.md`, along
+with the three cases that a deployment could still fake, named there rather than implied.
 
 ## The crash probe
 

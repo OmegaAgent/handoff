@@ -96,6 +96,20 @@ pub fn run_id() -> String {
     format!("{:x}{:x}", std::process::id(), nanos)
 }
 
+/// A value no deployment can have seen before, bound as `${nonce}` for the whole case.
+///
+/// C-15 writes one through a storage hook and then looks for it over HTTP. That only means
+/// something if the value could not have been there already: a fixed string would be satisfied by a
+/// row left behind by an earlier run, and the step would be measuring history rather than this
+/// attempt.
+pub fn nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("n{:x}{:x}", nanos, std::process::id())
+}
+
 /// Parse the ISO-8601 durations the protocol uses — `PT15M`, `PT4H`, `P1D`, `PT0.5S`.
 ///
 /// Deliberately narrow: this understands the shapes `openapi.yaml` documents and rejects the rest

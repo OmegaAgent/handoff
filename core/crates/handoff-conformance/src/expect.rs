@@ -139,10 +139,20 @@ pub fn check(
     } else {
         matcher.path.as_str()
     };
+    // Eleven operators compare one value, and a wildcard path can produce any number of them.
+    // Taking `hits[0]` silently checks the first and calls the rest checked: `data[].url` with
+    // `exists: false` would pass on a page whose second entry carries a URL. The set operators
+    // below exist for that shape, so a many-valued path here is a case defect, not a comparison.
     let single = || -> Result<Value, String> {
         match hits.len() {
             0 => Err(format!("`{path}` is absent")),
-            _ => Ok(hits[0].value.clone()),
+            1 => Ok(hits[0].value.clone()),
+            n => Err(format!(
+                "`{path}` matched {n} values and this operator compares one, so it would check \
+                 `{}` and report on all {n}. Use `all_equal`, `none_equal` or `set_equals` for a \
+                 path with a wildcard, or name the index.",
+                hits[0].at
+            )),
         }
     };
 
@@ -306,6 +316,18 @@ pub fn check(
                 Ok(())
             }
         }
+        Op::SetEquals(_) if hits.is_empty() => Err(format!(
+            // The third operator to need this guard, and the one that was missed when the other two
+            // got theirs. `set_equals: []` against a path that resolves to nothing compares an
+            // empty set with an empty set and passes — including when the path is a typo, when the
+            // container is absent, and when the deployment served an error. "The page is empty" is
+            // a fact about a container, so it is asserted on the container: `path: data` with
+            // `length: 0`.
+            "`{path}` matched nothing, so `set_equals` is comparing two empty sets and proves \
+             nothing — a path that resolves to no values and a path that does not resolve at all \
+             are the same thing from here. To assert that a collection is empty, assert its own \
+             length: `path: <the collection>` with `length: 0`."
+        )),
         Op::SetEquals(want) => {
             let mut got: Vec<String> = hits.iter().map(|h| as_text(&h.value)).collect();
             let mut want: Vec<String> = want
@@ -535,6 +557,139 @@ mod tests {
         );
         assert_eq!(parent_of("receipt"), None);
         assert_eq!(parent_of(""), None);
+    }
+
+    #[test]
+    fn set_equals_refuses_an_empty_match_set_the_way_the_other_two_do() {
+        // `set_equals: []` was the one empty-match-set operator without a guard: `[] == []` passed,
+        // so "assert the page is empty" written the obvious way asserted nothing at all — and it
+        // passed equally on a typo'd path and on a container the deployment never served.
+        let empty = Matcher {
+            path: "data[].org_id".into(),
+            op: Op::SetEquals(vec![]),
+            because: None,
+        };
+        let err = check(&serde_json::json!({"data": []}), &empty, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("matched nothing"), "{err}");
+        let typo = Matcher {
+            path: "dtaa[].org_id".into(),
+            op: Op::SetEquals(vec![]),
+            because: None,
+        };
+        assert!(check(&doc(), &typo, &BTreeMap::new()).is_err());
+
+        // The live shape still passes: a path that resolves, against the set it must equal.
+        let live = Matcher {
+            path: "data[].org_id".into(),
+            op: Op::SetEquals(vec!["org_a".into(), "org_a".into()]),
+            because: None,
+        };
+        assert!(check(&doc(), &live, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn a_one_value_operator_refuses_a_path_that_matched_many() {
+        // Silently taking `hits[0]` means a wildcard path is checked at index 0 and reported as
+        // checked everywhere, which is the same vacuity as an unguarded empty set with the sign
+        // flipped: here the assertion holds for one element and says it holds for all of them.
+        let many = Matcher {
+            path: "data[].org_id".into(),
+            op: Op::Equals(serde_json::json!("org_a")),
+            because: None,
+        };
+        let err = check(&doc(), &many, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("matched 2 values"), "{err}");
+        assert!(err.contains("all_equal"), "{err}");
+
+        // One hit through a wildcard is still one value, and still comparable.
+        let one = Matcher {
+            path: "data[0].org_id".into(),
+            op: Op::Equals(serde_json::json!("org_a")),
+            because: None,
+        };
+        assert!(check(&doc(), &one, &BTreeMap::new()).is_ok());
+    }
+
+    /// Every operator, against a path that resolves to nothing.
+    ///
+    /// The `set_equals` finding was not really about `set_equals`. Three of the four operators that
+    /// can be handed an empty match set had a guard, with a comment explaining the trap; the fourth
+    /// did not, and nothing in the repository could see the difference. What failed was the audit,
+    /// so the audit is a test.
+    ///
+    /// Adding a variant to [`Op`] stops this compiling until it is listed here and its
+    /// empty-match-set behaviour is stated.
+    #[test]
+    fn every_operator_is_audited_against_a_path_that_resolves_to_nothing() {
+        fn name(op: &Op) -> &'static str {
+            match op {
+                Op::Equals(_) => "equals",
+                Op::NotEquals(_) => "not_equals",
+                Op::Exists(_) => "exists",
+                Op::IsNull(_) => "is_null",
+                Op::Matches(_) => "matches",
+                Op::Length(_) => "length",
+                Op::LengthAtLeast(_) => "length_at_least",
+                Op::OneOf(_) => "one_of",
+                Op::SameAs(_) => "same_as",
+                Op::DiffersFrom(_) => "differs_from",
+                Op::AllEqual(_) => "all_equal",
+                Op::NoneEqual(_) => "none_equal",
+                Op::SetEquals(_) => "set_equals",
+                Op::ContainsText(_) => "contains_text",
+                Op::NotContainsText(_) => "not_contains_text",
+            }
+        }
+
+        let one = serde_json::json!("x");
+        let operators = vec![
+            Op::Equals(one.clone()),
+            Op::NotEquals(one.clone()),
+            Op::Exists(true),
+            Op::Exists(false),
+            Op::IsNull(true),
+            Op::Matches("^x$".into()),
+            Op::Length(0),
+            Op::LengthAtLeast(0),
+            Op::OneOf(vec![one.clone()]),
+            Op::SameAs("bound".into()),
+            Op::DiffersFrom("bound".into()),
+            Op::AllEqual(one.clone()),
+            Op::NoneEqual(one.clone()),
+            Op::SetEquals(vec![]),
+            Op::ContainsText("x".into()),
+            Op::NotContainsText("x".into()),
+        ];
+        let covered: std::collections::BTreeSet<&str> = operators.iter().map(name).collect();
+        assert_eq!(
+            covered.len(),
+            15,
+            "every operator must appear here, and both arms of `exists`: {covered:?}"
+        );
+
+        // A container that resolves, with a member that does not: the shape a case author writes
+        // when they mean "this is not there", and the shape a typo produces.
+        let doc = serde_json::json!({"data": [{"org_id": "org_a"}]});
+        let vars = BTreeMap::from([("bound".to_string(), "x".to_string())]);
+
+        for op in operators {
+            let label = name(&op);
+            // `exists: false` is the one operator whose *purpose* is an empty match set. Its guard
+            // is a different one, asserted in `exists_false_refuses_a_path_whose_container_is_not
+            // _there`: the container has to resolve, or the absence is a fact about the case file.
+            let may_pass = matches!(op, Op::Exists(false));
+            let matcher = Matcher {
+                path: "data[].missing".into(),
+                op,
+                because: None,
+            };
+            let outcome = check(&doc, &matcher, &vars);
+            assert_eq!(
+                outcome.is_ok(),
+                may_pass,
+                "`{label}` against a path matching nothing: {outcome:?}"
+            );
+        }
     }
 
     #[test]

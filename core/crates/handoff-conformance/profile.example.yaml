@@ -28,6 +28,15 @@ principals:
     kind: machine
     token: "omg_handoff_test_ka_REPLACE_ME"
     org: org_a
+  # A SECOND machine principal in the SAME tenant, which C-5 needs. Without it the only machine that
+  # ever calls /answer is the one that raised the request, and "refused because it is a machine" is
+  # then indistinguishable from "refused because it is the requester" — a Server enforcing §4.2 by
+  # identity rather than by principal type would pass every case while letting one agent approve
+  # another agent's refund.
+  machine_a2:
+    kind: machine
+    token: "omg_handoff_test_ka2_REPLACE_ME"
+    org: org_a
   human_editor:
     kind: human_bearer
     token: "REPLACE_ME"
@@ -72,30 +81,33 @@ deployment:
 # Commands run with `sh -c`. Arguments arrive as environment variables named
 # `HANDOFF_ARG_<UPPERCASE_KEY>`.
 #
-# These exist because ten requirements are below the HTTP API by construction. Putting a database
-# driver in the runner instead would make the suite an assertion about our storage choice rather
-# than about the protocol, and would stop it testing implementations written in other languages.
+# These exist because a handful of requirements are below the HTTP API by construction. Putting a
+# database driver in the runner instead would make the suite an assertion about our storage choice
+# rather than about the protocol, and would stop it testing implementations written in other
+# languages.
 #
-# Every hook below is REQUIRED: the ten commands here are exactly the ten the case set names, and a
+# Every hook below is REQUIRED: the commands here are exactly the ones the case set names, and a
 # case whose hook is missing FAILS rather than being skipped. `advance_clock` is the only optional
 # one, and it is commented out. That correspondence is checked by a test in this crate
 # (`profile_example_defines_every_hook_the_cases_require`) rather than maintained by hand, because
 # a review found this file missing `canonicalize` — which meant every implementer who started from
 # it failed C-24 for a missing hook rather than for anything about their implementation.
 #
-# ## Exit status is not what the case asserts
+# ## Exit status is not what the case asserts, and neither is anything a hook prints
 #
 # It cannot be. Every hook below has a one-word shell command that exits the way its case wants —
-# `false` for the mutations that must be refused, `true` for everything else — and a suite that
-# checked only the status would hand a conformance claim to a deployment that implemented none of
-# this. A hostile review demonstrated exactly that: eight of the suite's hardest assertions, the
-# ones covering the properties an implementer cannot verify from the HTTP surface, satisfied by
-# four stubs.
+# `false` for a mutation that must be refused, `true` for everything else — and a suite that checked
+# only the status would hand a conformance claim to a deployment that implemented none of this. A
+# hostile review demonstrated exactly that. The next round it demonstrated the sequel: requiring the
+# hook to *print evidence* is defeated the same way, because every value the case can require is
+# either handed to the hook as an argument or small enough to guess, and the claimant writes the
+# hook.
 #
-# So each case also requires **evidence in the hook's output that it did the thing**, and where the
-# evidence can be tied to something the suite read over HTTP — a receipt id, a chain head — it is.
-# The required line is documented against each hook here, and the case file says why. Print more if
-# it helps you debug; the case matches, it does not compare whole outputs.
+# So the number of hooks went down instead. Anything the suite can compute from what it read over
+# HTTP, the suite computes — the receipt chain is walked inside the runner now, in its own
+# implementation of `signing.md` §2.2, and there is no chain hook to supply. What remains below is
+# the residue that is genuinely not reachable over HTTP, and each one is judged by an observation
+# the suite makes afterwards rather than by what the command said.
 hooks:
   # C-7, C-17 — the scans must search logs. §12.3 makes "no secret in a log line" normative, and a
   # deployment that cannot show its logs has not demonstrated it. A `logs` hook that fails, or that
@@ -103,30 +115,24 @@ hooks:
   logs: "docker compose logs --no-color --since 10m"
 
   # C-15 — §9.4 requires immutability at the storage layer, "because the threat includes the
-  # application". These run as the application's own database role and must be REFUSED.
+  # application". ONE command, parameterized, run as the application's own database role:
   #
-  # Must print: the receipt id it attempted, and the engine's own refusal. `false` exits non-zero
-  # exactly as a refused mutation does, so the exit code alone separates nothing.
-  storage_update_receipt: >
-    echo "attempted=update receipt=$HANDOFF_ARG_RECEIPT_ID" &&
-    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
-    "update receipts set decision = '{\"values\":{\"decision\":\"reject\"}}'::jsonb
-     where id = '$HANDOFF_ARG_RECEIPT_ID'"
-  storage_delete_receipt: >
-    echo "attempted=delete receipt=$HANDOFF_ARG_RECEIPT_ID" &&
-    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
-    "delete from receipts where id = '$HANDOFF_ARG_RECEIPT_ID'"
-
-  # Re-walk the chain and exit 0 only if every link agrees with the stored head.
-  # Must print: `chain_verified head=<digest> height=<n>`, and it must be the head
-  # `GET /receipts/chain-head` returned — a walk of a different store gives a different digest.
-  receipt_chain_verify: "./scripts/verify-receipt-chain.sh"
-
-  # Alter one historical receipt in a DISPOSABLE COPY, re-verify against the copy, and exit 0 only
-  # when the head no longer verifies. This must never touch the live store.
-  # Must print: `tamper_detected altered=<id> head_before=<digest> head_after=did-not-verify`,
-  # with `head_before` again the head the suite read over HTTP.
-  chain_tamper_is_detected: "./scripts/chain-tamper-check.sh"
+  #   HANDOFF_ARG_TARGET     receipt | request
+  #   HANDOFF_ARG_OPERATION  update | delete
+  #   HANDOFF_ARG_ID         the object's id, as the HTTP surface reports it
+  #   HANDOFF_ARG_VALUE      for an update, the value to write where the object's content shows it
+  #
+  # An update must write VALUE somewhere the object's HTTP representation would carry it — a
+  # receipt's `decision.note`, a request's `prompt.title` — because C-15 decides the step by reading
+  # the object back over HTTP, not by what this command prints. The receipt targets must be refused
+  # by the engine; the request target must succeed and become visible. That control is what
+  # distinguishes a storage engine refusing a write from a command that never wrote: from outside,
+  # both leave the receipt exactly as it was.
+  #
+  # Implement it as one statement shape for both targets. A version that is honest for `request` and
+  # stubbed for `receipt` is a deliberate lie rather than an omission, and `conformance/GATE.md`
+  # says so where a reader of a published run will see it.
+  storage_mutate: "./scripts/storage-mutate.sh"
 
   # C-21 — the protocol defines the outbound delivery model but no inbound channel-adapter surface,
   # so the deployment injects the message. Receives REQUEST_ID, CHANNEL, TEXT.

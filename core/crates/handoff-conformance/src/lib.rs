@@ -21,6 +21,14 @@
 //!   database driver. A shared type between the suite and the reference implementation would let
 //!   one bug cancel out the other, and an implementation written in another language must be able
 //!   to run this binary unmodified.
+//! - **What the suite can compute, the suite computes.** Where a property has an answer this crate
+//!   can derive from what it read over HTTP, it derives it rather than asking the deployment. The
+//!   receipt chain is the case that taught this: two rounds of asking a deployment-supplied hook to
+//!   print the head it arrived at ended with a green run against a deployment that had no verifier,
+//!   because every value the hook had to print was either handed to it as an argument or small
+//!   enough to guess. [`chain`] implements `signing.md` §2.2 from the specification text — sharing
+//!   no code with any server, checked against the published vectors — so the walk is an
+//!   observation and not a narration.
 //! - **Cases are data.** Every case-specific fact lives in a YAML file a non-Rust implementer can
 //!   read and argue with. This crate is an interpreter for that format and holds no knowledge of
 //!   any individual case. The format is documented in `CASE-FORMAT.md`.
@@ -42,6 +50,7 @@
 
 pub mod callback;
 pub mod case;
+pub mod chain;
 pub mod expect;
 pub mod http;
 pub mod profile;
@@ -236,6 +245,66 @@ mod tests {
         let cases = load_cases(&root.join("conformance").join("cases")).expect("cases load");
         audit_coverage(&cases, &map).expect("cases cover §18");
         assert_eq!(map.spec_version, PROTOCOL_VERSION);
+    }
+
+    /// The hostile profile must differ from the honest one **only** in its hooks.
+    ///
+    /// `dev/run-lying-hooks.sh` is the gate that keeps C-15 honest: it runs the suite against
+    /// hooks that implement nothing and asserts the case goes red. That gate is worth exactly as
+    /// much as the assumption that the redness comes from the hooks. A hostile profile whose
+    /// credentials had quietly drifted would turn every case red for an unrelated reason, the gate
+    /// would still pass, and nobody would find out until the next review did it by hand.
+    #[test]
+    fn the_hostile_profile_matches_the_honest_one_except_for_its_hooks() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let Some(root) = find_repo_root(&manifest) else {
+            return;
+        };
+        let honest = profile::Profile::load(&root.join("core/dev/conformance-profile.yaml"))
+            .expect("the honest profile loads");
+        let hostile = profile::Profile::load(&manifest.join("dev/lying-hooks/profile.yaml"))
+            .expect("the hostile profile loads");
+
+        let credentials = |p: &profile::Profile| -> Vec<String> {
+            let mut out: Vec<String> = p
+                .principals
+                .iter()
+                .map(|(alias, principal)| {
+                    format!(
+                        "{alias} {:?} {}",
+                        principal.kind,
+                        principal.token.clone().unwrap_or_default()
+                    )
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            credentials(&honest),
+            credentials(&hostile),
+            "the hostile profile authenticates differently from the honest one, so a red run \
+             against it would not be evidence about the hooks"
+        );
+        assert_eq!(honest.deployment.len(), hostile.deployment.len());
+
+        let names = |p: &profile::Profile| -> Vec<String> {
+            let mut out: Vec<String> = p.hooks.keys().cloned().collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            names(&honest),
+            names(&hostile),
+            "the hostile profile supplies a different set of hooks, so some case would fail for a \
+             missing hook rather than for a hook that lied"
+        );
+        for (name, command) in &hostile.hooks {
+            assert!(
+                command.contains("lying-hooks"),
+                "`{name}` in the hostile profile is not one of the lying hooks: {command}"
+            );
+        }
     }
 
     /// The published example profile must define every hook the case set requires.
