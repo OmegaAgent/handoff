@@ -310,23 +310,46 @@ jobs:
         working-directory: core
         run: |
           python3 crates/handoff-conformance/dev/stub_501.py --port 8080 &
+          stub=$!
           # Readiness is "the socket answers", not "the socket answers 2xx" — the stub replies 501
-          # to everything by design, so `curl -f` would never succeed and the loop would always
-          # exhaust silently.
-          for _ in $(seq 1 30); do
-            curl -s -o /dev/null "http://127.0.0.1:8080/v1/requests" && break || sleep 0.2
+          # to everything by design, so `curl -f` would never succeed and the loop would exhaust.
+          ready=""
+          for _ in $(seq 1 50); do
+            if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080/v1/requests" | grep -q 501; then
+              ready=yes; break
+            fi
+            sleep 0.2
           done
+          if [ -z "$ready" ]; then
+            echo "::error::The stub never answered 501. A red result from here would prove nothing."
+            exit 1
+          fi
           set +e
           ./target/debug/handoff-conformance \
             --base-url http://127.0.0.1:8080/v1 \
-            --profile crates/handoff-conformance/profile.example.yaml
+            --profile crates/handoff-conformance/profile.example.yaml > /tmp/stub.out 2>&1
           rc=$?
           set -e
+          kill "$stub" 2>/dev/null || true
+          cat /tmp/stub.out
+          # A non-zero exit is NOT sufficient: a runner that crashes, cannot find its profile, or is
+          # pointed at a dead port exits non-zero identically. Require the report itself — the suite
+          # ran, every case ran, and every case failed.
           if [ "$rc" -eq 0 ]; then
             echo "::error::The suite passed against a stub that implements nothing. It is measuring nothing."
             exit 1
           fi
-          echo "The suite correctly reported non-conformance (exit ${rc})."
+          total=$(sed -n 's#^\([0-9]\{1,\}\)/\([0-9]\{1,\}\) passing$#\2#p' /tmp/stub.out | tail -1)
+          passed=$(sed -n 's#^\([0-9]\{1,\}\)/\([0-9]\{1,\}\) passing$#\1#p' /tmp/stub.out | tail -1)
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            echo "::error::No 'N/M passing' report. The runner did not complete, so this is a crash and not a measurement."
+            exit 1
+          fi
+          if [ "$passed" -ne 0 ]; then
+            echo "::error::${passed} case(s) passed against a server implementing nothing."
+            exit 1
+          fi
+          echo "The suite ran ${total} case(s) against a server that implements nothing and passed 0."
 
       # Half two, and the one the README actually promises: the reference server must PASS. Without
       # this the pipeline proves only that the suite can fail, and "a service that cannot pass the
@@ -344,10 +367,22 @@ jobs:
             echo "::error::handoffd does not pass the conformance suite."
             exit 1
           fi
-          grep -q '24/24 passing' /tmp/conformance.out || {
-            echo "::error::The suite exited 0 without reporting a full pass. Read the output above."
+          # Derive the count instead of hardcoding it. A literal here went stale the moment a case
+          # was added, turning the one job that backs the README's central promise red forever on a
+          # perfectly conforming server — and because this workflow had never run anywhere, nothing
+          # said so. Assert the shape of a full pass: a report exists, and nothing failed.
+          report=$(grep -E '^[0-9]+/[0-9]+ passing$' /tmp/conformance.out | tail -1)
+          if [ -z "$report" ]; then
+            echo "::error::No 'N/M passing' report. The suite did not complete."
             exit 1
-          }
+          fi
+          passed=${report%%/*}
+          total=${report#*/}; total=${total%% *}
+          if [ "$passed" -ne "$total" ] || [ "$total" -lt 1 ]; then
+            echo "::error::handoffd passed ${passed} of ${total}. Read the output above."
+            exit 1
+          fi
+          echo "handoffd passed ${passed}/${total}."
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
