@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 from typing import Any, Iterator, Mapping
 
+from .errors import NonConformingDocument
+
 __all__ = [
     "Document",
     "encode_document",
@@ -114,20 +116,32 @@ def _utf16_units(name: str) -> bytes:
 def _canonicalize(value: Any, path: str) -> Any:
     """Reject what JCS cannot carry, and impose JCS member order.
 
-    Member order is **UTF-16 code units**, not code points. The two agree for every name below
-    U+D800 and diverge above it, because a non-BMP character encodes as a surrogate pair
-    starting at 0xD800 and therefore sorts *below* every BMP character above U+D7FF while its
-    code point sorts above them. ``json.dumps(sort_keys=True)`` orders by code point and was
-    used here on the assumption that member names are ASCII. They are not: a ``document`` field
-    accepts any JSON value (§5.3), so caller-chosen object keys reach ``decision.values`` and
-    from there the receipt core. One such key put the Python SDK's canonicalization at odds with
-    the reference server's and the TypeScript SDK's over the same receipt, which is the one
-    disagreement a chain anybody can verify cannot survive.
+    Member order is **UTF-16 code units** (RFC 8785 §3.2.3, "Sorting of Object Properties"), not
+    code points. The two agree for every name below U+D800 and diverge above it, because a
+    non-BMP character encodes as a surrogate pair starting at 0xD800 and therefore sorts *below*
+    every BMP character above U+D7FF while its code point sorts above them.
+
+    This used to be ``json.dumps(sort_keys=True)``, which orders by code point — and that was
+    not a lapse. It is what the published specification said to do: ``signing.md`` named RFC 8785
+    and then, in the same sentence, required members "sorted by code point", and shipped a
+    reference verifier doing exactly that. This SDK implemented the document faithfully and the
+    document was wrong about the standard it named, so the RFC is cited here rather than the
+    spec. Anyone who copies that reference verifier reproduces the old behaviour, which is why
+    the specification is being corrected alongside this.
+
+    It matters because a ``document`` field accepts any JSON value (§5.3), so caller-chosen
+    object keys reach ``decision.values`` and from there the receipt core. One such key put this
+    SDK's canonicalization at odds with the reference server's and the TypeScript SDK's over the
+    same receipt, which is the one disagreement a chain anybody can verify cannot survive.
     """
     if isinstance(value, float):
-        raise ValueError(
-            f"cannot canonicalize a non-integer number at {path or '<root>'}: RFC 8785 "
-            "specifies a number serialization that this would not reproduce"
+        raise NonConformingDocument(
+            f"{path or '<root>'} carries the float {value!r}, and digest-covered content carries "
+            "integers only (§1.4). This document has no canonical form and therefore no digest, "
+            "so it cannot have been produced by a conforming Server — §1.4 requires every "
+            "digest-covered number to be stored and served in the form the canonicalizer emits. "
+            "That is a defect in whatever minted this, and it is not evidence that anyone "
+            "tampered with it."
         )
     if isinstance(value, dict):
         return {

@@ -15,10 +15,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 
 from ._document import ordered
-from .errors import HandoffError, RateLimited, TransportError, from_error_body
+from .errors import HandoffError, TransportError, from_error_body
 from .models import (
     AckResult,
     AnswerResult,

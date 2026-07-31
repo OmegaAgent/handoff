@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from handoff import verify_callback, verify_chain, verify_receipt_chain
+from handoff import canonical_bytes, verify_callback, verify_chain, verify_receipt_chain
 from handoff.errors import CallbackSignatureError
 from handoff.signing import callback_canonical_string, chain_digest, receipt_core_hash, sign_callback
 
@@ -272,3 +272,100 @@ def test_a_chain_with_a_relinked_gap_is_rejected():
     excised = dict(decision)
     excised["chain"] = dict(decision["chain"], height=decision["chain"]["height"] - 1)
     assert not verify_receipt_chain(excised)
+
+
+# -- the reference verifier the specification publishes ----------------------------------------
+
+
+def _reference_verifier_source() -> str:
+    """The Python snippet from signing.md §2.5, extracted from the document itself.
+
+    Extracted rather than copied, because a copy is a second implementation that drifts. The
+    marker and the fence are located structurally, and a failure to find either is an assertion
+    failure rather than a skip — if the document is restructured, this test says so instead of
+    quietly measuring nothing.
+    """
+    lines = (SPEC / "signing.md").read_text(encoding="utf-8").splitlines()
+    marker = next(
+        (i for i, line in enumerate(lines) if line.startswith("**Reference verifier**") and "cryptography" in line),
+        None,
+    )
+    assert marker is not None, "signing.md no longer publishes a receipt reference verifier"
+
+    opened = next((i for i in range(marker, len(lines)) if lines[i].strip() == "```python"), None)
+    assert opened is not None, "the reference verifier is no longer a ```python fence"
+    closed = next((i for i in range(opened + 1, len(lines)) if lines[i].strip() == "```"), None)
+    assert closed is not None, "the reference verifier fence is unterminated"
+
+    source = "\n".join(lines[opened + 1 : closed])
+    assert "def verify_receipt" in source and "def canonical_json" in source, source[:200]
+    return source
+
+
+def _reference_verifier_namespace() -> dict:
+    namespace: dict = {}
+    exec(compile(_reference_verifier_source(), "signing.md#reference-verifier", "exec"), namespace)
+    return namespace
+
+
+def test_the_published_reference_verifier_executes_and_agrees_with_this_sdk():
+    """The specification's own verifier, actually run.
+
+    It had never been executed by anything in this repository, which is how it came to ship
+    ordering that contradicted the RFC it named in the same sentence. An implementer's first
+    move is to copy this snippet, so it is the artifact most likely to be trusted and was the
+    one least likely to be checked.
+
+    Executing it is also the only cross-implementation check available without a server: the
+    snippet shares no code with this SDK, so agreement between them is evidence rather than
+    self-consistency.
+    """
+    reference = _reference_verifier_namespace()
+
+    # 1. It reproduces the published canonical bytes, which is signing.md §3's own criterion.
+    core = json.loads((FIXTURES / "signing" / "receipt-core.json").read_bytes())
+    published = (FIXTURES / "signing" / "receipt-core.json").read_bytes()
+    assert reference["canonical_json"](core) == published
+    assert (
+        hashlib.sha256(reference["canonical_json"](core)).hexdigest()
+        == "2763f39ef8a61d493106d3db302ec36cae5c024ca3da3a019d483ccc29704ad1"
+    )
+
+    # 2. It agrees with this SDK on the document that broke them apart. A non-BMP key sorts
+    #    below a BMP key above U+D7FF by code unit and above it by code point, so a verifier
+    #    built from the old wording disagrees here and nowhere else.
+    adversarial = {"！": 1, "\U0001f600": 2, "a": 0, "": 3, "zé": "café\n\"q\""}
+    assert reference["canonical_json"](adversarial) == canonical_bytes(adversarial)
+    assert (
+        reference["canonical_json"](adversarial)
+        == '{"":3,"a":0,"zé":"café\\n\\"q\\"","\U0001f600":2,"！":1}'.encode()
+    ), "empty key first, then 'a' (U+0061), 'z…' (U+007A), the surrogate pair (0xD83D), U+FF01"
+
+    # 3. It verifies the published receipt, chain and Ed25519 signature together, as published.
+    keys = {"rk_01K3MB2R4Y8ZC4YRXB2N6VD9FT": bytes.fromhex(
+        "fb83e7234defb5402d3123ce1753df2e30313285cf194f4b7651bf5530646f98"
+    )}
+    signature = {
+        "alg": "Ed25519",
+        "kid": "rk_01K3MB2R4Y8ZC4YRXB2N6VD9FT",
+        "sig": "av8Iq2KkysJR6J3na_k6GHTS26ajN3CNsT4iOyHcJUy9mTxvF1hD0moPcg4kFGkklv1u2cGiijm76V2icmwZCw",
+    }
+    decision = json.loads((FIXTURES / "08-receipt-decision.json").read_bytes())
+    assert reference["verify_receipt"](decision, signature, keys) is True
+
+    # And it rejects what it must: an altered core, and a kid it was not given.
+    tampered = json.loads((FIXTURES / "08-receipt-decision.json").read_bytes())
+    tampered["decision"]["values"]["decision"] = "reject"
+    assert reference["verify_receipt"](tampered, signature, keys) is False
+    assert reference["verify_receipt"](decision, dict(signature, kid="rk_unknown"), keys) is False
+
+
+def test_the_published_reference_verifier_refuses_a_float_like_both_sdks():
+    """§1.4: a float in a digest-covered position means the bytes at rest are not the bytes the
+    canonicalizer emits, so no digest an auditor computes is the one that was sealed. The
+    snippet an implementer copies has to refuse it too, or it will verify receipts that this
+    SDK and the TypeScript SDK both reject."""
+    reference = _reference_verifier_namespace()
+    for bad in [{"amount": 2400.5}, {"amount": -0.0}, {"nested": [1.0]}]:
+        with pytest.raises(ValueError):
+            reference["canonical_json"](bad)

@@ -19,7 +19,7 @@
  */
 
 import { canonicalBytes, constantTimeEquals, sha256Hex, toHex, type JsonObject } from "./document.ts";
-import { CallbackSignatureError } from "./errors.ts";
+import { CallbackSignatureError, NonConformingDocument } from "./errors.ts";
 import { Signal } from "./models.ts";
 
 /** signing.md §1.3 step 2. Receiver-enforced, and not negotiable downward by the sender. */
@@ -260,7 +260,11 @@ export async function verifyReceiptChain(receipt: JsonObject): Promise<boolean> 
   try {
     const expected = await chainDigest(chain.height, chain.prev_digest, await receiptCoreHash(receipt));
     return constantTimeEquals(expected, String(chain.digest ?? ""));
-  } catch {
+  } catch (error) {
+    // A receipt with no canonical form is a different finding from one whose digest does not
+    // recompute, and this function must not report them identically: the first says whatever
+    // minted it is broken, the second says someone changed a sealed record.
+    if (error instanceof NonConformingDocument) throw error;
     return false;
   }
 }

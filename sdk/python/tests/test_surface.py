@@ -254,8 +254,35 @@ def test_canonicalization_refuses_non_integer_numbers():
     from handoff import canonical_bytes
 
     assert canonical_bytes({"n": 4211}) == b'{"n":4211}'
-    with pytest.raises(ValueError, match="non-integer number"):
+    with pytest.raises(handoff.NonConformingDocument, match="digest-covered content carries"):
         canonical_bytes({"amount": 2400.5})
+
+
+def test_a_receipt_with_no_canonical_form_is_not_reported_as_a_failed_verification():
+    """A verifier that cannot tell "this Server is broken" from "someone tampered with this" is
+    not much of a verifier, and the difference is the difference between a bug report and an
+    incident. `False` is reserved for the digest failing to recompute; a receipt that has no
+    canonical form at all raises instead."""
+    from pathlib import Path
+
+    from handoff.signing import verify_receipt_chain
+
+    fixtures = Path(__file__).resolve().parents[3] / "spec" / "fixtures"
+    sealed = json.loads((fixtures / "08-receipt-decision.json").read_bytes())
+    assert verify_receipt_chain(sealed) is True
+
+    # Tampered: the digest no longer recomputes. That is what False means.
+    tampered = json.loads((fixtures / "08-receipt-decision.json").read_bytes())
+    tampered["decision"]["values"]["decision"] = "reject"
+    assert verify_receipt_chain(tampered) is False
+
+    # Non-conforming: a float in a digest-covered position, which §1.4 says a conforming Server
+    # never serves. Nobody tampered with it — and the SDK must not imply that anyone did.
+    non_conforming = json.loads((fixtures / "08-receipt-decision.json").read_bytes())
+    non_conforming["decision"]["values"]["amount"] = -0.0
+    with pytest.raises(handoff.NonConformingDocument) as raised:
+        verify_receipt_chain(non_conforming)
+    assert "not evidence that anyone tampered" in str(raised.value)
 
 
 def test_members_are_ordered_by_utf16_code_units_not_code_points():

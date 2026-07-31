@@ -35,8 +35,7 @@ hash chain that the protocol actually requires is stdlib and always available.
 
 from __future__ import annotations
 
-import warnings
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 
 from ._document import Document, canonical_bytes, digest, encode_document
 from .client import Client, DEFAULT_BASE_URL, new_idempotency_key
@@ -62,6 +61,7 @@ from .errors import (
     InsufficientAuthority,
     InsufficientScope,
     InvalidRequest,
+    NonConformingDocument,
     NotEntitled,
     NotFound,
     PresentationStale,
@@ -169,6 +169,7 @@ __all__ = [
     "HandoffTimeout",
     "SignalNotApplied",
     "CallbackSignatureError",
+    "NonConformingDocument",
     "TransportError",
     "FieldError",
     "InvalidRequest",

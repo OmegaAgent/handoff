@@ -53,6 +53,7 @@ __all__ = [
     "HandoffTimeout",
     "SignalNotApplied",
     "CallbackSignatureError",
+    "NonConformingDocument",
     "from_error_body",
 ]
 
@@ -159,6 +160,26 @@ class CallbackSignatureError(Exception):
     The message names which check failed and never includes a secret, a computed signature, or
     any value derived from a secret — an attacker who can read rejection detail should learn
     nothing they could not compute themselves.
+    """
+
+
+class NonConformingDocument(Exception):
+    """A document cannot be canonicalized because it violates §1.4, so no digest exists for it.
+
+    Deliberately **not** a verification failure, and deliberately not a ``ValueError`` that
+    :func:`handoff.signing.verify_receipt_chain` would swallow into ``False``. Those two
+    conditions are different findings and a verifier that reports them identically is not much
+    of a verifier:
+
+    * ``verify_receipt_chain() is False`` — the digest does not recompute. Something changed
+      after the receipt was sealed. That is the tamper-evidence the chain exists to provide.
+    * ``NonConformingDocument`` — the receipt never had a computable digest, because a
+      digest-covered number is not an integer. Whatever minted it is broken. Nobody tampered
+      with anything, and telling a holder their records look forged when the truth is that the
+      Server had a bug is a bad answer to an alarming question.
+
+    §1.4 requires a Server to store and serve every digest-covered number in the form the
+    canonicalizer emits, so a conforming Server never produces one of these.
     """
 
 

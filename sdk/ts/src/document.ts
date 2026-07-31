@@ -17,6 +17,8 @@
  * can reproduce both.
  */
 
+import { NonConformingDocument } from "./errors.ts";
+
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: any };
 
@@ -118,9 +120,13 @@ export function constantTimeEquals(a: string, b: string): boolean {
 function canonicalize(value: any, path: string): any {
   if (typeof value === "number") {
     if (!Number.isInteger(value)) {
-      throw new Error(
-        `cannot canonicalize a non-integer number at ${path || "<root>"}: RFC 8785 specifies a ` +
-          `number serialization that this would not reproduce`,
+      throw new NonConformingDocument(
+        `${path || "<root>"} carries the non-integer number ${value}, and digest-covered content ` +
+          `carries integers only (§1.4). This document has no canonical form and therefore no ` +
+          `digest, so it cannot have been produced by a conforming Server — §1.4 requires every ` +
+          `digest-covered number to be stored and served in the form the canonicalizer emits. ` +
+          `That is a defect in whatever minted this, and it is not evidence that anyone tampered ` +
+          `with it.`,
       );
     }
     return value;

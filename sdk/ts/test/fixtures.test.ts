@@ -13,7 +13,16 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 
-import { Doc, canonicalBytes, Receipt, Request, Signal, sha256Hex } from "../src/index.ts";
+import {
+  Doc,
+  canonicalBytes,
+  NonConformingDocument,
+  Receipt,
+  Request,
+  Signal,
+  sha256Hex,
+  verifyReceiptChain,
+} from "../src/index.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "..", "..", "..", "spec", "fixtures");
@@ -136,7 +145,30 @@ test("canonicalization refuses non-integer numbers", () => {
   // signing.md §3 trap 2: a naive float format produces a digest that is stable in one
   // implementation and wrong across two.
   assert.deepEqual(canonicalBytes({ n: 4211 }), new TextEncoder().encode('{"n":4211}'));
-  assert.throws(() => canonicalBytes({ amount: 2400.5 }), /non-integer number/);
+  assert.throws(() => canonicalBytes({ amount: 2400.5 }), /digest-covered content carries/);
+});
+
+test("a receipt with no canonical form is not reported as a failed verification", async () => {
+  // A verifier that cannot tell "this Server is broken" from "someone tampered with this" is not
+  // much of a verifier, and the difference is the difference between a bug report and an incident.
+  // `false` is reserved for the digest failing to recompute.
+  const sealed = JSON.parse(new TextDecoder().decode(read(join(FIXTURES, "08-receipt-decision.json"))));
+  assert.equal(await verifyReceiptChain(sealed), true);
+
+  // Tampered: the digest no longer recomputes. That is what `false` means.
+  const tampered = JSON.parse(new TextDecoder().decode(read(join(FIXTURES, "08-receipt-decision.json"))));
+  tampered.decision.values.decision = "reject";
+  assert.equal(await verifyReceiptChain(tampered), false);
+
+  // Non-conforming: a float in a digest-covered position, which §1.4 says a conforming Server
+  // never serves. Nobody tampered with it, and the SDK must not imply that anyone did.
+  const nonConforming = JSON.parse(new TextDecoder().decode(read(join(FIXTURES, "08-receipt-decision.json"))));
+  nonConforming.decision.values.amount = 2400.5;
+  await assert.rejects(() => verifyReceiptChain(nonConforming), (error: Error) => {
+    assert.ok(error instanceof NonConformingDocument, `expected NonConformingDocument, got ${error.name}`);
+    assert.match(error.message, /not evidence that anyone tampered/);
+    return true;
+  });
 });
 
 test("members are ordered by UTF-16 code units, not code points", () => {

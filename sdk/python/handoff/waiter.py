@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from .errors import HandoffTimeout, SignalNotApplied, TransportError
 from .models import AckResult, Decision, ReattachResult, Request, Signal

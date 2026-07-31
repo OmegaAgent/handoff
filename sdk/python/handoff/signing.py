@@ -250,6 +250,12 @@ def verify_receipt_chain(receipt: Mapping[str, Any]) -> bool:
 
     This is the base tamper-evidence mechanism and it needs no key management at all, which is
     why the protocol makes it a MUST and detached signatures only a MAY (§9.4).
+
+    ``False`` means one thing and one thing only: **the digest does not recompute**, so the
+    receipt is not the one that was sealed. A receipt that cannot be canonicalized at all is a
+    different finding and raises :class:`~handoff.errors.NonConformingDocument` rather than
+    returning ``False`` — see that class for why collapsing the two would make this function
+    tell a holder their records look forged when the truth is that the Server had a bug.
     """
     chain = receipt.get("chain")
     if not isinstance(chain, Mapping):
@@ -257,6 +263,13 @@ def verify_receipt_chain(receipt: Mapping[str, Any]) -> bool:
     try:
         expected = chain_digest(chain["height"], chain["prev_digest"], receipt_core_hash(receipt))
     except (KeyError, TypeError, ValueError):
+        # A malformed chain entry — a missing member, a height that is not a number. Nothing to
+        # recompute against, so the receipt does not verify.
+        #
+        # `NonConformingDocument` is deliberately absent from this tuple and is not a subclass of
+        # any member of it, so it propagates. Do not add it: that would turn "this Server emitted
+        # a receipt with no canonical form" into "this receipt does not verify", which is the one
+        # conflation this function must not make.
         return False
     return hmac.compare_digest(expected, str(chain.get("digest", "")))
 

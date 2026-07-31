@@ -156,6 +156,26 @@ export class CallbackSignatureError extends Error {
   }
 }
 
+/**
+ * A document cannot be canonicalized because it violates §1.4, so no digest exists for it.
+ *
+ * Deliberately not a verification failure. `verifyReceiptChain` returns `false` for one thing
+ * only — the digest does not recompute, so the receipt is not the one that was sealed — and
+ * throws this instead when the receipt never had a computable digest, because a digest-covered
+ * number is not an integer. Those are different findings: the first says someone changed a
+ * sealed record, the second says whatever minted it is broken. Reporting them identically tells
+ * a holder their records look forged when the truth is that the Server had a bug.
+ *
+ * §1.4 requires a Server to store and serve every digest-covered number in the form the
+ * canonicalizer emits, so a conforming Server never produces one of these.
+ */
+export class NonConformingDocument extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonConformingDocument";
+  }
+}
+
 const BY_CODE: Record<string, new (message: string, detail?: ErrorDetail) => HandoffError> = {
   invalid_request: InvalidRequest,
   unsupported_field_type: UnsupportedFieldType,
