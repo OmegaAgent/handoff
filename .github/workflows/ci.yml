@@ -5,7 +5,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `main` and the protocol release lines. Restricting this to `main` meant the branch where the
+    # protocol is actually built ran nothing until it was merged, which is how fourteen jobs came to
+    # be predictions no run had ever contradicted — including one, `conformance`, that would have
+    # failed on a missing `psql` the first time anybody executed it. A pipeline that only runs after
+    # the work is finished is a pipeline that reports on work nobody can still cheaply change.
+    branches: [main, 'v1/**']
   pull_request:
 
 permissions:
