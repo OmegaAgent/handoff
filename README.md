@@ -42,24 +42,26 @@ relationships. None of that ships in a container, and this repository will not p
 this reference implementation.**
 
 A deployment of `examples/night-hack/` — the four-hour hackathon build preserved here as prior art,
-and not this implementation — **has existed at `handoff.omegas.dev` with no authentication**, and
-nothing in this repository establishes that it has since stopped. `SECURITY.md` holds the detail
-and puts that hostname out of scope. Treat it as possibly live until somebody has checked, rather
-than as a dead link. (This line previously said flatly that there is no hosted service, full stop,
+and not this implementation — **is running at `handoff.omegas.dev` with no authentication**. That
+was checked on 2026-07-31: the host answers, served by Fly.io. `SECURITY.md` holds the detail and
+puts that hostname out of scope. It is a live hackathon demo, not this project, and not a dead
+link. (This line previously said flatly that there is no hosted service, full stop,
 which is the sentence that was wrong.)
 
-The reference server passes all 26 Level 1 conformance cases: C-1 through C-16, plus C-6b and C-18
-through C-26. It does not pass C-17, the only Level 2 case, and deliberately cannot — see below.
-The enumeration is spelled out rather than left as a bare count, because a count does not say
-*which* cases, and a Server passing every case but one is not Level 1 compliant. Read `docs/hostile-review.md` before
-relying on any of this: an independent review pass found defects that are open at the time of
-writing, and `BACKLOG.md` states the gaps plainly rather than leaving them to be discovered.
+Level 1 is 26 conformance cases: C-1 through C-16, plus C-6b and C-18 through C-26. C-17 is the only
+Level 2 case, and this server deliberately does not implement what it covers — see below. The
+enumeration is spelled out rather than left as a bare count, because a count does not say *which*
+cases, and a Server passing every case but one is not Level 1 compliant. Read `docs/review-3.md`
+before relying on any of this — it is the most recent of three independent hostile reviews
+(`docs/hostile-review.md`, `docs/review-2.md`, `docs/review-3.md`), each of which found defects the
+one before it had missed. `BACKLOG.md` states the remaining gaps plainly rather than leaving them
+to be discovered.
 
 | Component | State |
 |---|---|
 | `spec/` — the normative protocol | v0.1, frozen. 21 invariants, OpenAPI 3.1, signing test vectors that reproduce. |
 | `conformance/` — the suite | 26 Level 1 cases + 1 Level 2. Written before the server, and demonstrably red against one that implements nothing. |
-| `core/` — the Rust reference implementation | `handoffd` passes **26/26 Level 1**. Level 2 (`continuation`) is not implemented and is not advertised. |
+| `core/` — the Rust reference implementation | `handoffd`, the target of the Level 1 suite. Level 2 (`continuation`) is not implemented and is not advertised. |
 | `sdk/python` — `handoff-human` | 0.2.0. Standard library only. |
 | `sdk/ts` — `@handoffproto/sdk` | Zero runtime dependencies. |
 | `managed/` — the hosted adapter | Closed-source, unpublished. Refuses where a dependency does not exist rather than pretending. |

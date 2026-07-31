@@ -48,10 +48,12 @@ unfunded open-source project and pretending otherwise would waste your time.
 **Out of scope:**
 
 - `examples/night-hack/**`. That directory is preserved prior art from a four-hour hackathon build.
-  It is not the reference implementation and it is not maintained. **A deployment of it has existed
+  It is not the reference implementation and it is not maintained. **A deployment of it is running
   at `handoff.omegas.dev`**, with no authentication — its own docs say anyone holding the URL can
-  ring a phone — so treat that hostname as a running hackathon demo rather than as this project,
-  and do not assume it is gone until someone has checked. Its
+  ring a phone. Confirmed serving on 2026-07-31 by a liveness check against the host, which is
+  answered by Fly.io. Treat that hostname as a live hackathon demo rather than as this project. It
+  should be decommissioned or put behind authentication before this repository is published, since
+  publication is what turns a URL nobody knows into a URL everybody has. Its
   weaknesses are documented rather than fixed — see `examples/night-hack/README.md`. Reports about
   it are welcome as issues, not as security advisories.
 - Denial of service through raw volume against a deployment you control.

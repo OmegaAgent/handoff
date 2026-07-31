@@ -97,7 +97,7 @@ Deploy `handoff-omegas-server` to `handoff.omegas.dev` with its own database. No
 touches it. `handoff-omegas-server preflight` prints every absent dependency on boot.
 
 - **Gate:** `GET https://handoff.omegas.dev/v1/meta` returns a conformance level **derived from the
-  build rather than declared**, and `handoff-conformance` run against that base URL is **25/25,
+  build rather than declared**, and `handoff-conformance` run against that base URL is **26/26,
   exit 0**. `/v1/meta` also carries the `handoff-core` version, which must be no more than one minor
   release behind the latest published tag — that is the anti-drift check, and it is `/v1/meta`
   because there is no `/v1/version` route and adding one would duplicate an endpoint that already
