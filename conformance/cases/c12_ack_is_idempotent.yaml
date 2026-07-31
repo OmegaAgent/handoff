@@ -114,36 +114,75 @@ steps:
               §3.5 — the repeat is a 200 with first_ack false. A second ack is a retry, not a second
               application: an implementation that applies the decision again has double-spent it.
 
-  # Positive control, for the same reason as C-21: an unknown waiter also returns an empty list.
-  - name: the request still names the waiter we are about to poll
+  # Positive control, for the same reason as C-21: an unknown waiter also returns an empty list, so
+  # "the acked signal is no longer listed" is satisfied by an empty list from any cause — including
+  # a waiter the Server never had. A review demonstrated exactly that. Asserting `length: 0`
+  # instead does not fix it, because emptiness is what the endpoint reports either way. The fix is
+  # to put a DIFFERENT signal in the same queue: a second request on the same waiter, answered and
+  # left unacked. The list is then non-empty, and "the acked one is not in it" can fail.
+  - name: a positive control — a second request on the same waiter
     http:
-      method: GET
-      path: /requests/${req}
+      method: POST
+      path: /requests
       as: machine_a
+      headers:
+        Idempotency-Key: "c12-control-${run_id}"
+      body:
+        waiter_ref: "run:c12-${run_id}"
+        prompt:
+          title: "A second request on the same waiter, answered and deliberately left unacked"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        control: id
+
+  - name: answer it, so this waiter has a signal it has not acked
+    http:
+      method: POST
+      path: /requests/${control}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c12-control-answer-${run_id}"
+      body:
+        values: {decision: approve}
       expect:
         status: 200
-        body:
-          - path: waiter_ref
-            equals: "run:c12-${run_id}"
-            because: "an empty signal list is only evidence of consumption if the waiter is the real one"
 
   - name: the acked signal is consumed and no longer pending
-    http:
-      method: GET
-      path: /waiters/run%3Ac12-${run_id}/signals
-      as: machine_a
-      expect:
-        status_in: [200, 204]
-        body:
-          - path: data
-            length: 0
-            because: >
-              §8.2 W4 — the ack stops redelivery. The only signal this case creates is the one it
-              acked, so after the ack the pending list is empty. Asserted as emptiness rather than
-              as "no element carries that id", because the weaker form is satisfied by an empty list
-              from any cause, including a waiter the Server never had: a review demonstrated it
-              passing against a waiter reference that does not exist. The earlier poll in this case
-              is the positive control that the endpoint returns this waiter's signals at all.
+    poll:
+      timeout: PT30S
+      interval: PT1S
+      call:
+        method: GET
+        path: /waiters/run%3Ac12-${run_id}/signals
+        as: machine_a
+        expect:
+          status: 200
+          body:
+            - path: data
+              length: 1
+              because: >
+                the positive control. The second request's signal is here and unacked; the first
+                one's is not. An empty list would prove neither, and is what a Server returns for a
+                waiter it has never heard of.
+            - path: data[0].type
+              equals: answered
+              because: "the signal that remains is the unacked one, which is a real pending signal"
+            - path: data[].id
+              none_equal: "${signal}"
+              because: "§8.2 W4 — the ack stops redelivery"
 
   - name: redelivery stopped exactly once
     http:

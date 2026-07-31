@@ -33,6 +33,40 @@ C-7 must grep the logs. A case whose requirements are missing **fails**; it is n
 
 The case format is documented in `core/crates/handoff-conformance/CASE-FORMAT.md`.
 
+## A hook must show its work
+
+The hooks are where a conformance claim is easiest to fake, because they are the only part of the
+suite the deployment writes. A hostile review demonstrated the whole of it: the eight assertions
+covering the properties an implementer *cannot* verify from the HTTP surface — storage-level
+immutability, transactional atomicity, channel-content non-authority, secret absence from logs —
+were all satisfied by four hooks stubbed with `true` and `false`. Every one of those hooks exits the
+way its case wanted when it does nothing at all.
+
+So an exit code is never the whole assertion. Each hook step also requires **evidence in the output
+that the hook did the thing**, and where the evidence can be tied to something the suite read
+independently over HTTP, it is:
+
+| hook | must print |
+|---|---|
+| `storage_update_receipt`, `storage_delete_receipt` | the receipt id it attempted, and the engine's own refusal |
+| `receipt_chain_verify` | `chain_verified head=<digest> height=<n>` — and it must be the head `GET /receipts/chain-head` returned |
+| `chain_tamper_is_detected` | `tamper_detected altered=<id> head_before=<digest> head_after=did-not-verify`, `head_before` likewise |
+| `channel_inbound` | `channel_message=<id> request=<id> channel=<name> request_state=<state>` |
+| `observe_page_state_change` | `observation=<id> request=<id> request_state=<state> receipts=<n>` |
+| `crash_between_state_and_event` | `crash_point_reached=<name> instance_exit=<non-zero> … agree=yes` |
+| `logs` | anything, but it must exit 0 and it must not be empty |
+
+Two of these deserve their reason stated. **C-23** asks whether a state change and its event are one
+transaction, and "both are present and they agree" is equally true of an answer that committed
+normally — so the hook has to show the process was actually interrupted at the seam, and left by a
+fault rather than by exiting 0. A deployment that cannot induce the crash must **fail** the case
+rather than report agreement it never tested. And **C-7**'s `logs` source is not one contribution
+among several: a hook that fails, or that prints nothing, fails the case. §12.3 makes "no secret in
+a log line" normative, and there is no version of "we could not show you" that is a pass.
+
+Print more than the required line if it helps you debug. The cases match; they do not compare whole
+outputs.
+
 ## Why this directory is not a test folder
 
 This is the project's governance instrument, and three rules in

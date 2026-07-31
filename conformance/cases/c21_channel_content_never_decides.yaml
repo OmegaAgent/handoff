@@ -134,22 +134,54 @@ steps:
 
   # Positive control. An unknown waiter reference also returns an empty signal list, so emptiness
   # alone cannot tell "this waiter exists and was told nothing" from "this waiter never existed" —
-  # a review demonstrated the weaker form passing against a reference that had never been created.
-  # Reading the reference back off the request proves the one polled below is the real one.
-  - name: the request still names the waiter we are about to poll
+  # a review demonstrated the weaker form passing against a reference that had never been created,
+  # and asserting `length: 0` instead does not fix it, because emptiness is what the endpoint
+  # reports either way. The fix is to put something in the queue that is not `answered`: a second
+  # request on the SAME waiter, withdrawn. The queue is then non-empty for a reason that has
+  # nothing to do with the channel message, "no `answered` signal" becomes a fact about the Server
+  # rather than about an empty list, and repointing this poll at a fabricated waiter fails.
+  - name: a positive control — a second request on the same waiter, which will be withdrawn
     http:
-      method: GET
-      path: /requests/${req}
+      method: POST
+      path: /requests
       as: machine_a
+      headers:
+        Idempotency-Key: "c21-control-${run_id}"
+      body:
+        waiter_ref: "run:c21-${run_id}"
+        prompt:
+          title: "A second request on the same waiter, raised only to be withdrawn"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        control: id
+
+  - name: withdraw it, which queues a signal this waiter really can receive
+    http:
+      method: POST
+      path: /requests/${control}/cancel
+      as: machine_a
+      headers:
+        Idempotency-Key: "c21-control-cancel-${run_id}"
+      body:
+        reason: "raised only to prove this waiter's queue is not empty"
       expect:
         status: 200
         body:
-          - path: waiter_ref
-            equals: "run:c21-${run_id}"
-            because: "the poll below is only evidence if it addresses the waiter this request bound"
           - path: state
-            equals: pending
-            because: "§8.2 — nothing has settled, which is the premise of the assertion that follows"
+            equals: cancelled
 
   - name: and the waiter was never told anything was decided
     http:
@@ -157,17 +189,23 @@ steps:
       path: /waiters/run%3Ac21-${run_id}/signals
       as: machine_a
       expect:
-        status_in: [200, 204]
+        status: 200
         body:
           - path: data
-            length: 0
+            length_at_least: 1
             because: >
-              §8.2 — a Server MUST NOT satisfy a wait with a decision nobody made. Asserted as an
-              empty collection rather than as "no element equals `answered`": nothing in this case
-              ever settles, so the signal list is legitimately empty, and a `none_equal` over an
-              empty list is satisfied by a server that lost the waiter entirely. Emptiness is both
-              the stronger claim and the one that can actually fail — a review found the weaker
-              form passing against a waiter reference that had never existed.
+              the positive control. Without something in this queue, everything below is satisfied
+              by a Server that queues no signals at all, and by a waiter reference that does not
+              exist.
+          - path: data[].type
+            all_equal: cancelled
+            because: >
+              the withdrawal reached this waiter and nothing else did, so the collection the next
+              assertion reads is this case's own queue — non-empty, and non-empty for a reason
+              unrelated to the channel message
+          - path: data[].type
+            none_equal: answered
+            because: "§8.2 — a Server MUST NOT satisfy a wait with a decision nobody made"
 
   - name: an unbound channel identity still cannot answer
     hook:
