@@ -34,13 +34,15 @@ export SPRITES_API_TOKEN=...   # redacted: never name the file that holds a work
 cd ~/human && python3 demo/agent_sprite.py --page          # --page rings the phone
 
 # Simpler fallback, no sandbox, but the live view is not its browser:
-HANDOFF_URL=https://handoff.example.invalid python3 demo/agent.py --scripted
+HANDOFF_URL=https://handoff.example.invalid python3 demo/agent.py --scripted --page
 ```
 
 `agent_sprite.py` takes roughly 25 to 40 seconds to reach the wall because every browser step goes
 through the sandbox exec API. It narrates each step, so it reads as an agent working rather than a
 hang. Do not fill the silence by talking over it; let the narration carry the beat. Note that
-`--no-page` is the DEFAULT for this one, so you must pass `--page` for the phone to ring on stage.
+**not paging is the default for both agents**, so you must pass `--page` for the phone to ring on
+stage. `HANDOFF_URL` has no useful default either: it points at a placeholder host that resolves
+nowhere, so neither script reaches a deployment until you name one.
 
 The terminal prints the wall it hit, the handoff URL, and a line showing the statement endpoint
 answering **403 while the handoff is still pending** — the payoff is locked and the agent cannot

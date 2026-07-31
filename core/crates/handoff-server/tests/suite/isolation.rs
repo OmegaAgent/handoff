@@ -6,18 +6,33 @@
 //! identity together — which is the only form that fails when a row that should be invisible is
 //! present.
 //!
-//! The second half checks the same property one layer down. Every `handoff_*` table has row-level
-//! security, and every request-scoped transaction names its tenant before it reads anything, so a
-//! query that lost its `WHERE tenant_ref = …` still cannot see another tenant's rows. That is the
-//! second line of defence, and it is only a defence if it is tested per table rather than assumed.
+//! The second half checks the same property one layer down. Every `handoff_*` table except the
+//! migration log has row-level security enabled and forced, so a query that named its tenant and
+//! then lost its `WHERE tenant_ref = …` still cannot see another tenant's rows. That is the second
+//! line of defence, and it is only a defence if it is tested per table rather than assumed.
+//!
+//! What that defence does **not** cover is a query that never named a tenant at all: the policy
+//! passes when the tenant setting is unset, because `handoffd` legitimately runs queries that have
+//! no tenant to name — authentication, which discovers the tenant from the credential (§4.1), and
+//! the cross-tenant sweeps. `every_request_scoped_path_names_its_tenant` measures which paths would
+//! survive a fail-closed policy and pins the ones that would not, so the conditional half of the
+//! guarantee is a check rather than a convention.
 
 use super::harness::*;
 use std::collections::BTreeSet;
 
 /// Every table that carries tenant-scoped rows, with the column that identifies a row.
+///
+/// Twenty, which is every table `handoff_enable_rls` is applied to across the migration set —
+/// `handoff_migrations` is the only `handoff_*` table without a policy, and it holds no tenant's
+/// data. A review found `handoff_request_dispositions` missing from this list, which left it
+/// neither proven nor named as unproven; the first assertion in
+/// `row_level_security_holds_on_every_tenant_scoped_table` now compares this list against
+/// `pg_policies`, so the same omission fails rather than passing quietly.
 const TENANT_SCOPED_TABLES: &[(&str, &str)] = &[
     ("handoff_requests", "id"),
     ("handoff_request_steps", "request_id"),
+    ("handoff_request_dispositions", "id"),
     ("handoff_deliveries", "id"),
     ("handoff_delivery_attempts", "delivery_id"),
     ("handoff_waiters", "waiter_ref"),
@@ -139,46 +154,287 @@ async fn each_tenant_reads_exactly_its_own_rows_and_nothing_of_the_others() {
     assert!(untouched["cancel_reason"].is_null());
 }
 
+/// One tenant's half of the row-level-security fixture.
+struct Fixture<'a> {
+    machine: &'a str,
+    human: &'a str,
+    /// Distinguishes this tenant's rows and idempotency keys from the other's.
+    label: &'a str,
+    /// The capability handle this tenant's raise declares (§11.4).
+    capability: &'a str,
+    /// The value sink this tenant's second raise declares (§12).
+    sink: &'a str,
+}
+
+/// Everything one tenant does — so that both tenants do exactly the same things.
+///
+/// The eight holes a review found in this fixture were all one shape: a long flow for tenant A and
+/// a short one for tenant B, which left eight tables holding rows for a single tenant. Their
+/// per-table assertions then compared two empty sets and passed, which is indistinguishable from
+/// coverage. Driving both tenants through *one* function is what keeps them symmetric by
+/// construction: a table that gains a row here gains it for both tenants, or for neither.
+async fn populate(deployment: &Deployment, tenant: Fixture<'_>) {
+    let base = &deployment.base;
+    let Fixture {
+        machine,
+        human,
+        label,
+        capability,
+        sink,
+    } = tenant;
+
+    // ---- A gated ask that declares a capability and asks for a callback. This one raise reaches
+    // requests, request_steps, waiters, idempotency, events, usage, deliveries and grants.
+    let mut body = raise_body(&format!("run:rls-{label}"), &format!("Tenant {label} asks"));
+    body["mode"] = serde_json::json!("gated");
+    // The callback points at this deployment's own `/meta`, which refuses a POST. An attempt is
+    // recorded whatever the receiver answers, and a URL on a port nothing is listening on would
+    // make the fixture depend on that port staying free for the length of the test.
+    body["callback"] = serde_json::json!({"url": format!("{base}/meta")});
+    body["routing"] = serde_json::json!({
+        "targets": [{"kind": "role", "value": "editor"}],
+        "ladder": [{"after": "PT0S", "channels": ["inapp"]}],
+    });
+    body["requires"]["capabilities"] = serde_json::json!([{
+        "handle": capability,
+        "type": "interactive_surface",
+        "scope": "view",
+        "provider": "test/browser",
+        "resource_ref": "opaque:bs_rls",
+        "label": "the browser the agent is driving",
+        "purpose": "Watch what the agent is doing.",
+        "optional": false,
+        "ttl": "PT15M",
+    }]);
+    let (status, raised) = post(
+        base,
+        "/requests",
+        machine,
+        &format!("rls-raise-{label}"),
+        body,
+    )
+    .await;
+    assert_eq!(status, 201, "{raised}");
+    let request = raised["id"].as_str().expect("an id").to_string();
+    let grant = raised["requires"]["capabilities"][0]["handle"]
+        .as_str()
+        .expect("a grant handle")
+        .to_string();
+
+    // ---- Resolving the grant, which is the only thing that writes a grant session (§11.2).
+    let (status, grant_view) = get(base, &format!("/grants/{grant}"), human).await;
+    assert_eq!(status, 200, "{grant_view}");
+    let radius = grant_view["blast_radius_digest"]
+        .as_str()
+        .expect("a blast radius digest")
+        .to_string();
+    let (status, session) = post(
+        base,
+        &format!("/grants/{grant}/sessions"),
+        human,
+        &format!("rls-session-{label}"),
+        serde_json::json!({"scopes": ["view"], "accepted_blast_radius_digest": radius}),
+    )
+    .await;
+    assert_eq!(status, 200, "{session}");
+
+    // ---- Handing the decision on rather than taking it. §6.6 is explicit that this is not a
+    // decision, so the request stays pending and can still be decided below — which is why the
+    // disposition does not need a request of its own.
+    let (status, delegated) = post(
+        base,
+        &format!("/requests/{request}/answer"),
+        human,
+        &format!("rls-delegate-{label}"),
+        serde_json::json!({
+            "values": {},
+            "disposition": "delegate",
+            "delegate_to": {"kind": "role", "value": "admin"},
+            "note": "Above my limit.",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{delegated}");
+
+    // ---- The answer: receipts, authorizations, signals, and the callback a worker then pushes.
+    let (status, answered) = post(
+        base,
+        &format!("/requests/{request}/answer"),
+        human,
+        &format!("rls-answer-{label}"),
+        serde_json::json!({"values": {"decision": "approve"}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{answered}");
+    let authorization = answered["authorization"]["id"]
+        .as_str()
+        .expect("a gated answer mints an authorization")
+        .to_string();
+
+    // ---- Spending it once (§10.2), which is what writes a redemption.
+    let (status, redeemed) = post(
+        base,
+        &format!("/authorizations/{authorization}/redeem"),
+        machine,
+        &format!("rls-redeem-{label}"),
+        serde_json::json!({"effect_key": format!("refund:rls-{label}")}),
+    )
+    .await;
+    assert_eq!(status, 200, "{redeemed}");
+
+    // ---- A second ask for the one table the first cannot reach: a value sink is declared at
+    // raise time (§12). It is deliberately left pending, because the two subcommands below need a
+    // request that has not settled.
+    let mut body = raise_body(
+        &format!("run:rls-{label}-sink"),
+        &format!("Tenant {label} signs in"),
+    );
+    body["requires"]["answer"] = serde_json::json!({
+        "fields": [
+            {"name": "email", "label": "Email", "type": "text", "required": true},
+            {"name": "password", "label": "Password", "type": "secret", "required": true},
+        ],
+        "value_sink": {"provider": "test/sink", "op": "submit_credentials", "ref": sink},
+    });
+    let (status, sink_raise) = post(
+        base,
+        "/requests",
+        machine,
+        &format!("rls-sink-{label}"),
+        body,
+    )
+    .await;
+    assert_eq!(status, 201, "{sink_raise}");
+    let pending = sink_raise["id"].as_str().expect("an id").to_string();
+
+    // ---- The two surfaces the protocol deliberately does not put on HTTP: §4.7's inbound channel
+    // adapter and §9.7's runtime observation. Both are `handoffd` subcommands and nothing else
+    // writes their tables, so without these two lines those two tables have no fixture at all.
+    deployment.run_handoffd(&[
+        "inject-channel-message",
+        "--request",
+        &pending,
+        "--channel",
+        "email",
+        "--text",
+        "I'll look at this tomorrow.",
+    ]);
+    deployment.run_handoffd(&["observe-page-change", "--request", &pending]);
+}
+
+/// Whether every tenant-scoped table now holds a row for **both** tenants.
+///
+/// Only the answer, not the list: naming what is missing is the per-table guard's job, and two
+/// messages for one condition would let a slow fixture and an absent one read the same.
+async fn both_tenants_are_everywhere(pool: &sqlx::PgPool) -> bool {
+    for (table, _) in TENANT_SCOPED_TABLES {
+        for tenant in [ORG_A, ORG_B] {
+            let rows: i64 = sqlx::query_scalar(&format!(
+                "select count(*) from {table} where tenant_ref = $1"
+            ))
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|e| panic!("{table}: {e}"));
+            if rows == 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Row-level security only binds a role that cannot bypass it.
 ///
 /// A superuser — and any role with `BYPASSRLS` — ignores every policy in the database, so running
 /// `handoffd` as one leaves this whole defence inert while every test still passes. This test
-/// therefore creates a least-privilege role and asserts the property as **that** role, which is
-/// also the way a deployment should run: the tenant predicate in every query is the primary
-/// defence, and this is the one that catches the day somebody forgets it.
+/// therefore probes as a role that cannot bypass it, and then asserts that the role it used really
+/// could not. What a deployment should grant its service role is in `SECURITY.md`; what matters
+/// here is only that the probe is not exempt.
+///
+/// The tenant predicate in every query is the primary defence. This is the one that catches the day
+/// somebody forgets it — on a query that named its tenant. A query that named none is not covered,
+/// and that is [`every_request_scoped_path_names_its_tenant`]'s subject.
 #[tokio::test]
 async fn row_level_security_holds_on_every_tenant_scoped_table() {
     let deployment = Deployment::start("rls").await;
 
-    // Produce rows in as many tables as the API can reach, for both tenants.
-    for (machine, human, label) in [(MACHINE_A, EDITOR_A, "A"), (MACHINE_B, EDITOR_B, "B")] {
-        let (status, raised) = post(
-            &deployment.base,
-            "/requests",
-            machine,
-            &format!("rls-raise-{label}"),
-            raise_body(&format!("run:rls-{label}"), &format!("Tenant {label} asks")),
+    // The list above is the population under test, so a table that gains a policy without gaining
+    // an entry here would be exempt from every assertion below and nothing would say so. This is
+    // how `handoff_request_dispositions` came to be neither proven nor named as unproven.
+    let with_a_policy: BTreeSet<String> = deployment
+        .superuser_sql(
+            "select tablename from pg_policies where policyname = 'handoff_tenant_isolation'",
         )
-        .await;
-        assert_eq!(status, 201, "{raised}");
-        let id = raised["id"].as_str().unwrap();
-        let (status, answered) = post(
-            &deployment.base,
-            &format!("/requests/{id}/answer"),
-            human,
-            &format!("rls-answer-{label}"),
-            serde_json::json!({"values": {"decision": "approve"}}),
-        )
-        .await;
-        assert_eq!(status, 200, "{answered}");
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let listed: BTreeSet<String> = TENANT_SCOPED_TABLES
+        .iter()
+        .map(|(table, _)| table.to_string())
+        .collect();
+    assert_eq!(
+        listed, with_a_policy,
+        "TENANT_SCOPED_TABLES and the tables carrying handoff_tenant_isolation have diverged"
+    );
+
+    // Both tenants, through one flow, so neither can be the shorter one.
+    for tenant in [
+        Fixture {
+            machine: MACHINE_A,
+            human: EDITOR_A,
+            label: "a",
+            capability: "hg_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+            sink: "snk_01K3M7QW8ZC4YRXB2N6VD9FTHA",
+        },
+        Fixture {
+            machine: MACHINE_B,
+            human: EDITOR_B,
+            label: "b",
+            capability: "hg_01K3M7QW8ZC4YRXB2N6VD9FTHB",
+            sink: "snk_01K3M7QW8ZC4YRXB2N6VD9FTHB",
+        },
+    ] {
+        populate(&deployment, tenant).await;
     }
 
     let pool = deployment.pool().await;
+
+    // Deliveries and callbacks are pushed by background workers, so the fixture is not finished
+    // when the last HTTP call returns. Wait for it, and let the per-table guard below name
+    // whatever never arrived rather than reporting it here — a table that is merely slow and a
+    // table that has no fixture at all must not produce the same message.
+    for _ in 0..200 {
+        if both_tenants_are_everywhere(&pool).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     let least_privilege = LeastPrivilegeRole::create(&deployment).await;
     let restricted = least_privilege.pool().await;
 
-    let mut uncovered: Vec<(&str, i64)> = Vec::new();
     for (table, id_column) in TENANT_SCOPED_TABLES {
+        // Per table, before the comparison it protects, and not once for the whole loop. The
+        // comparison below can only fail when the *other* tenant owns a row in this table: with
+        // both sides empty it holds against a table that has no policy at all. Eight of these
+        // tables were empty in an earlier fixture, so eight assertions proved nothing while
+        // reading as coverage.
+        let other_tenant: i64 = sqlx::query_scalar(&format!(
+            "select count(*) from {table} where tenant_ref = $1"
+        ))
+        .bind(ORG_B)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("{table}: {e}"));
+        assert!(
+            other_tenant > 0,
+            "{table}: tenant B owns no row here, so the comparison below would compare two empty \
+             sets and hold against a table with no policy at all. Grow `populate` until this \
+             table has a row for both tenants — every one of them is reachable through the API or \
+             a handoffd subcommand — rather than removing the table from TENANT_SCOPED_TABLES."
+        );
+
         // The predicate a correct query would carry.
         let with_predicate: Vec<String> = sqlx::query_scalar(&format!(
             "select {id_column}::text from {table} where tenant_ref = $1 order by 1"
@@ -213,56 +469,7 @@ async fn row_level_security_holds_on_every_tenant_scoped_table() {
             without_predicate.len(),
             with_predicate.len()
         );
-
-        // Per table, not once for the whole loop. The comparison above can only fail when the
-        // *other* tenant owns a row in this table: with both sides empty it holds against a table
-        // that has no policy at all. A review found eight of these tables empty in this fixture,
-        // so eight assertions were proving nothing while reading as coverage.
-        let b_rows: i64 = sqlx::query_scalar(&format!(
-            "select count(*) from {table} where tenant_ref = $1"
-        ))
-        .bind(ORG_B)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or_else(|e| panic!("{table}: {e}"));
-        uncovered.push((table, b_rows));
     }
-
-    // A table the fixture never populates for tenant B is *not* covered by the loop above, and
-    // saying so is the point: silence here is what made the weakness invisible. Listing them keeps
-    // the gap in view until the fixture grows rows for them.
-    let empty: Vec<&str> = uncovered
-        .iter()
-        .filter(|(_, rows)| *rows == 0)
-        .map(|(table, _)| *table)
-        .collect();
-    let covered = uncovered.len() - empty.len();
-    assert!(
-        covered > 0,
-        "no table has rows for tenant B, so nothing above proved anything"
-    );
-    if !empty.is_empty() {
-        eprintln!(
-            "row-level security: {covered} of {} tenant-scoped tables carry a tenant-B row and are \
-             genuinely covered. NOT covered, because this fixture creates no tenant-B rows in \
-             them: {}",
-            uncovered.len(),
-            empty.join(", ")
-        );
-    }
-
-    // And the guard against the test passing vacuously: tenant B really does have rows that tenant
-    // A must not have seen above.
-    let b_requests: i64 =
-        sqlx::query_scalar("select count(*) from handoff_requests where tenant_ref = $1")
-            .bind(ORG_B)
-            .fetch_one(&pool)
-            .await
-            .expect("count tenant B's requests");
-    assert!(
-        b_requests > 0,
-        "tenant B has no rows, so the isolation assertions above proved nothing"
-    );
 
     // And the guard against the *role* being the wrong one: a superuser ignores every policy, so a
     // run under one would have passed the loop above without proving anything at all.
@@ -278,6 +485,215 @@ async fn row_level_security_holds_on_every_tenant_scoped_table() {
     );
 
     drop(restricted);
+}
+
+/// The request-scoped paths that run on the pool without naming a tenant.
+///
+/// This list is the finding, not the fixture: each entry is a path that would stop working if the
+/// policy were fail-closed, which is the same thing as saying row-level security is not protecting
+/// it. Today's permissive policy makes that harmless — every one of them carries its own
+/// `WHERE tenant_ref = …`, the primary defence — but they are the paths where a forgotten
+/// predicate would not be caught by anything. Both are in `handoff-store-postgres`:
+/// `remember_idempotent` and `delivery`/`delivery_attempts` issue their statements against the pool
+/// rather than inside `tenant_tx`.
+///
+/// This list may shrink and must not grow. Fixing one of them means removing its line, and adding
+/// a pool query to a request-scoped path means this test fails until somebody writes the line
+/// admitting it.
+const PATHS_THAT_DO_NOT_NAME_THEIR_TENANT: &[&str] = &[
+    "GET /deliveries/{id}",
+    "POST /requests/{id}/answer, with an Idempotency-Key",
+];
+
+/// Tighten the policy on every table except the one authentication must read first.
+const FAIL_CLOSED: &str = "\
+do $$
+declare t text;
+begin
+  for t in select tablename from pg_policies
+           where policyname = 'handoff_tenant_isolation'
+             and tablename <> 'handoff_principals'
+  loop
+    execute format(
+      'alter policy handoff_tenant_isolation on %I using \
+       (tenant_ref = current_setting(''handoff.tenant_ref'', true))', t);
+  end loop;
+end $$;";
+
+/// One pass over the request-scoped surface, recording what each path answered.
+async fn probe(deployment: &Deployment, run: &str) -> Vec<(&'static str, u16)> {
+    let base = &deployment.base;
+    let mut seen: Vec<(&'static str, u16)> = Vec::new();
+
+    let (status, raised) = post(
+        base,
+        "/requests",
+        MACHINE_A,
+        &format!("guc-raise-{run}"),
+        raise_body(&format!("run:guc-{run}"), "Approve the release?"),
+    )
+    .await;
+    seen.push(("POST /requests", status));
+    let request = raised["id"].as_str().unwrap_or_default().to_string();
+    let delivery = raised["deliveries"][0]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    let (status, _) = get(base, &format!("/requests/{request}"), MACHINE_A).await;
+    seen.push(("GET /requests/{id}", status));
+    let (status, _) = get(
+        base,
+        &format!("/requests?waiter_ref=run%3Aguc-{run}"),
+        MACHINE_A,
+    )
+    .await;
+    seen.push(("GET /requests", status));
+    let (status, _) = get(base, &format!("/requests/{request}/deliveries"), MACHINE_A).await;
+    seen.push(("GET /requests/{id}/deliveries", status));
+    let (status, _) = get(base, &format!("/deliveries/{delivery}"), MACHINE_A).await;
+    seen.push(("GET /deliveries/{id}", status));
+
+    // Without a key, §3.1 stores no replay record, so this is the answer path alone.
+    let (status, _) = post_without_key(
+        base,
+        &format!("/requests/{request}/answer"),
+        EDITOR_A,
+        serde_json::json!({"values": {"decision": "approve"}}),
+    )
+    .await;
+    seen.push(("POST /requests/{id}/answer", status));
+    let (status, _) = get(base, &format!("/requests/{request}/receipt"), MACHINE_A).await;
+    seen.push(("GET /requests/{id}/receipt", status));
+    let (status, _) = get(base, "/receipts/chain-head", MACHINE_A).await;
+    seen.push(("GET /receipts/chain-head", status));
+
+    // With a key, on a request of its own, because the record it writes is what differs.
+    let (_, second) = post(
+        base,
+        "/requests",
+        MACHINE_A,
+        &format!("guc-raise-keyed-{run}"),
+        raise_body(&format!("run:guc-keyed-{run}"), "Approve the second one?"),
+    )
+    .await;
+    let keyed = second["id"].as_str().unwrap_or_default().to_string();
+    let (status, _) = post(
+        base,
+        &format!("/requests/{keyed}/answer"),
+        EDITOR_A,
+        &format!("guc-answer-{run}"),
+        serde_json::json!({"values": {"decision": "approve"}}),
+    )
+    .await;
+    seen.push((
+        "POST /requests/{id}/answer, with an Idempotency-Key",
+        status,
+    ));
+
+    seen
+}
+
+/// Which request-scoped paths survive a database that refuses every query with no tenant named.
+///
+/// `SECURITY.md` and `core/dev/README.md` both say that each request-scoped transaction names its
+/// tenant before it reads, so a query that lost its `WHERE tenant_ref = …` still cannot see another
+/// tenant's rows. That sentence is true of the paths it describes and nothing enforced it — the
+/// policy itself cannot, because it passes when no tenant is named, and it has to: **authentication
+/// resolves a credential to a tenant** (§4.1), so the query that discovers the tenant is by
+/// construction unable to name it. A fail-closed policy on `handoff_principals` makes every
+/// authenticated request answer `401`, which is why that one table is exempted below rather than
+/// tightened.
+///
+/// So this asserts what is actually assertable: with the other nineteen tables fail-closed, every
+/// request-scoped path works except the ones named in
+/// [`PATHS_THAT_DO_NOT_NAME_THEIR_TENANT`], and those two fail.
+#[tokio::test]
+async fn every_request_scoped_path_names_its_tenant() {
+    let deployment = Deployment::start_as_least_privilege("guc").await;
+
+    // Otherwise the tightening below is invisible to the server and every probe passes.
+    assert!(
+        !deployment.bypasses_row_level_security(),
+        "handoffd is connected as a role that ignores every policy, so tightening one proves \
+         nothing"
+    );
+
+    // The anti-vacuity guard, one per probe rather than one per run: a path that is already broken
+    // would otherwise read as a path that failed because of the tightening.
+    let permissive = probe(&deployment, "permissive").await;
+    for (path, status) in &permissive {
+        assert!(
+            (200..300).contains(status),
+            "{path} answered {status} before the policy was tightened, so its behaviour after \
+             tightening measures nothing"
+        );
+    }
+
+    deployment.superuser_sql(FAIL_CLOSED);
+    let tightened: usize = deployment
+        .superuser_sql(
+            "select count(*) from pg_policies where policyname = 'handoff_tenant_isolation' \
+             and qual not ilike '%coalesce%'",
+        )
+        .parse()
+        .expect("a count");
+    assert_eq!(
+        tightened,
+        TENANT_SCOPED_TABLES.len() - 1,
+        "the tightening did not reach every table it was supposed to"
+    );
+
+    // And that it bites the role `handoffd` actually connects as. Rows exist; a connection that
+    // has named no tenant must now see none of them.
+    let as_handoffd = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&deployment.url)
+        .await
+        .expect("connect as the role handoffd runs as");
+    let unnamed: i64 = sqlx::query_scalar("select count(*) from handoff_requests")
+        .fetch_one(&as_handoffd)
+        .await
+        .expect("count with no tenant named");
+    let total: i64 = deployment
+        .superuser_sql("select count(*) from handoff_requests")
+        .parse()
+        .expect("a count");
+    assert!(
+        total > 0,
+        "no requests exist, so the probe below proves nothing"
+    );
+    assert_eq!(
+        unnamed, 0,
+        "the tightened policy is not refusing an unnamed connection, so nothing below is a test \
+         of naming the tenant"
+    );
+    drop(as_handoffd);
+
+    let fail_closed = probe(&deployment, "failclosed").await;
+    let mut surprises: Vec<String> = Vec::new();
+    for ((path, status), (_, before)) in fail_closed.iter().zip(&permissive) {
+        let should_work = !PATHS_THAT_DO_NOT_NAME_THEIR_TENANT.contains(path);
+        let worked = (200..300).contains(status);
+        if worked != should_work {
+            surprises.push(format!(
+                "{path}: {before} permissive, {status} fail-closed — expected it to {}",
+                if should_work {
+                    "keep working, because it names its tenant"
+                } else {
+                    "fail, because PATHS_THAT_DO_NOT_NAME_THEIR_TENANT says it does not"
+                }
+            ));
+        }
+    }
+    assert!(
+        surprises.is_empty(),
+        "row-level security protects a path only if that path names its tenant. A path that \
+         started failing has grown a query on the pool and must be moved inside `tenant_tx`; a \
+         path that stopped failing has been fixed and must be removed from \
+         PATHS_THAT_DO_NOT_NAME_THEIR_TENANT.\n  {}",
+        surprises.join("\n  ")
+    );
 }
 
 /// A database role with no more than `handoffd` needs, created for the life of one test.

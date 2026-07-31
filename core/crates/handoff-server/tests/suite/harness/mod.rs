@@ -22,6 +22,21 @@ fn database_url(name: &str) -> String {
     format!("{base}/{name}")
 }
 
+/// The same host and port as [`admin_url`], as some other role.
+fn role_url(name: &str, role: &str) -> String {
+    let admin = admin_url();
+    let (scheme, rest) = admin.split_once("://").expect("an admin URL has a scheme");
+    let hosted = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+    let (host, _) = hosted
+        .rsplit_once('/')
+        .expect("an admin URL names a database");
+    format!("{scheme}://{role}:{LEAST_PRIVILEGE_PASSWORD}@{host}/{name}")
+}
+
+/// The password every disposable role in this suite is created with. Not a secret: these roles
+/// exist for the length of one test against a local development cluster.
+pub const LEAST_PRIVILEGE_PASSWORD: &str = "least-privilege";
+
 /// A running deployment.
 pub struct Deployment {
     /// Name of the disposable database.
@@ -35,6 +50,9 @@ pub struct Deployment {
     port: u16,
     server: Option<Child>,
     env: Vec<(String, String)>,
+    /// The role `handoffd` connects as, when it is not the development superuser. Roles are
+    /// cluster-wide, so dropping the database does not take one with it.
+    role: Option<String>,
 }
 
 /// The machine credential for tenant A.
@@ -75,6 +93,26 @@ impl Deployment {
     /// Callback signing is the case this exists for: `HANDOFF_CALLBACK_SECRETS` is deployment
     /// configuration, and a test about rotation needs two of them, which no default can supply.
     pub async fn start_with(label: &str, env: &[(&str, &str)]) -> Deployment {
+        Self::start_inner(label, env, false).await
+    }
+
+    /// A deployment whose `handoffd` connects as a role that **cannot bypass row-level security**.
+    ///
+    /// [`start`](Self::start) runs the server as the development superuser, which ignores every
+    /// policy — so a test about what the policies do to `handoffd`'s own queries would pass against
+    /// a database that had none. This one hands the database to a fresh login role and points
+    /// `handoffd` at it.
+    ///
+    /// The role **owns** its tables rather than merely holding `SELECT, INSERT, UPDATE, DELETE` on
+    /// them, and that is not a convenience: `handoffd` applies its migrations on every start, so a
+    /// role that cannot issue DDL cannot start the process at all. Ownership does not weaken the
+    /// test, because the policies are installed with `force row level security`, which keeps the
+    /// owner subject to them — and `bypasses_row_level_security` asserts exactly that.
+    pub async fn start_as_least_privilege(label: &str) -> Deployment {
+        Self::start_inner(label, &[], true).await
+    }
+
+    async fn start_inner(label: &str, env: &[(&str, &str)], least_privilege: bool) -> Deployment {
         let database = format!(
             "handoff_test_{label}_{}",
             std::time::SystemTime::now()
@@ -82,13 +120,28 @@ impl Deployment {
                 .map(|d| d.as_millis())
                 .unwrap_or_default()
         );
-        let url = database_url(&database);
 
         psql(
             &admin_url(),
             &format!("drop database if exists \"{database}\" with (force)"),
         );
-        psql(&admin_url(), &format!("create database \"{database}\""));
+        let (url, role) = if least_privilege {
+            // Unique per run, so two tests in parallel do not fight over one role.
+            let role = format!("{database}_role");
+            psql(&admin_url(), &format!("drop role if exists \"{role}\""));
+            psql(
+                &admin_url(),
+                &format!("create role \"{role}\" login password '{LEAST_PRIVILEGE_PASSWORD}'"),
+            );
+            psql(
+                &admin_url(),
+                &format!("create database \"{database}\" owner \"{role}\""),
+            );
+            (role_url(&database, &role), Some(role))
+        } else {
+            psql(&admin_url(), &format!("create database \"{database}\""));
+            (database_url(&database), None)
+        };
 
         let bootstrap = std::env::temp_dir().join(format!("{database}.json"));
         let mut file = std::fs::File::create(&bootstrap).expect("a bootstrap file");
@@ -119,6 +172,7 @@ impl Deployment {
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
+            role,
         };
         deployment.spawn().await;
         deployment
@@ -216,12 +270,70 @@ impl Deployment {
     }
 
     /// A connection to the deployment's database, for assertions below the API.
+    ///
+    /// As the development superuser, which is what an assertion wants: it reads the rows that
+    /// exist, rather than the rows some policy is willing to show.
     pub async fn pool(&self) -> sqlx::PgPool {
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
-            .connect(&self.url)
+            .connect(&database_url(&self.database))
             .await
             .expect("connect to the test database")
+    }
+
+    /// Run one statement against this deployment's database as the superuser, returning stdout.
+    ///
+    /// Panics rather than warning when `psql` fails. Setting up a condition and not noticing that
+    /// the setup did not happen is how a test comes to measure nothing.
+    pub fn superuser_sql(&self, sql: &str) -> String {
+        let output = Command::new("psql")
+            .args([&database_url(&self.database), "-q", "-tA", "-c", sql])
+            .output()
+            .expect("psql is available");
+        assert!(
+            output.status.success(),
+            "psql: {sql}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Run a `handoffd` maintenance subcommand against this deployment's database.
+    ///
+    /// Two of these subcommands are the only writer their table has: the protocol deliberately
+    /// defines no inbound channel-adapter surface (§4.7) and no endpoint for recording a runtime
+    /// observation (§9.7), so `inject-channel-message` and `observe-page-change` are how those rows
+    /// come to exist at all. Returning stdout rather than a status keeps a caller able to assert on
+    /// what the command *said*.
+    pub fn run_handoffd(&self, args: &[&str]) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_handoffd"))
+            .args(args)
+            .env("HANDOFF_DATABASE_URL", &self.url)
+            .env("HANDOFF_MAX_CONNECTIONS", "2")
+            .output()
+            .expect("handoffd runs");
+        assert!(
+            output.status.success(),
+            "handoffd {}\n{}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Whether the role `handoffd` connects as ignores every row-level-security policy.
+    ///
+    /// A test that tightens a policy and then watches the server's behaviour proves nothing unless
+    /// this is false, because a superuser never sees a policy at all.
+    pub fn bypasses_row_level_security(&self) -> bool {
+        self.superuser_sql(&format!(
+            "select bool_or(rolsuper or rolbypassrls) from pg_roles where rolname = {}",
+            match &self.role {
+                Some(role) => format!("'{role}'"),
+                None => "current_user".to_string(),
+            }
+        )) == "t"
     }
 }
 
@@ -236,6 +348,12 @@ impl Drop for Deployment {
             &admin_url(),
             &format!("drop database if exists \"{}\" with (force)", self.database),
         );
+        // Roles are cluster-wide, so the database going away does not take one with it — and a
+        // cleanup that only ran on the happy path would leave one behind on every red run, which
+        // is when tests are run most.
+        if let Some(role) = &self.role {
+            psql(&admin_url(), &format!("drop role if exists \"{role}\""));
+        }
     }
 }
 
@@ -261,6 +379,28 @@ pub async fn post(
         .post(format!("{base}{path}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Idempotency-Key", key)
+        .json(&body)
+        .send()
+        .await
+        .expect("the server answers");
+    let status = response.status().as_u16();
+    let json = response.json().await.unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// POST a JSON body as a principal, with no `Idempotency-Key`.
+///
+/// §3.1 makes the key caller-supplied, so "no key" is a real shape of the API rather than a test
+/// shortcut — and it is a different code path, because a call without one stores no replay record.
+pub async fn post_without_key(
+    base: &str,
+    path: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let response = reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&body)
         .send()
         .await

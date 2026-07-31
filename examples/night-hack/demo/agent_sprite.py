@@ -52,7 +52,9 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff.omegas.dev").rstrip("/")
+# A placeholder host that resolves nowhere, matching RUNBOOK.md's redaction. Paging here has
+# always been opt-in; the URL default had not caught up.
+HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff.example.invalid").rstrip("/")
 WALL_URL = os.environ.get("WALL_URL") or f"{HANDOFF_URL}/demo/wall"
 SPRITES_API = os.environ.get("SPRITES_API_BASE_URL", "https://api.sprites.dev").rstrip("/")
 SPRITE_NAME = os.environ.get("SPRITE_NAME", "omega-browser-019f3ad1-019f3ad1")

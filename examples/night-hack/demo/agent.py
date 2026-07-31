@@ -23,7 +23,9 @@ Three modes, cheapest-first (all three call the SAME `human.clear_wall`):
                `browser-use` AND `boto3` importable; degrades with a clear message.
 
 Env:
-  HANDOFF_URL              default https://handoff.omegas.dev  (the Handoff API + wall host)
+  HANDOFF_URL              REQUIRED in practice. Defaults to a placeholder host that resolves
+                           nowhere, so running this with no arguments cannot reach a deployment
+                           and cannot ring anyone. Point it at your own.
   WALL_URL                 override the wall page URL entirely
   BEDROCK_API_KEY          bearer key for Bedrock (also accepted as AWS_BEARER_TOKEN_BEDROCK)
   BEDROCK_REGION           default us-east-1
@@ -50,7 +52,11 @@ import urllib.request
 # without installing anything.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff.omegas.dev").rstrip("/")
+# A placeholder, matching the redaction in RUNBOOK.md, and for the same reason: the runbook's
+# paging example was redacted because a working request against a live unauthenticated deployment
+# is a phone call handed to the first reader — and a default that pointed at the same host made
+# `python3 demo/agent.py --scripted` that request with one fewer argument.
+HANDOFF_URL = os.environ.get("HANDOFF_URL", "https://handoff.example.invalid").rstrip("/")
 WALL_URL = os.environ.get("WALL_URL") or f"{HANDOFF_URL}/demo/wall"
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-east-1")
 BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
@@ -124,8 +130,10 @@ def hit_wall(html: str) -> bool:
 
 # ------------------------------------------------------------------------------- the wall
 
-# Set by --no-page: create the handoff without ringing anyone's phone (page:false).
-PAGE_PHONE = True
+# Set by --page: create the handoff and ring the on-call human's phone. Off unless asked for,
+# which is the same default `agent_sprite.py` has always had. Ringing a real person is the one
+# thing in this directory with a cost outside the process, so it is opt-in.
+PAGE_PHONE = False
 
 
 def page_a_human(extra_reason: str = ""):
@@ -158,7 +166,7 @@ def page_a_human(extra_reason: str = ""):
         timeout_s=int(os.environ.get("WALL_TIMEOUT_S", "600")),
         page=PAGE_PHONE,
     )
-    log(f"handoff {h.id} created ({'phone paging ON' if PAGE_PHONE else 'phone paging OFF (--no-page)'})")
+    log(f"handoff {h.id} created ({'phone paging ON (--page)' if PAGE_PHONE else 'phone paging off'})")
     log(f"a human is being asked here: {h.page_url}")
 
     # Prove the deliverable is out of reach with THIS handoff id while it is still pending.
@@ -510,15 +518,19 @@ def main() -> int:
     mode.add_argument("--claude", action="store_true", help="Claude brain via Bedrock Converse, no browser")
     mode.add_argument("--browser-use", action="store_true", help="browser-use + Claude on Bedrock")
     ap.add_argument("--selftest", action="store_true", help="offline parser check, no network")
-    ap.add_argument("--no-page", action="store_true",
-                    help="create the handoff with page:false — no phone rings (for testing)")
+    paging = ap.add_mutually_exclusive_group()
+    paging.add_argument("--no-page", dest="page", action="store_false",
+                        help="create the handoff with page:false — no phone rings (default)")
+    paging.add_argument("--page", dest="page", action="store_true",
+                        help="ring the on-call human's real phone")
+    ap.set_defaults(page=False)
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
 
     global PAGE_PHONE
-    PAGE_PHONE = not args.no_page
+    PAGE_PHONE = args.page
     if args.claude:
         return run_claude()
     if args.browser_use:

@@ -65,16 +65,35 @@ Two properties this project tests are **inert unless the deployment is configure
 are stated here because a guarantee that holds only under conditions nobody is asked to create is
 not a guarantee.
 
-**Run `handoffd` as a role that cannot bypass row-level security.** Every `handoff_*` table has RLS
-enabled and forced, and each request-scoped transaction names its tenant before reading, so a query
-that lost its `WHERE tenant_ref = …` still cannot see another tenant's rows. **A superuser, or any
-role with `BYPASSRLS`, ignores every policy** — and the development harness in `core/dev/` defaults
-to exactly such a role, because it also creates and drops databases. Grant the service role
-`SELECT, INSERT, UPDATE, DELETE` on its own tables and nothing more.
+**Run `handoffd` as a role that cannot bypass row-level security.** Twenty of the twenty-one
+`handoff_*` tables have RLS enabled and forced — every one that carries a `tenant_ref`; the
+exception is `handoff_migrations`, which is a log of applied migration numbers and holds no
+tenant's data. **A superuser, or any role with `BYPASSRLS`, ignores every policy** — and the
+development harness in `core/dev/` defaults to exactly such a role, because it also creates and
+drops databases.
 
-The tenant predicate in every query is the primary defence and is present regardless. RLS is the
-layer that catches the day somebody forgets one, so losing it costs defence-in-depth rather than
-isolation — but it is exactly the layer you want on the day it matters.
+Give the service role **ownership of its own schema, and neither `SUPERUSER` nor `BYPASSRLS`** —
+in practice, `CREATE DATABASE handoff OWNER handoff_app`. Ownership is not a relaxation: the
+policies are installed with `FORCE ROW LEVEL SECURITY`, which keeps the owner subject to them. It
+is a requirement, because `handoffd` applies its migrations on every start, so a role holding only
+`SELECT, INSERT, UPDATE, DELETE` cannot start the process at all — it fails on the first DDL
+statement with `permission denied for schema public`. An earlier revision of this file asked for
+exactly that grant set; it was never run, and it does not work.
+
+**What the policy does and does not do.** The predicate is
+`COALESCE(current_setting('handoff.tenant_ref', true), '') = '' OR tenant_ref = current_setting(…)`:
+it restricts to the named tenant, and it **passes when no tenant has been named**. That second half
+is deliberate and cannot be removed. `handoffd` authenticates by resolving a credential to a
+tenant (§4.1), so the query that discovers the tenant is by construction unable to name it; a
+fail-closed policy on `handoff_principals` makes every authenticated request answer `401`. The
+cross-tenant sweeps that settle expired requests are in the same position.
+
+So RLS catches **a query that named its tenant and then lost its `WHERE tenant_ref = …`**. It does
+not catch a query that never named a tenant at all. Nearly every request-scoped path names one —
+`every_request_scoped_path_names_its_tenant` measures this by tightening the policy to fail closed
+and driving the API — and the exceptions it currently pins are `GET /deliveries/{id}` and the
+idempotency record written by a keyed `POST`. Both carry their own tenant predicate, which is the
+primary defence and is present regardless; what they lack is the second line under it.
 
 **Export the receipt chain head somewhere you do not control.** Height contiguity detects alteration
 anywhere in a tenant's chain and excision from the middle. It cannot detect **truncation of the

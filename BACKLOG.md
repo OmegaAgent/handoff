@@ -4,15 +4,34 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
 
 ## Stated gaps — things that do not exist, said plainly
 
-- **Row-level security is proven on 11 of 19 tenant-scoped tables.** The test asserts, per table,
-  that a query without a tenant predicate returns exactly the caller's rows — but that comparison
-  can only fail when the *other* tenant owns a row in that table, and this fixture creates none in
-  `handoff_delivery_attempts`, `handoff_callback_attempts`, `handoff_redemptions`, `handoff_grants`,
-  `handoff_grant_sessions`, `handoff_sinks`, `handoff_channel_messages` or `handoff_observations`.
-  The test now prints exactly which tables are uncovered instead of reading as full coverage; the
-  fix is a fixture that exercises a second tenant through a grant, a sink, a callback and an
-  observation. Note RLS is the second line of defence — the tenant predicate in every query is the
-  first, and it is present on all 19.
+- ~~**Row-level security is proven on 11 of 19 tenant-scoped tables.**~~ **Closed.** Proven on
+  **20 of 20**. The population was 19 because `handoff_request_dispositions` was missing from the
+  test's list — neither proven nor named as unproven — and eight of the rest held rows for one
+  tenant only, so their per-table comparison was between two empty sets. Both tenants now run
+  through one `populate` function, which is what keeps them symmetric: an asymmetric fixture is how
+  the eight holes appeared. The "which tables are uncovered" `eprintln!` is now a per-table
+  assertion, because `cargo test` captures stdout and never printed it on a passing run, which is
+  exactly the case where it mattered. A second assertion compares the list against `pg_policies`, so a
+  table that gains a policy without gaining an entry fails rather than being silently exempt.
+
+- **Row-level security does not protect a query that never named a tenant, and two request-scoped
+  paths do not name one.** The policy passes when `handoff.tenant_ref` is unset, and that half
+  cannot be removed: authentication resolves a credential to a tenant (§4.1), so the query that
+  discovers the tenant cannot name it, and a fail-closed policy on `handoff_principals` makes every
+  request answer `401` — measured, not reasoned. With the other nineteen tables fail-closed,
+  `every_request_scoped_path_names_its_tenant` finds two paths that stop working: `GET
+  /deliveries/{id}` and the idempotency record a keyed `POST` writes. Both are in
+  `handoff-store-postgres`, both issue their statements against the pool rather than inside
+  `tenant_tx`, and both carry their own `WHERE tenant_ref = …` — so this is a missing second line
+  of defence rather than a leak. Closing it means moving `remember_idempotent`, `delivery` and
+  `delivery_attempts` into `tenant_tx`; the test's list may shrink and cannot grow.
+
+  The remaining step after that is a **deliberate cross-tenant marker** — a distinct GUC value the
+  sweeps and the delivery claim set on purpose — so the policy can deny by default and the paths
+  that genuinely have no tenant say so rather than being indistinguishable from a mistake. That is
+  a store-wide change: every statement issued on the pool has to move inside a transaction that
+  names something, because a session-level setting on a pooled connection leaks to whoever gets
+  that connection next.
 
 An empty directory named after a package is worse than an absent one, because it implies a
 deliverable. These are the things a reader might reasonably expect to find and will not.

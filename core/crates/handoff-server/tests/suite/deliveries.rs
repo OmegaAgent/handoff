@@ -11,26 +11,7 @@
 //! be able to assert it: accepting it here would let a caller write "they decided" onto a delivery
 //! with no decision behind it.
 
-use crate::harness::{get, post, raise_body, Deployment, MACHINE_A};
-
-/// POST that returns the raw status and body without an idempotency key.
-async fn post_plain(
-    base: &str,
-    path: &str,
-    token: &str,
-    body: serde_json::Value,
-) -> (u16, serde_json::Value) {
-    let response = reqwest::Client::new()
-        .post(format!("{base}{path}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&body)
-        .send()
-        .await
-        .expect("the server answers");
-    let status = response.status().as_u16();
-    let json = response.json().await.unwrap_or(serde_json::Value::Null);
-    (status, json)
-}
+use crate::harness::{get, post, post_without_key, raise_body, Deployment, MACHINE_A};
 
 #[tokio::test]
 async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() {
@@ -69,7 +50,7 @@ async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() 
     assert!(!delivery.is_empty(), "no delivery ever reached dispatched");
 
     // ---- `seen`: the person opened the surface and authenticated. A real advance.
-    let (status, graded) = post_plain(
+    let (status, graded) = post_without_key(
         &deployment.base,
         &format!("/deliveries/{delivery}/grade"),
         MACHINE_A,
@@ -83,7 +64,7 @@ async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() 
     // ---- Reporting it again changes nothing and is not an error. Delivery is at-least-once and
     // consumers dedupe (§16 rule 10), so a provider webhook resends; answering 4xx to a duplicate
     // teaches it to retry forever.
-    let (status, repeated) = post_plain(
+    let (status, repeated) = post_without_key(
         &deployment.base,
         &format!("/deliveries/{delivery}/grade"),
         MACHINE_A,
@@ -100,7 +81,7 @@ async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() 
     // ---- A grade already behind us is the same case, not a conflict. An SES delivery receipt
     // routinely lands after the person has already opened the surface, and the delivery has
     // genuinely reached at least `delivered` — so this is true, idempotent, and not a rejection.
-    let (status, late) = post_plain(
+    let (status, late) = post_without_key(
         &deployment.base,
         &format!("/deliveries/{delivery}/grade"),
         MACHINE_A,
@@ -126,7 +107,7 @@ async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() 
             "`dispatched` is the send's own claim, already recorded by the attempt that made it",
         ),
     ] {
-        let (status, refused) = post_plain(
+        let (status, refused) = post_without_key(
             &deployment.base,
             &format!("/deliveries/{delivery}/grade"),
             MACHINE_A,
@@ -206,7 +187,7 @@ async fn a_grade_report_replays_under_an_idempotency_key() {
 #[tokio::test]
 async fn a_delivery_in_another_tenant_is_indistinguishable_from_one_that_never_existed() {
     let deployment = Deployment::start("grades-iso").await;
-    let (status, refused) = post_plain(
+    let (status, refused) = post_without_key(
         &deployment.base,
         "/deliveries/dlv_01K3MB2R6C8ZC4YRXB2N6VD9FT/grade",
         crate::harness::MACHINE_B,

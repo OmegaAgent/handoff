@@ -623,6 +623,80 @@ mod tests {
         }
     }
 
+    /// Every Rust source under `core/crates/*/src/`, as `(path relative to core/crates, text)`.
+    ///
+    /// Read from disk rather than embedded, so a file that starts querying a table is scanned
+    /// without anybody remembering to add it. The caller is responsible for noticing when the walk
+    /// has found nothing: a guard that scanned no files passes.
+    fn workspace_sources() -> Vec<(String, String)> {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("this crate lives in core/crates");
+        let mut directories: Vec<std::path::PathBuf> = std::fs::read_dir(crates)
+            .expect("read core/crates")
+            .flatten()
+            .map(|entry| entry.path().join("src"))
+            .filter(|path| path.is_dir())
+            .collect();
+        let mut sources = Vec::new();
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .expect("read a src directory")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().is_some_and(|kind| kind == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read a source file");
+                    let name = path
+                        .strip_prefix(crates)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    sources.push((name, text));
+                }
+            }
+        }
+        sources
+    }
+
+    /// One line of lower-case text with every run of whitespace, and every line continuation,
+    /// collapsed to a single space.
+    ///
+    /// This is the whole point of the rewrite below. SQL in this codebase is written across lines
+    /// with a backslash continuation, so a per-line scan sees `decision` and
+    /// `from handoff_receipts` as two unrelated lines. Line comments go first, because prose sits
+    /// directly above these queries and a comment discussing a decision is not a query reading one.
+    /// Non-ASCII collapses to a space so the byte offsets below can never split a character.
+    fn flatten(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut spaced = true;
+        for line in source.lines() {
+            for ch in line.split("//").next().unwrap_or_default().chars() {
+                let ch = if ch.is_ascii() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    ' '
+                };
+                if ch.is_whitespace() || ch == '\\' {
+                    if !spaced {
+                        out.push(' ');
+                        spaced = true;
+                    }
+                } else {
+                    out.push(ch);
+                    spaced = false;
+                }
+            }
+            if !spaced {
+                out.push(' ');
+                spaced = true;
+            }
+        }
+        out
+    }
+
     #[test]
     fn the_receipts_decision_column_is_never_read() {
         // §9.4 covers the receipt *document*, which is `body`. `handoff_receipts.decision` exists
@@ -630,17 +704,60 @@ mod tests {
         // query reads receipt content from it, it becomes a second source of truth the chain does
         // not cover — and with the triggers dropped it can be altered without invalidating the
         // head. A comment saying "write-only" is a wish; this is the check.
-        let store = include_str!("store.rs");
-        for line in store.lines() {
-            let lowered = line.to_lowercase();
-            if lowered.contains("from handoff_receipts") && lowered.contains("decision") {
-                panic!(
-                    "a query reads `decision` from handoff_receipts, which is outside the hash \
-                     chain (§9.4). Read the receipt from `body`.\n  {}",
-                    line.trim()
-                );
+        //
+        // The first version of this guard got two things wrong, and a reviewer found both rather
+        // than the guard finding them. It read `store.rs` alone, while three files in this
+        // workspace query the table. And it matched a line at a time, which the codebase's own
+        // formatting evades: the same query with `decision` ending one line and
+        // `from handoff_receipts` starting the next never matched.
+        //
+        // Around each mention of the table, this reads a window of the flattened text rather than
+        // parsing SQL. That is deliberately approximate: it does not know where a statement begins
+        // or ends, so a `decision` inside another string literal within the window would be
+        // reported as an offence. Erring that way is the right error for a guard.
+        const WINDOW: usize = 120;
+        let mut scanned: Vec<String> = Vec::new();
+        let mut offences: Vec<String> = Vec::new();
+        for (path, source) in workspace_sources() {
+            // A test module is not a query the server runs — and this test's own source holds both
+            // halves of what it is looking for, so scanning it would make the guard report itself.
+            let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+            if !production.contains("handoff_receipts") {
+                continue;
+            }
+            scanned.push(path.clone());
+            let flat = flatten(production);
+            for (at, _) in flat.match_indices("from handoff_receipts") {
+                let window = &flat[at.saturating_sub(WINDOW)..(at + WINDOW).min(flat.len())];
+                if window.contains("decision") {
+                    offences.push(format!("{path}\n    …{}…", window.trim()));
+                }
             }
         }
+
+        // The anti-vacuity guard, and the reason it names files: this is not the scan list — the
+        // walk above reads every source in the workspace — it is the proof that the walk reached
+        // the tree at all. `grep -rln handoff_receipts core/crates/*/src/` returns exactly these
+        // three, and a walk that returns fewer has found nothing and would pass silently.
+        for expected in [
+            "handoff-store-postgres/src/store.rs",
+            "handoff-store-postgres/src/migrations.rs",
+            "handoff-server/src/cli.rs",
+        ] {
+            assert!(
+                scanned.iter().any(|path| path == expected),
+                "the source walk did not reach {expected}, so it scanned {} file(s) and this \
+                 guard proves nothing. Scanned: {scanned:?}",
+                scanned.len()
+            );
+        }
+
+        assert!(
+            offences.is_empty(),
+            "a query reads `decision` from handoff_receipts, which is outside the hash chain \
+             (§9.4). Read the receipt from `body`.\n  {}",
+            offences.join("\n  ")
+        );
     }
 
     #[test]

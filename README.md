@@ -38,7 +38,10 @@ relationships. None of that ships in a container, and this repository will not p
 
 ## Status
 
-**Pre-release. The protocol runs; it has not been published, and there is no hosted service.**
+**Pre-release. The protocol runs; it has not been published, and there is no hosted service running
+this reference implementation.** (`examples/night-hack/` is preserved prior art, not this
+implementation, and `SECURITY.md` says what is known and not known about where it has been
+deployed.)
 
 The reference server passes all 25 Level 1 conformance cases. It does not pass C-17, the
 optional Level 2 continuation case, and deliberately cannot — see below. Read `docs/hostile-review.md` before

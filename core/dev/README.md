@@ -55,15 +55,29 @@ nothing when unset.
 
 ## Row-level security needs a role that cannot bypass it
 
-Every `handoff_*` table has RLS enabled and forced, and each request-scoped transaction names its
-tenant before it reads anything — so a query that lost its `WHERE tenant_ref = …` still cannot see
-another tenant's rows. **A superuser, or any role with `BYPASSRLS`, ignores every policy**, which
-leaves this defence inert while every test still passes. Run `handoffd` as a least-privilege role
-with `SELECT, INSERT, UPDATE, DELETE` on its own tables and nothing more.
+Twenty of the twenty-one `handoff_*` tables have RLS enabled and forced — every one that carries a
+`tenant_ref`. The exception is `handoff_migrations`, which holds applied migration numbers and no
+tenant's data. **A superuser, or any role with `BYPASSRLS`, ignores every policy**, which leaves
+this defence inert while every test still passes.
 
-The integration test `row_level_security_holds_on_every_tenant_scoped_table` creates such a role,
-asserts the property per table on **length and identity**, and then asserts that the role it used
-does not bypass RLS — so the test cannot pass vacuously the way a superuser run would.
+Run `handoffd` as a role that **owns its own schema and has neither `SUPERUSER` nor `BYPASSRLS`**:
+`CREATE DATABASE handoff OWNER handoff_app`. `FORCE ROW LEVEL SECURITY` keeps the owner subject to
+the policies, and ownership is needed rather than optional, because `handoffd` applies migrations
+on every start — a role with only `SELECT, INSERT, UPDATE, DELETE` cannot start it, and fails with
+`permission denied for schema public`.
+
+The policy passes when **no** tenant has been named, and that half cannot be removed:
+authentication resolves a credential to a tenant (§4.1), so the query that discovers the tenant is
+unable to name it, and the cross-tenant sweeps have no tenant to name either. RLS therefore catches
+a query that named its tenant and then lost its `WHERE tenant_ref = …`, and does not catch one that
+named no tenant at all.
+
+Two integration tests hold this down, and both refuse to pass vacuously:
+
+| Test | What it asserts |
+|---|---|
+| `row_level_security_holds_on_every_tenant_scoped_table` | Per table, on **length and identity**, that a query without the predicate returns exactly the caller's rows. It first asserts that the *other* tenant owns a row in that table, because otherwise the comparison is between two empty sets; and that the role it used does not bypass RLS. |
+| `every_request_scoped_path_names_its_tenant` | Tightens the policy to fail closed on all but `handoff_principals` and drives the API, so "each request-scoped transaction names its tenant" is measured rather than asserted. The paths that do not are listed in the test, and the list may shrink but not grow. |
 
 The tenant predicate in every query is the primary defence; RLS is the one that catches the day
 somebody forgets it.
