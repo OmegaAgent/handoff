@@ -95,6 +95,21 @@ fn split_accessors(segment: &str) -> (&str, Vec<Accessor>) {
     (name, accessors)
 }
 
+/// The container a path addresses a member of, or `None` when the path names a top-level member.
+///
+/// `data[0].expires_at` → `data[0]`; `data[0]` → `data`; `data[].url` → `data[]`; `receipt` → the
+/// whole document, which always resolves.
+fn parent_of(path: &str) -> Option<&str> {
+    let path = path.trim().trim_start_matches("$.").trim_start_matches('$');
+    let cut = if path.ends_with(']') {
+        path.rfind('[')
+    } else {
+        path.rfind('.')
+    }?;
+    let parent = &path[..cut];
+    (!parent.is_empty()).then_some(parent)
+}
+
 fn join(prefix: &str, name: &str) -> String {
     match (prefix.is_empty(), name.is_empty()) {
         (_, true) => prefix.to_string(),
@@ -134,15 +149,28 @@ pub fn check(
     let outcome = match &matcher.op {
         Op::Exists(want) => {
             let got = !hits.is_empty();
-            if got == *want {
-                Ok(())
-            } else if *want {
-                Err(format!("`{path}` is absent, expected it to be present"))
-            } else {
+            if got && !*want {
                 Err(format!(
                     "`{path}` is present ({}), expected it to be absent",
                     brief(&hits[0].value)
                 ))
+            } else if !got && *want {
+                Err(format!("`{path}` is absent, expected it to be present"))
+            } else if !*want {
+                // `exists: false` is satisfied by a path that resolves to nothing, which is also
+                // what a typo resolves to. The container has to be there for the absence of a
+                // member to be a fact about the Server rather than a fact about the case file —
+                // the same trap `none_equal` had, and it is worth closing before it goes live.
+                match parent_of(&matcher.path) {
+                    Some(parent) if resolve(doc, parent).is_empty() => Err(format!(
+                        "`{path}` is absent, but so is `{parent}` — nothing under a container that \
+                         does not resolve is absent for the reason the case means. Assert the \
+                         container first, or correct the path."
+                    )),
+                    _ => Ok(()),
+                }
+            } else {
+                Ok(())
             }
         }
         Op::IsNull(want) => {
@@ -462,6 +490,51 @@ mod tests {
         // And it still passes where the path resolves and the forbidden value is absent.
         let populated = serde_json::json!({"data": [{"type": "cancelled"}]});
         assert!(check(&populated, &none, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn exists_false_refuses_a_path_whose_container_is_not_there() {
+        // The same trap as `none_equal`: a typo resolves to nothing, and "nothing" satisfies
+        // "must be absent". Every use of `exists: false` in the case set today has a sibling
+        // matcher proving the container resolves, so this was latent — which is exactly what was
+        // said about `none_equal` in the first review, before it went live in two cases.
+        let doc = serde_json::json!({"data": [{"handle": "hg_1"}]});
+        let typo = Matcher {
+            path: "dtaa[0].url".into(),
+            op: Op::Exists(false),
+            because: None,
+        };
+        let err = check(&doc, &typo, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("but so is `dtaa[0]`"), "{err}");
+
+        // The real assertion, with its container present, still passes.
+        let real = Matcher {
+            path: "data[0].url".into(),
+            op: Op::Exists(false),
+            because: None,
+        };
+        assert!(check(&doc, &real, &BTreeMap::new()).is_ok());
+
+        // A top-level member has the whole document as its container, which always resolves.
+        let top = Matcher {
+            path: "transport".into(),
+            op: Op::Exists(false),
+            because: None,
+        };
+        assert!(check(&doc, &top, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn a_paths_container_is_the_thing_it_is_a_member_of() {
+        assert_eq!(parent_of("data[0].expires_at"), Some("data[0]"));
+        assert_eq!(parent_of("data[0]"), Some("data"));
+        assert_eq!(parent_of("data[].url"), Some("data[]"));
+        assert_eq!(
+            parent_of("requires.capabilities[0].url"),
+            Some("requires.capabilities[0]")
+        );
+        assert_eq!(parent_of("receipt"), None);
+        assert_eq!(parent_of(""), None);
     }
 
     #[test]

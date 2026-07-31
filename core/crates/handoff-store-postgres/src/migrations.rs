@@ -254,6 +254,11 @@ create table if not exists handoff_receipts (
   -- The decided values, as their own column. Held separately from `body` so that the storage-level
   -- immutability probe of C-15 has a real column to aim an `UPDATE` at: a probe that fails because
   -- the column does not exist proves nothing about the trigger.
+  --
+  -- WRITE-ONLY, and it must stay that way. Nothing selects it — the receipt is always read from
+  -- `body`, which is what the chain digest covers. If a future query reads receipt content from
+  -- here it becomes a second source of truth outside the chain, and §9.4's guarantee stops holding:
+  -- with the triggers dropped, this column can be altered without invalidating the head.
   decision     jsonb       not null default '{}'::jsonb,
   body         jsonb       not null,
   created_at   timestamptz not null default now(),
@@ -615,6 +620,26 @@ mod tests {
                 body.contains("tenant_ref"),
                 "{table} has no tenant_ref column"
             );
+        }
+    }
+
+    #[test]
+    fn the_receipts_decision_column_is_never_read() {
+        // §9.4 covers the receipt *document*, which is `body`. `handoff_receipts.decision` exists
+        // only so C-15's storage-level probe has a real column to aim an UPDATE at. The moment a
+        // query reads receipt content from it, it becomes a second source of truth the chain does
+        // not cover — and with the triggers dropped it can be altered without invalidating the
+        // head. A comment saying "write-only" is a wish; this is the check.
+        let store = include_str!("store.rs");
+        for line in store.lines() {
+            let lowered = line.to_lowercase();
+            if lowered.contains("from handoff_receipts") && lowered.contains("decision") {
+                panic!(
+                    "a query reads `decision` from handoff_receipts, which is outside the hash \
+                     chain (§9.4). Read the receipt from `body`.\n  {}",
+                    line.trim()
+                );
+            }
         }
     }
 

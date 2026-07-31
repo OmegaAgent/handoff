@@ -21,6 +21,7 @@ use crate::callback::Captured;
 use crate::case::CallbackCheck;
 use crate::profile::CallbackConfig;
 use hmac::{Hmac, Mac};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -291,11 +292,22 @@ fn redelivers(captured: &[Captured]) -> Result<(), String> {
     }
 }
 
+/// Every scheme this protocol can mint a drivable address in.
+///
+/// `wss://` is the one that matters and the one this check used to miss. A resolved capability
+/// session is a WebSocket URL with a bearer token in the query string — the thing §11.2 says exists
+/// in exactly one place — so a check that looked only for `http://` and `https://` would pass a
+/// callback leaking a live, drive-capable surface, token and all, under the name "carries no
+/// resolvable URL". C-8's own matcher already accepts `^(https|wss?)://`; the two must not disagree
+/// about what a resolvable address is, and this is the union of both.
+const RESOLVABLE_SCHEME: &str = r"(?i)\b(https?|wss?)://";
+
 fn no_resolvable_url(captured: &[Captured]) -> Result<(), String> {
+    let re = regex::Regex::new(RESOLVABLE_SCHEME).expect("the scheme pattern is a valid regex");
     let hits: Vec<usize> = captured
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.body.contains("http://") || c.body.contains("https://"))
+        .filter(|(_, c)| re.is_match(&c.body))
         .map(|(i, _)| i)
         .collect();
     if hits.is_empty() {
@@ -309,21 +321,52 @@ fn no_resolvable_url(captured: &[Captured]) -> Result<(), String> {
     }
 }
 
+/// Tenant identifiers a receiver must never be able to read out of a callback body.
+const TENANCY_KEYS: [&str; 4] = ["org_id", "tenant_id", "tenant", "organization_id"];
+
 fn tenancy_not_in_body(captured: &[Captured]) -> Result<(), String> {
     for (i, c) in captured.iter().enumerate() {
-        let doc = c.json();
-        for key in ["org_id", "tenant_id", "tenant", "organization_id"] {
-            if doc.get(key).is_some() {
-                return Err(format!(
-                    "callback {i} carries `{key}` in its body. §15.3 and I13 — a valid signature \
-                     proves the SENDER, never the TENANT; a receiver must resolve tenancy from its \
-                     own stored state keyed on the endpoint or the secret. A tenant identifier in \
-                     the body is an invitation to read it from there."
-                ));
-            }
+        // The whole document, not its top level. `doc.get(key)` was a check on the shape the
+        // reference implementation happens to send: a nested `decision.org_id` or one inside an
+        // array element is exactly as readable to a receiver, and exactly as much of an invitation
+        // to key tenancy on it.
+        let mut found = Vec::new();
+        find_key_anywhere(&c.json(), &TENANCY_KEYS, String::new(), &mut found);
+        if let Some(at) = found.first() {
+            return Err(format!(
+                "callback {i} carries a tenant identifier at `{at}` in its body. §15.3 and I13 — a \
+                 valid signature proves the SENDER, never the TENANT; a receiver must resolve \
+                 tenancy from its own stored state keyed on the endpoint or the secret. A tenant \
+                 identifier in the body is an invitation to read it from there."
+            ));
         }
     }
     Ok(())
+}
+
+/// Collect the dotted path of every occurrence of any of `keys`, at any depth.
+fn find_key_anywhere(value: &Value, keys: &[&str], at: String, found: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                let path = if at.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{at}.{key}")
+                };
+                if keys.contains(&key.as_str()) {
+                    found.push(path.clone());
+                }
+                find_key_anywhere(child, keys, path, found);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                find_key_anywhere(child, keys, format!("{at}[{index}]"), found);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn signature_verifies(captured: &[Captured], config: &CallbackConfig) -> Result<(), String> {
@@ -588,5 +631,61 @@ mod tests {
         let mut c = vector_callback();
         c.body = r#"{"id":"sig_1","org_id":"org_a","sequence":1}"#.into();
         assert!(tenancy_not_in_body(&[c]).is_err());
+    }
+
+    #[test]
+    fn a_nested_tenant_identifier_fails_the_check_too() {
+        // The old check read `doc.get(key)` and saw only the top level, so this passed. A receiver
+        // reads `decision.org_id` exactly as easily as `org_id`, and keying tenancy on either is
+        // the thing I13 forbids.
+        let mut c = vector_callback();
+        c.body = r#"{"id":"sig_1","decision":{"outcome":"answered","org_id":"org_a"}}"#.into();
+        let top_level_only = c.json().get("org_id").is_some();
+        assert!(!top_level_only, "the identifier is nested, not top level");
+
+        let err = tenancy_not_in_body(&[c.clone()]).unwrap_err();
+        assert!(err.contains("decision.org_id"), "{err}");
+
+        // And inside an array element, which is the same reachability.
+        let mut inside_array = vector_callback();
+        inside_array.body = r#"{"id":"sig_1","evidence":[{"tenant":"org_a"}]}"#.into();
+        assert!(tenancy_not_in_body(&[inside_array]).is_err());
+    }
+
+    #[test]
+    fn a_wss_surface_url_is_a_resolvable_address() {
+        // The one resolvable address this protocol actually mints: a resolved capability session,
+        // which is a WebSocket URL carrying a bearer token in its query string (§11.2). The old
+        // predicate tested only `http://` and `https://`, so a callback leaking this — token and
+        // all — passed a check named "carries no resolvable URL".
+        let leak =
+            "wss://127.0.0.1:8443/surfaces/hs_0V57TJ3HWG6VCPWND4TQPA2D76?t=KMDNFYH8Q89R1YWYN4SH";
+        let old_predicate = leak.contains("http://") || leak.contains("https://");
+        assert!(
+            !old_predicate,
+            "the old check accepted this, which is the defect"
+        );
+
+        let mut c = vector_callback();
+        c.body = format!(r#"{{"id":"sig_1","transport":{{"url":"{leak}"}}}}"#);
+        assert!(no_resolvable_url(&[c]).is_err());
+    }
+
+    #[test]
+    fn every_drivable_scheme_is_refused_and_an_identifier_is_not() {
+        for leak in [
+            "https://example.test/x",
+            "http://example.test/x",
+            "ws://example.test/x",
+            "WSS://EXAMPLE.TEST/x",
+        ] {
+            let mut c = vector_callback();
+            c.body = format!(r#"{{"id":"sig_1","at":"{leak}"}}"#);
+            assert!(no_resolvable_url(&[c]).is_err(), "{leak} must be refused");
+        }
+        // An opaque handle is what a callback is allowed to carry, and it must still pass.
+        let mut ok = vector_callback();
+        ok.body = r#"{"id":"sig_1","handle":"hg_01K3M7QW8ZC4YRXB2N6VD9FTHE"}"#.into();
+        assert!(no_resolvable_url(&[ok]).is_ok());
     }
 }

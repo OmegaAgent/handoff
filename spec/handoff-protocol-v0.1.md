@@ -1034,7 +1034,15 @@ A conforming Server MUST enforce receipt immutability in **three** layers:
    same tenant**, forming a per-tenant hash chain. `chain.digest` is taken over the canonical form of
    the receipt including `prev_digest`. The chain head MUST be exportable.
 
-Altering any historical receipt MUST invalidate the chain head. This gives tamper-evidence with no
+Altering any historical **receipt document** — the object §9.2 defines, over which the digest is
+computed — MUST invalidate the chain head.
+
+The scope of that sentence is worth being exact about, because a storage layer may hold columns
+beside the document for indexing or for a probe to aim at. **Those columns are not authoritative and
+a Server MUST NOT read receipt content from them.** A duplicate that is read but not covered by the
+digest is a second source of truth the chain does not protect, which is the failure this whole
+section exists to prevent; a duplicate that is written and never read is inert, and the chain's
+guarantee is unaffected by what happens to it. This gives tamper-evidence with no
 key management at all. Detached signatures and external anchoring are OPTIONAL additions (§15,
 `signing.md`) and MUST NOT replace the chain.
 
