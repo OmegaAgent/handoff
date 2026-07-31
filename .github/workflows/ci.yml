@@ -841,11 +841,22 @@ jobs:
     name: the published vectors reproduce, and the spec's own verifier accepts them
     runs-on: ubuntu-latest
     # `spec/signing.md` prints worked vectors and a reference verifier and tells an implementer to
-    # reproduce every value exactly. Until this job existed, nothing executed either: the prose was
-    # checked by the SDK tests, which is the same closed loop as the conformance harness sharing a
-    # crate with the server — our code agreeing with our code. This script extracts the verifier
-    # from the specification text itself and runs it against the published fixtures, so what is
-    # tested is the document a third party reads rather than the implementation we happen to have.
+    # reproduce every value exactly. Until this job existed, nothing executed either. The SDK tests
+    # cover the same ground, but they are our code agreeing with our code — the closed loop the
+    # conformance harness is already in by sharing a crate with the server it tests.
+    #
+    # `verify-published-artifacts.py` breaks that loop in the one way that matters: it EXTRACTS the
+    # reference verifier from the fenced block in `spec/signing.md` at run time and executes it, so
+    # the code under test is the code a reader is invited to copy, and it cannot drift from the
+    # document the way a duplicate would. It derives the signing seed from the published sentence
+    # rather than trusting the published hex, verifies both receipt fixtures AS PUBLISHED without
+    # recomputing the digest first — recomputing before asserting is how a broken fixture survived
+    # a whole review round — and checks that UTF-16 and code-point member ordering really do
+    # disagree on a non-BMP key.
+    #
+    # That last one is the part with teeth. Every published fixture is ASCII and canonicalizes
+    # identically under both orderings, so the fixtures are structurally blind to the ordering
+    # defect; a "fix" that changed nothing would pass every other check here.
     #
     # Required, not conditional, for the same reason as the receipts job: a gate that steps aside
     # when its subject is missing reports green and measures nothing, and the absence looks exactly
@@ -857,6 +868,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Without this the script prints `skip  signature checks` and exits 0 having checked five
+      # things fewer — a quiet loss of coverage that reads as a pass, which is the exact shape of
+      # what this pipeline is being fixed for. Installed rather than tolerated, and the honest run
+      # below refuses any `skip` line so a future dependency cannot go missing silently either.
+      - name: The signature checks have what they need
+        run: python -m pip install --quiet 'cryptography==43.0.1'
+
       - name: The script exists
         run: |
           if [ ! -f scripts/verify-published-artifacts.py ]; then
@@ -867,18 +885,23 @@ jobs:
           fi
           echo "found"
 
-      # The red direction first. A verifier that reports success on a receipt whose content has
-      # been altered is the failure this whole document exists to make impossible, so the sabotage
-      # is a single changed character inside the digest-covered core: the published signature was
-      # computed over the original bytes and nothing that actually reads the fixture can still
-      # accept it. The mutation deliberately does not depend on how the script is written — only on
-      # its stated job — so it keeps working when the script is rewritten.
+      # Two sabotages, because they fail the script in two different places and a green here means
+      # nothing unless both can turn it red. The author ran both by hand before trusting the green
+      # one; running them on every build is the difference between a demonstration and a check.
       #
-      # If the script stays green here, that is a finding and not a flake: it is not reading the
-      # artifact it claims to verify, or it is regenerating the expected value from the same input
-      # it is checking, which is the closed loop again with a smaller radius.
+      # The first alters one character inside the digest-covered core. The published signature was
+      # computed over the original bytes, so nothing that actually reads the fixture can still
+      # accept it. It deliberately does not depend on how the script is written — only on its
+      # stated job — so it keeps working when the script is rewritten. If the script stays green
+      # here that is a finding rather than a flake: it is not reading the artifact it claims to
+      # verify, or it is recomputing the expected value from the same bytes it is checking, which
+      # is the closed loop again with a smaller radius.
       - name: The script goes red when a published artifact is altered
         run: |
+          # Checked explicitly rather than left to `set -e`: whether this step aborts on a failed
+          # sabotage is the whole question, and it must not depend on which shell option is in
+          # force when somebody moves the block.
+          set +e
           python3 - <<'SABOTAGE'
           import pathlib, sys
           p = pathlib.Path("spec/fixtures/signing/receipt-core.json")
@@ -889,6 +912,13 @@ jobs:
                        "digest-covered core and say so here.")
           p.write_text(text.replace("Dana Okafor", "Dana Okafur", 1))
           SABOTAGE
+          applied=$?
+          set -e
+          if [ "$applied" -ne 0 ]; then
+            echo "::error::The sabotage could not be applied, so this meta-test would prove"
+            echo "::error::nothing. Read the reason above and repoint it."
+            exit 1
+          fi
           if git diff --quiet -- spec/fixtures/signing/receipt-core.json; then
             echo "::error::The sabotage changed nothing, so this meta-test is measuring nothing."
             exit 1
@@ -909,6 +939,51 @@ jobs:
           fi
           echo "The script reports red when a published artifact stops matching its signature."
 
+      # The second reverts the member ordering inside the published verifier itself, from UTF-16
+      # code units to code points. That is the defect the correction was written to fix, and it is
+      # invisible to every fixture in the tree, so this is the only thing standing between the
+      # document and a silent regression of it. It is not hypothetical: the correction was absent
+      # from the document for a window while this job was being written, and running the script
+      # against that state produced exactly the two failures below.
+      - name: The script goes red when the published verifier's member ordering regresses
+        run: |
+          set +e
+          python3 - <<'SABOTAGE'
+          import pathlib, sys
+          p = pathlib.Path("spec/signing.md")
+          text = p.read_text()
+          correct = 'sorted(v.items(), key=lambda kv: kv[0].encode("utf-16-be"))'
+          if correct not in text:
+              sys.exit("the sabotage no longer applies: the published verifier in signing.md no "
+                       "longer sorts members by UTF-16 code unit in the form this step reverts. "
+                       "Point it at whatever the snippet does now and say so here.")
+          p.write_text(text.replace(correct, "sorted(v.items())", 1))
+          SABOTAGE
+          applied=$?
+          set -e
+          if [ "$applied" -ne 0 ]; then
+            echo "::error::The sabotage could not be applied, so this meta-test would prove"
+            echo "::error::nothing. Read the reason above and repoint it."
+            exit 1
+          fi
+          if git diff --quiet -- spec/signing.md; then
+            echo "::error::The sabotage changed nothing, so this meta-test is measuring nothing."
+            exit 1
+          fi
+          set +e
+          python3 scripts/verify-published-artifacts.py > /tmp/reordered.out 2>&1
+          rc=$?
+          set -e
+          git checkout -- spec/signing.md
+          tail -40 /tmp/reordered.out
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::The published verifier sorted members by code point and every check"
+            echo "::error::still passed. The ordering section is not measuring the ordering, and"
+            echo "::error::no fixture in this tree can tell the two apart."
+            exit 1
+          fi
+          echo "The script reports red when the published verifier's ordering regresses."
+
       - name: The published artifacts verify under the specification's own verifier
         run: |
           set +e
@@ -921,11 +996,28 @@ jobs:
             echo "::error::fixture does not verify under the verifier the document prints."
             exit 1
           fi
-          if [ ! -s /tmp/published.out ]; then
-            echo "::error::The script exited 0 and said nothing. It must report what it checked."
+          # Exit 0 is not the whole answer. The script degrades rather than failing when something
+          # it needs is absent: a missing dependency prints `skip` and drops five checks, and a
+          # verifier it cannot extract from the document takes the fixture and ordering sections
+          # with it, silently and with no marker at all. So the count is asserted too. Eighteen is
+          # a FLOOR and not a total: it may only rise, and raising it is the right response to
+          # adding a check. If it falls, something stopped running and said nothing.
+          skipped=$(grep -c '^  skip' /tmp/published.out || true)
+          checks=$(grep -cE '^  (ok|FAIL|skip)' /tmp/published.out || true)
+          if [ "$skipped" -ne 0 ]; then
+            grep '^  skip' /tmp/published.out
+            echo "::error::${skipped} check(s) were skipped. A check that steps aside is not a"
+            echo "::error::check that passed; install what it needs or remove the claim."
             exit 1
           fi
-          echo "Every published vector reproduces and every published fixture verifies."
+          if [ "$checks" -lt 18 ]; then
+            echo "::error::Only ${checks} check(s) ran, and this job has seen 18. A section stopped"
+            echo "::error::running without failing — most likely the reference verifier could not"
+            echo "::error::be extracted from spec/signing.md, which takes the fixture and ordering"
+            echo "::error::checks with it and says nothing."
+            exit 1
+          fi
+          echo "Every published vector reproduces and every published fixture verifies: ${checks} checks."
 
   gate-count:
     name: conformance — the case count agrees everywhere it is written
