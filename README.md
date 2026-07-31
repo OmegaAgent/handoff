@@ -40,7 +40,8 @@ relationships. None of that ships in a container, and this repository will not p
 
 **Pre-release. The protocol runs; it has not been published, and there is no hosted service.**
 
-The reference server passes the conformance suite in full. Read `docs/hostile-review.md` before
+The reference server passes all 25 Level 1 conformance cases. It does not pass C-17, the
+optional Level 2 continuation case, and deliberately cannot — see below. Read `docs/hostile-review.md` before
 relying on any of this: an independent review pass found defects that are open at the time of
 writing, and `BACKLOG.md` states the gaps plainly rather than leaving them to be discovered.
 
@@ -48,7 +49,7 @@ writing, and `BACKLOG.md` states the gaps plainly rather than leaving them to be
 |---|---|
 | `spec/` — the normative protocol | v0.1, frozen. 21 invariants, OpenAPI 3.1, signing test vectors that reproduce. |
 | `conformance/` — the suite | 25 Level 1 cases + 1 Level 2. Written before the server, and demonstrably red against one that implements nothing. |
-| `core/` — the Rust reference implementation | `handoffd` passes **25/25**. |
+| `core/` — the Rust reference implementation | `handoffd` passes **25/25 Level 1**. Level 2 (`continuation`) is not implemented and is not advertised. |
 | `sdk/python` — `handoff-human` | 0.2.0. Standard library only. |
 | `sdk/ts` — `@handoffproto/sdk` | Zero runtime dependencies. |
 | `managed/` — the hosted adapter | Closed-source, unpublished. Refuses where a dependency does not exist rather than pretending. |

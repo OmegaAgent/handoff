@@ -8,11 +8,18 @@ not care what is listening there.
 handoff-conformance --base-url https://your-deployment.example.com/v1 --profile your-profile.yaml
 ```
 
-**Status: 25 Level 1 cases and 1 Level 2 case. The reference server passes all of them.** They were written before any conforming
+**Status: 25 Level 1 cases, all passing against the reference server. The one Level 2 case does
+not pass, and cannot.** They were written before any conforming
 server existed, and the last thing done to them was to run them against a server that answers `501`
 to everything and confirm the report reads `0/25 passing` with twenty-five individually named
-failures and a non-zero exit. A suite that cannot fail loudly is not a suite. Against the reference
-implementation they are green; `conformance/GATE.md` records both directions.
+failures and a non-zero exit. A suite that cannot fail loudly is not a suite. Against the reference implementation the Level 1 cases are green;
+`conformance/GATE.md` records both directions.
+
+**C-17 is deliberately unpassable here.** It requires `GET /meta` to advertise Level 2 with the
+`continuation` extension. This build refuses a raise carrying `resume_payload`, because it has no
+encryption at rest to protect one with, and it advertises Level 1 — derived from that same
+capability rather than declared, so the two cannot drift. A server that has not implemented an
+optional extension failing its optional case is the suite working, not a defect. See `BACKLOG.md`.
 
 The runner checks the case set against `spec/conformance-map.json` before running anything, so a
 case §18 defines with no file, or a file §18 does not define, stops the run rather than quietly

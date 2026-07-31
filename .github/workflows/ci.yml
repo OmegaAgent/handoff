@@ -270,6 +270,77 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
+      # Claims 4 and 5 of spec/fixtures/README.md. Both said "asserted mechanically" while being
+      # asserted by hand, which is the same defect as a stale status document: a reader is told a
+      # check exists and reasonably stops looking.
+      - name: Use-case fixtures validate, and no fixture leaks
+        run: |
+          python -m pip install --quiet jsonschema referencing
+          python - <<'PY'
+          import json, pathlib, re, sys
+          from jsonschema import Draft202012Validator
+          from referencing import Registry, Resource
+
+          root = pathlib.Path("spec")
+          files = {p.name.split(".")[0]: json.loads(p.read_text())
+                   for p in (root / "schemas").glob("*.json")}
+          resources = []
+          for name, doc in files.items():
+              resource = Resource.from_contents(doc)
+              resources.append((doc.get("$id", f"{name}.schema.json"), resource))
+              resources.append((f"{name}.schema.json", resource))
+          registry = Registry().with_resources(resources)
+
+          failed = 0
+
+          # Claim 4: every use-case raise validates member by member.
+          for path in sorted((root / "fixtures" / "use-cases").glob("*.json")):
+              raised = json.loads(path.read_text()).get("raise")
+              if raised is None:
+                  continue
+              for member, definition in (("prompt", "Prompt"), ("requires", "Requires"),
+                                         ("ttl_policy", "TtlPolicy")):
+                  if member not in raised:
+                      continue
+                  validator = Draft202012Validator(
+                      {"$ref": f"request.schema.json#/$defs/{definition}"}, registry=registry)
+                  for error in validator.iter_errors(raised[member]):
+                      failed += 1
+                      print(f"{path.name} raise.{member}: {error.message}")
+
+          # Claim 5: no fixture carries a secret value, a resolvable capability address, or a
+          # request `kind`. A resolvable address is the one that would undo I8 by example.
+          address = re.compile(r"https?://(?!example\.(com|org|invalid)\b)[^\s\"']+|wss?://[^\s\"']+")
+          for path in sorted(root.rglob("fixtures/**/*.json")):
+              text = path.read_text()
+              document = json.loads(text)
+
+              def walk(node, where=""):
+                  global failed
+                  if isinstance(node, dict):
+                      for key, value in node.items():
+                          if key == "kind" and isinstance(value, str) and where.endswith("raise"):
+                              failed += 1
+                              print(f"{path.name}: a request `kind` at {where} — the point of use-cases is that there is none")
+                          if key in {"secret", "password", "token", "value"} and isinstance(value, str) and len(value) > 12:
+                              failed += 1
+                              print(f"{path.name}: a suspicious literal at {where}.{key}")
+                          walk(value, f"{where}.{key}" if where else key)
+                  elif isinstance(node, list):
+                      for i, item in enumerate(node):
+                          walk(item, f"{where}[{i}]")
+
+              walk(document)
+              for hit in address.findall(text):
+                  if "token=" in hit or "/live" in hit:
+                      failed += 1
+                      print(f"{path.name}: a resolvable capability address: {hit[:60]}")
+
+          if failed:
+              sys.exit(f"{failed} fixture consistency failure(s)")
+          print("use-case fixtures validate; no fixture carries a secret, an address, or a kind")
+          PY
+
   conformance:
     name: conformance suite
     runs-on: ubuntu-latest

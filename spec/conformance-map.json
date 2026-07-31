@@ -238,7 +238,7 @@
   {
    "id": "C-24",
    "level": 1,
-   "title": "Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` \u2192 each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `1e20` \u2192 accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md`",
+   "title": "Answer a `number` field with a non-integer, with `1e21`, and with `2^53` \u2192 each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1`, and `9007199254740991` (2^53 \u2212 1) \u2192 accepted. A canonicalizer MUST refuse a non-integer rather than render it. Canonicalize the two signing fixtures and reproduce their exact byte lengths and SHA-256 digests from `signing.md`",
    "invariants": [
     "I2",
     "I21"
@@ -261,7 +261,8 @@
    "statement": "One request has many deliveries and at most one decision receipt.",
    "cases": [
     "C-2",
-    "C-14"
+    "C-14",
+    "C-25"
    ]
   },
   {
@@ -330,7 +331,8 @@
    "id": "I10",
    "statement": "One answer mints one authorization. Redemption is idempotent per effect_key, and a single-use authorization cannot be spent twice.",
    "cases": [
-    "C-13"
+    "C-13",
+    "C-25"
    ]
   },
   {
@@ -406,7 +408,8 @@
    "cases": [
     "C-1",
     "C-2",
-    "C-19"
+    "C-19",
+    "C-25"
    ]
   },
   {
