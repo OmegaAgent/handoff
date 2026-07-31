@@ -44,6 +44,7 @@ mod tests {
 
     fn principal(tenant: &str) -> Principal {
         Principal {
+            credential_ref: format!("{tenant}::test-credential"),
             id: None,
             kind: PrincipalKind::Machine,
             tenant_ref: tenant.to_string(),

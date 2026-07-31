@@ -28,7 +28,7 @@ implementation of anything the spec describes. Every type this crate exports imp
 declared in `handoff_core::seam`, and `src/main.rs` wires them into the same server a self-hoster
 runs. If `main.rs` ever grows a route handler, the boundary has moved.
 
-`GET /v1/version` reports the `handoff-core` version this service is running. If it drifts more than
+`GET /v1/meta` reports, in `core_version`, the `handoff-core` version this service is running. If it drifts more than
 one minor release behind the latest published tag, the open-core strategy is failing — visibly, to
 everyone, including us.
 
@@ -61,7 +61,7 @@ milestone, and where the decision is recorded.
 ## Running the tests
 
 ```
-cargo test --workspace      # 75 tests; five of them need a local Postgres
+cargo test --workspace      # 76 tests; five of them need a local Postgres
 ```
 
 The Postgres-backed tests create and drop disposable `handoff_managed_*` databases, using

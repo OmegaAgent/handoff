@@ -48,13 +48,41 @@ unfunded open-source project and pretending otherwise would waste your time.
 **Out of scope:**
 
 - `examples/night-hack/**`. That directory is preserved prior art from a four-hour hackathon build.
-  It is not the reference implementation, it is not deployed, and it is not maintained. Its
+  It is not the reference implementation and it is not maintained. **A deployment of it has existed
+  at `handoff.omegas.dev`**, with no authentication — its own docs say anyone holding the URL can
+  ring a phone — so treat that hostname as a running hackathon demo rather than as this project,
+  and do not assume it is gone until someone has checked. Its
   weaknesses are documented rather than fixed — see `examples/night-hack/README.md`. Reports about
   it are welcome as issues, not as security advisories.
 - Denial of service through raw volume against a deployment you control.
 - Missing hardening headers on a page you are self-hosting.
 - Findings from an automated scanner with no demonstrated impact.
 - Social engineering of maintainers or contributors.
+
+## Running a deployment safely
+
+Two properties this project tests are **inert unless the deployment is configured for them**. Both
+are stated here because a guarantee that holds only under conditions nobody is asked to create is
+not a guarantee.
+
+**Run `handoffd` as a role that cannot bypass row-level security.** Every `handoff_*` table has RLS
+enabled and forced, and each request-scoped transaction names its tenant before reading, so a query
+that lost its `WHERE tenant_ref = …` still cannot see another tenant's rows. **A superuser, or any
+role with `BYPASSRLS`, ignores every policy** — and the development harness in `core/dev/` defaults
+to exactly such a role, because it also creates and drops databases. Grant the service role
+`SELECT, INSERT, UPDATE, DELETE` on its own tables and nothing more.
+
+The tenant predicate in every query is the primary defence and is present regardless. RLS is the
+layer that catches the day somebody forgets one, so losing it costs defence-in-depth rather than
+isolation — but it is exactly the layer you want on the day it matters.
+
+**Export the receipt chain head somewhere you do not control.** Height contiguity detects alteration
+anywhere in a tenant's chain and excision from the middle. It cannot detect **truncation of the
+tail**: deleting the newest receipts leaves a shorter chain that verifies perfectly, because nothing
+remains to point at what was removed (§9.4). That is inherent to an unanchored hash chain. An
+exported head is the anchor that makes truncation visible, and it is the only thing that does — a
+deployment that never records its head outside its own database has no evidence against a party who
+can delete its newest rows.
 
 ## Handling secrets in this repository
 

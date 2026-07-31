@@ -26,6 +26,26 @@ jobs:
     defaults:
       run:
         working-directory: core
+    # The store and server suites talk to a real Postgres on purpose: tenant isolation, storage-level
+    # receipt immutability and the SIGKILL durability case are properties a fake cannot demonstrate.
+    # Without this service block `cargo test --workspace` could not have passed here — a review
+    # caught it by reading, since the job had never been run.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: omega
+      PGPASSWORD: omega
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +54,9 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
           rustc --version && cargo --version
+
+      - name: psql, which the store suite shells out to
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
 
       - name: Format
         run: cargo fmt --all -- --check

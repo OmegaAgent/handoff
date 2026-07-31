@@ -1459,6 +1459,11 @@ async fn meta(State(state): State<Arc<AppState>>) -> ApiResult {
     // support instead of assuming it (§19).
     Ok(Api::ok(json!({
         "protocol_version": handoff_protocol::PROTOCOL_VERSION,
+        // The build's own version, so "did the managed tier quietly fork the core?" is a question
+        // anyone can answer over HTTP against a running deployment. GOVERNANCE.md and the cutover
+        // plan both name that check; they described a `/v1/version` route that does not exist, and
+        // a second endpoint answering the same question is worse than one field here.
+        "core_version": env!("CARGO_PKG_VERSION"),
         // §1.2 makes the advertised level normative, and a Server MUST NOT advertise Level 2
         // unless it passes C-17. Derived from what this build actually does, never a literal.
         "conformance_level": if state.config.continuation_supported { 2 } else { 1 },

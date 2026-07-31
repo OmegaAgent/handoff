@@ -54,7 +54,7 @@ stops meaning anything.
 ### Protocol versioning
 
 - The wire version is carried in the request (`protocol: "handoff/0.1"`) and is reported by
-  `GET /v1/version` alongside the running core version.
+  `GET /v1/meta`, whose `core_version` field is the running core version.
 - The **major** version appears in the path (`/v1`). A new major ships alongside the old one; the
   old one runs for at least 12 months past the successor's general availability.
 - **MINOR** = additive optional request fields, new response fields, new channel capabilities, new
@@ -82,7 +82,7 @@ any managed service claiming that version.** Tying the definition of "released" 
 service passing the open suite is what stops the open core becoming a stale marketing artifact. If
 the managed service cannot pass the open suite, the release is not a release and the deploy is red.
 
-The check that tells you whether this is working: `GET /v1/version` on any managed deployment returns
+The check that tells you whether this is working: `GET /v1/meta` on any managed deployment returns
 the core version and the spec version it is running. If that drifts more than one minor release
 behind the latest published tag, the governance model is failing and it is visible to everyone,
 including the maintainer.

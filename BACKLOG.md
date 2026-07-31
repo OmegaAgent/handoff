@@ -58,7 +58,7 @@ Still open before the first public push, in order:
    `handoff-adapters`, `handoff-server`, `handoff-conformance` on crates.io, and the npm scope for
    the TypeScript SDK. Fallbacks exist (`handoffproto-*`, `@handoff-protocol/*`) but the choice must
    be made before the spec is published, not after.
-2. **`spec/` v0.1.** Concurrent work. The release gate for H0 is not met until it exists.
+2. ~~`spec/` v0.1.~~ **Done.** Frozen, with 21 invariants, an OpenAPI contract, JSON Schemas, and signing vectors that reproduce.
 3. **Confirm the copyright holder going forward.** The published MIT grant says
    `Noureddin Bakir`; the company packages say `Omegas`. Pick the entity that will hold the
    trademark and use it consistently from here. Do not rewrite the published grant.
@@ -203,10 +203,11 @@ highest-bandwidth channel, and it is the one that is built.
    reveal, so "a human cleared it" needs a server-side notion of clearance.
 3. **State is in one process.** A redeploy drops pending requests. Fine for a hack, wrong for
    anything real — needs durable storage before anyone else can rely on it.
-4. Nothing outstanding on hosting. `handoff.omegas.dev` is live on a Let's Encrypt cert, A and
-   AAAA records pointing at the Fly app, DNS-only. Note for later: the old
-   `CLOUDFLARE_DNS_API_TOKEN` is EXPIRED and `hipocampus/.env`'s `CLOUDFLARE_API_TOKEN` cannot see
-   the zone — the working token is the one in `omega/.env.live` (named RED_LINE in Cloudflare).
+4. Nothing outstanding on hosting for the hack build. *(Operational detail redacted: an earlier
+   revision of this line named which private files hold working credentials, which token was
+   expired, and the console name of the working one. No literal values, so this repository's own
+   secret-hygiene job could not catch it — and in a repository intended to be published, a map to
+   where the keys live is the part an attacker actually wants. Whoever needs it has the runbook.)*
 
 ## Deferred (non-blocking)
 - **Paging-UX escalation ladder** — owner-approved direction, full spec in `PAGING-UX.md` (quiet
@@ -232,5 +233,5 @@ highest-bandwidth channel, and it is the one that is built.
   hangs when the phone API is down.
 - 2026-07-24: long-poll plus one `asyncio.Event` per request is the entire blocking primitive. No
   queue, no broker, no websocket on the agent side.
-- 2026-07-24: the expired Cloudflare DNS token cost us the vanity domain. Verify a credential by
-  calling the API that will actually use it, not by finding it in a `.env` file.
+- 2026-07-24: an expired DNS token cost us the vanity domain. Verify a credential by calling the API
+  that will actually use it, not by finding it in a `.env` file.

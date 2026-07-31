@@ -8,11 +8,11 @@ not care what is listening there.
 handoff-conformance --base-url https://your-deployment.example.com/v1 --profile your-profile.yaml
 ```
 
-**Status: 23 Level 1 cases and 1 Level 2 case, all red.** They were written before any conforming
+**Status: 25 Level 1 cases and 1 Level 2 case. The reference server passes all of them.** They were written before any conforming
 server existed, and the last thing done to them was to run them against a server that answers `501`
-to everything and confirm the report reads `0/23 passing` with twenty-three individually named
-failures and a non-zero exit. A suite that cannot fail loudly is not a suite. They go green in H2,
-against the reference implementation.
+to everything and confirm the report reads `0/25 passing` with twenty-five individually named
+failures and a non-zero exit. A suite that cannot fail loudly is not a suite. Against the reference
+implementation they are green; `conformance/GATE.md` records both directions.
 
 The runner checks the case set against `spec/conformance-map.json` before running anything, so a
 case §18 defines with no file, or a file §18 does not define, stops the run rather than quietly

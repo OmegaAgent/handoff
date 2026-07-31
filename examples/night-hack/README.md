@@ -57,6 +57,18 @@ Read this part before borrowing any of it.
 - **Not double-resolve safe.** Resolving an already-resolved request returned HTTP 200 with an
   `{"ok": false}` body rather than a conflict. Quiet is the wrong answer here; the protocol requires
   loud.
+- **Not the claim language, either.** These documents predate the specification's rule about what may
+  be said, and they break it. `RUNBOOK.md` closes on *"It did not restart. It carried on from exactly
+  where it stopped"*, and `SUBMISSION.md` says the agent *"picks right back up"* and *"resumes"*.
+  Spec §19 lists *"your agent resumes exactly where it stopped"* as **not defensible**, because this
+  protocol does not resume execution: it delivers an answer, and what the runtime does next is the
+  runtime's own business. Read those lines as a record of how the project once described itself, not
+  as a description of what it does.
+- **`DISCLOSURE.md`'s "ten of ten assertions against production" is unverifiable here.** The only
+  assertion set preserved in this tree is an offline `selftest()` in `demo/agent.py` with **eight**
+  asserts over a hardcoded sample. The production run may well have happened; the artifact was not
+  kept, which is precisely the failure `DISCLOSURE.md` exists to prevent. Treat the number as
+  unsupported rather than as evidence.
 - **Not maintained.** It is out of scope for security reports — see
   [`SECURITY.md`](../../SECURITY.md).
 

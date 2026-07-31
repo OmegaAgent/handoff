@@ -96,11 +96,17 @@ stopped being written.
 Deploy `handoff-omegas-server` to `handoff.omegas.dev` with its own database. No Ωmegas traffic
 touches it. `handoff-omegas-server preflight` prints every absent dependency on boot.
 
-- **Gate:** `GET https://handoff.omegas.dev/v1/meta` returns a conformance level, and
-  `handoff-conformance` run against that base URL is **24/24, exit 0**. `GET /v1/version` reports a
-  `handoff-core` version no more than one minor release behind the latest published tag.
+- **Gate:** `GET https://handoff.omegas.dev/v1/meta` returns a conformance level **derived from the
+  build rather than declared**, and `handoff-conformance` run against that base URL is **25/25,
+  exit 0**. `/v1/meta` also carries the `handoff-core` version, which must be no more than one minor
+  release behind the latest published tag — that is the anti-drift check, and it is `/v1/meta`
+  because there is no `/v1/version` route and adding one would duplicate an endpoint that already
+  answers the question.
 - **Rollback:** delete the deployment. Nothing depends on it. Minutes.
-- **Blast radius:** none. No Ωmegas code has changed.
+- **Blast radius:** **that hostname already serves the night-hack demo.** This step replaces a
+  running service, so it is not a greenfield deploy: decide first whether the demo is retired, moved,
+  or kept on another name, and note that the existing deployment has no authentication at all. No
+  Ωmegas code changes, which is a different question from nothing being affected.
 
 > The conformance gate belongs here, on the first deploy, and not at v1.0. A gate added later is a
 > gate that never gets added, and this is the only mechanism that mechanically prevents the managed

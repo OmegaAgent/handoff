@@ -389,6 +389,10 @@ impl TokenClaims {
             .collect::<Vec<_>>();
 
         Ok(Principal {
+            // The exchanged token's own subject is the credential: two tokens for one user are two
+            // credentials, and §3.1 scopes an idempotency key to the credential rather than the
+            // person so that one holder's retry can never absorb another's.
+            credential_ref: id.to_string(),
             id: Some(id),
             kind,
             tenant_ref: org,

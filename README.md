@@ -47,22 +47,18 @@ writing, and `BACKLOG.md` states the gaps plainly rather than leaving them to be
 | Component | State |
 |---|---|
 | `spec/` — the normative protocol | v0.1, frozen. 21 invariants, OpenAPI 3.1, signing test vectors that reproduce. |
-| `conformance/` — the suite | 24 Level 1 cases + 1 Level 2. Written before the server, and demonstrably red against one that implements nothing. |
-| `core/` — the Rust reference implementation | `handoffd` passes **24/24**. |
+| `conformance/` — the suite | 25 Level 1 cases + 1 Level 2. Written before the server, and demonstrably red against one that implements nothing. |
+| `core/` — the Rust reference implementation | `handoffd` passes **25/25**. |
 | `sdk/python` — `handoff-human` | 0.2.0. Standard library only. |
 | `sdk/ts` — `@handoffproto/sdk` | Zero runtime dependencies. |
 | `managed/` — the hosted adapter | Closed-source, unpublished. Refuses where a dependency does not exist rather than pretending. |
+| `ui/responder` — a standalone human-facing page | **Not built.** It appears in the layout below as intended; it is absent on disk. |
 
 Nothing has been published to crates.io, npm, or PyPI, and the package names are not yet reserved.
-| `sdk/ts` | Not started |
-| `ui/responder` — the standalone human-facing page | Not started |
-
-`handoffd` builds and prints its version. It listens on nothing, and pointing a client at it will not
-work. `handoff-conformance` runs and reports zero cases, exiting non-zero on purpose so that no
-pipeline can report conformance it has not measured.
 
 This table is the honest state as of the last commit. If it disagrees with something else in this
-repository, this table is what was checked.
+repository, this table is what was checked — and the disagreement is a defect worth reporting,
+because a status document that is trusted and stale is worse than one nobody reads.
 
 ## Where the spec lives
 
@@ -93,8 +89,8 @@ core/               Rust workspace. Apache-2.0. Published to crates.io.
   crates/handoff-conformance/     the suite runner. Takes any base URL.
 conformance/        Declarative cases. The governance instrument, not a test helper.
 sdk/python/         handoff-human. MIT.
-sdk/ts/             (H3) MIT.
-ui/responder/       (H3) A standalone page for the person answering. Apache-2.0.
+sdk/ts/             @handoffproto/sdk. MIT. Zero runtime dependencies.
+ui/responder/       PLANNED, not present. A standalone page for the person answering. Apache-2.0.
 examples/           Worked examples, including the original hackathon build.
 docs/               Documentation source.
 ```
@@ -104,8 +100,8 @@ docs/               Documentation source.
 Self-hosting is the point rather than a concession, so it is worth being precise about what it does
 and does not get you.
 
-**Once `handoffd` exists** (milestone H2) the shape will be: point it at a Postgres database, give it
-a configuration file naming the people it can reach and the channels it may use, and run it. It has
+**The shape today:** point `handoffd` at a Postgres database, give it a configuration file naming the
+people it can reach and the channels it may use, and run it. It has
 no dependency on any hosted service, no phone-home, no licence key, and no disabled feature waiting
 to be switched on. `CONTRIBUTING.md` makes a dormant gate in this repository a mergeable-blocking
 defect rather than a matter of taste.
