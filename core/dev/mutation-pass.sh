@@ -58,15 +58,22 @@ expect "callbacks signed with unknown secrets" "C-18" "HANDOFF_CALLBACK_SECRETS=
 echo
 echo "source mutations -- the invariant is removed from the code that enforces it"
 
+# Aimed at the shared predicate, not at one call site. The first version of this mutation neutered
+# `require_person` in routes.rs, and the suite stayed at 26/26 -- correctly, because I15 is enforced
+# at THREE independent points: routes.rs, plan.rs, and store.rs "before anything else is read".
+# Removing one leaves two, the refusal still happens, and C-5 is right to pass. That is defence in
+# depth working as intended, and it means a single-site mutation cannot answer the question this
+# script asks. `may_answer` is the predicate all three call, so mutating it removes the invariant
+# everywhere at once. Worth remembering when adding a mutation: aim at the property, not at a line.
 python3 - <<'PY'
 import pathlib
-p = pathlib.Path("core/crates/handoff-server/src/routes.rs"); s = p.read_text()
-old = "    if principal.kind == PrincipalKind::Machine {"
-assert s.count(old) == 1, "require_person no longer looks like this -- re-derive the mutation"
-p.write_text(s.replace(old, "    if false && principal.kind == PrincipalKind::Machine {", 1))
+p = pathlib.Path("core/crates/handoff-core/src/auth.rs"); s = p.read_text()
+old = "        !matches!(self.kind, PrincipalKind::Machine)"
+assert s.count(old) == 1, "may_answer no longer looks like this -- re-derive the mutation"
+p.write_text(s.replace(old, "        true // MUTATION", 1))
 PY
 expect "any principal may answer (I15 removed)" "C-5" ""
-git checkout -- core/crates/handoff-server/src/routes.rs
+git checkout -- core/crates/handoff-core/src/auth.rs
 
 python3 - <<'PY'
 import pathlib, re
