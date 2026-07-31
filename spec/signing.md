@@ -391,17 +391,43 @@ signature (hex)    6aff08ab62a4cac251e89de76bf93a1874d2dba6a337708db13e223b21dc2
 import json, hashlib, base64
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+def canonical_json(value) -> bytes:
+    """RFC 8785 (JCS) over the value types this protocol digests."""
+    return _canon(value).encode("utf-8")
+
+def _canon(v) -> str:
+    if v is None:  return "null"
+    if v is True:  return "true"       # before int: bool is a subclass of int
+    if v is False: return "false"
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, int):
+        if abs(v) > 2**53 - 1:
+            raise ValueError("digest-covered numbers are within +/-(2^53 - 1)")
+        return str(v)
+    if isinstance(v, float):
+        # §1.4: refuse rather than render. A float here means the value was stored
+        # in a form the canonicalizer would not have emitted, so the digest an
+        # auditor computes is not the digest that was sealed.
+        raise ValueError("digest-covered numbers are integers only")
+    if isinstance(v, list):
+        return "[" + ",".join(_canon(x) for x in v) + "]"
+    if isinstance(v, dict):
+        # RFC 8785 sorts member names by UTF-16 code unit, NOT by code point.
+        # `sort_keys=True` is code-point ordering and is wrong for any non-BMP key.
+        # Encoding to UTF-16BE and comparing bytes gives the required ordering.
+        items = sorted(v.items(), key=lambda kv: kv[0].encode("utf-16-be"))
+        return "{" + ",".join(json.dumps(k, ensure_ascii=False) + ":" + _canon(val)
+                              for k, val in items) + "}"
+    raise TypeError(f"not JSON: {type(v).__name__}")
+
 def b64u_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 def verify_receipt(receipt: dict, signature: dict, keys: dict[str, bytes]) -> bool:
     chain = receipt["chain"]
     core  = {k: v for k, v in receipt.items() if k != "chain"}
-    # canonical_json must be RFC 8785 (JCS); json.dumps with sorted keys and no
-    # whitespace matches it for the value types this protocol uses.
-    core_bytes = json.dumps(core, sort_keys=True, separators=(",", ":"),
-                            ensure_ascii=False).encode("utf-8")
-    core_hash  = hashlib.sha256(core_bytes).hexdigest()
+    core_hash = hashlib.sha256(canonical_json(core)).hexdigest()
     chain_input = f'{chain["height"]}\n{chain["prev_digest"]}\n{core_hash}'.encode()
     expected    = "sha256:" + hashlib.sha256(chain_input).hexdigest()
     if expected != chain["digest"]:
@@ -422,13 +448,36 @@ def verify_receipt(receipt: dict, signature: dict, keys: dict[str, bytes]) -> bo
 ## 3. Canonical JSON
 
 Every digest in this document is taken over **RFC 8785 (JSON Canonicalization Scheme)** output,
-UTF-8 encoded: object members sorted by code point, no insignificant whitespace, and the RFC's number
-serialization.
+UTF-8 encoded: object members sorted by **UTF-16 code unit**, no insignificant whitespace, and the
+RFC's number serialization.
+
+**Sorting is by UTF-16 code unit, not by code point**, because that is what RFC 8785 requires — it
+inherits ECMAScript's ordering, in which a member name is compared as a sequence of UTF-16 code
+units. The two orderings agree throughout the Basic Multilingual Plane and diverge for any non-BMP
+name, because a non-BMP character encodes as a surrogate pair beginning at 0xD800 and therefore
+sorts *below* every BMP character from U+E000 up:
+
+```
+four member names      U+0061   U+D7FF   U+FF01   U+1F600
+
+by code point          U+0061   U+D7FF   U+FF01   U+1F600      <- WRONG
+by UTF-16 code unit    U+0061   U+D7FF   U+1F600  U+FF01       <- RFC 8785
+
+                       U+1F600 encodes as the pair D83D DE00,
+                       and 0xD83D sorts below 0xFF01.
+```
+
+
+This is reachable input, not a curiosity. Answer field *names* are ASCII by construction
+(`^[a-z][a-z0-9_]{0,63}$`), but a `document` field accepts any JSON value, so the object keys
+**inside** a document value are chosen by the caller and constrained by nothing. One answer carrying
+one non-BMP key is enough to make two implementations disagree about a receipt's digest.
 
 An implementation MUST use a JCS implementation, or MUST guarantee equivalent output for the value
-types this protocol uses. The fixtures in `fixtures/signing/` are the authority: an implementation
-that reproduces their byte lengths and hashes is canonicalizing correctly, and one that does not has
-a bug regardless of what its own tests say.
+types this protocol uses. The fixtures in `fixtures/signing/` are necessary but not sufficient: an
+implementation that fails to reproduce their byte lengths and hashes has a bug regardless of what
+its own tests say, but every object key in them is ASCII, so reproducing them proves nothing about
+member ordering. Test that separately, against a name above U+D7FF and a non-BMP name — C-26 does.
 
 Two traps worth naming, because both produce a digest that is stable in one implementation and wrong
 across two:

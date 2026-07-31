@@ -249,12 +249,36 @@ calling none of the production helpers.
 
 ### Fixed — the normative documents disagreed with each other, and with what was built
 
-A third review read the specification the way an implementer would, and found five places where two
-sentences of one unreleased version contradicted each other. None is a protocol change; all five are
-the documents disagreeing about what the protocol already is. Two of them — the chain height, and
-the number rule in `signing.md` — would have produced a Server that cannot interoperate with the
-reference implementation while following the specification exactly.
+A third review read the specification the way an implementer would, and found six places where two
+sentences of one unreleased version contradicted each other. None is a protocol change; all six are
+the documents disagreeing about what the protocol already is. Three of them — the member ordering,
+the chain height, and the number rule in `signing.md` — would have produced a Server that cannot
+interoperate with the reference implementation while following the specification exactly.
 
+- **`signing.md` named RFC 8785 and then specified a different sort order.** §3 said member names
+  are sorted **by code point**. RFC 8785 sorts by **UTF-16 code unit**, and the two disagree for any
+  non-BMP name, because a surrogate pair begins at 0xD800 and therefore sorts below every BMP
+  character from U+E000 up. The reference verifier published in §2.5 implemented the same error —
+  `json.dumps(sort_keys=True)`, which is code-point ordering — under a comment asserting it matched
+  JCS "for the value types this protocol uses". The hedge was about value *types* and the divergence
+  is in the key *charset*, so it excused exactly the case it did not cover.
+
+  This inverts an earlier finding. The Python SDK's ordering was reported as the outlier against the
+  Rust server and the TypeScript SDK; in fact it was the only implementation faithfully following the
+  published specification, and the specification was wrong about the standard it cited. A third party
+  implementing from `signing.md` — or copying the reference verifier, which is the thing a
+  specification publishes a reference verifier to be copied for — reproduced the Python behaviour and
+  disagreed with the server. §3 now states UTF-16 ordering, shows where the two diverge, and says why
+  it is reachable: a `document` field accepts any JSON value, so object keys inside a document value
+  are caller-chosen and constrained by nothing.
+
+  Two further corrections came with it. The reference verifier is now a real canonicalizer rather
+  than a `json.dumps` call, refuses a float instead of rendering one, and — for the first time — has
+  been executed: it reproduces the published receipt core byte for byte, verifies the worked vector,
+  and rejects all five negative vectors the document's own table promises. And §3 no longer claims
+  the signing fixtures are "the authority" on canonicalization. Every object key in them is ASCII, so
+  reproducing them proves nothing about ordering; they are necessary and not sufficient, and the
+  document now says so and points at C-26.
 - **§1.2 and §18 defined Level 1 differently.** §1.2 said 24 cases ending at C-24 and §18 said 25
   ending at C-25 — the fourth time this hand-maintained count went stale, and the one time it
   mattered, because the case §1.2 omitted exists precisely because the reference implementation had
