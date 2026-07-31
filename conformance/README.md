@@ -12,7 +12,7 @@ handoff-conformance --base-url https://your-deployment.example.com/v1 --profile 
 not pass, and cannot.** They were written before any conforming
 server existed, and two things are done to them regularly to keep the total meaning something: they
 are run against a server that answers `501` to everything, where the report must read
-`0/26 passing` with twenty-six individually named failures and a non-zero exit; and they are run
+`0/26 passing` with every case individually named and a non-zero exit; and they are run
 against a profile whose hooks implement nothing, where C-15 must be red. A suite that cannot fail
 loudly is not a suite. Against the reference implementation the Level 1 cases are green;
 `conformance/GATE.md` records both directions.
@@ -140,28 +140,41 @@ somewhere a skeptic can find them and rerun them against your endpoint. See
 ## Three ways a check passes without measuring anything
 
 Every one of these was found in this repository, in a check written by someone trying to prevent
-exactly the thing it failed to catch. They are listed because the pattern recurs and the failure is
-always silent: a check that measures nothing looks identical to one that measures everything, and
-the only signal is that it has never been seen to fail.
+exactly the thing it failed to catch. They are written in the past tense on purpose: each is a
+defect that has since been closed, kept here because the *pattern* recurs and the failure is always
+silent. A check that measures nothing looks identical to one that measures everything, and the only
+signal is that it has never been seen to fail. None of these is a statement about the tree as it
+stands today; a lesson that has to be re-verified every time the code moves stops being a lesson.
 
-**A verifier that shares code with the producer proves only self-consistency.** The receipt chain
+**A verifier that shares code with the producer proved only self-consistency.** The receipt chain
 was verified by calling the same canonicalization the server used to build it, so any
 self-consistent construction passed — including one that disagreed with the specification and with
-both published SDKs, which could verify none of the receipts the server minted. A verifier must
-implement the spec independently, or assert against published vectors. Ours now does both.
+both published SDKs, which could verify none of the receipts the server minted. What closed it: a
+verifier must implement the standard independently, or assert against published vectors. This suite
+now does both — `core/crates/handoff-conformance/src/chain.rs` implements RFC 8785 and
+`signing.md` §2.2 with no dependency on any protocol crate, checked against the vectors in
+`spec/fixtures/signing/` — and C-26 is the case that spends it. Its sibling half,
+`scripts/verify-minted-receipts.sh`, hands the same server-minted receipts to the two published
+SDKs, because a Rust verifier written by the same people from the same reading can still share a
+misreading with the server.
 
 **An anti-vacuity guard must be scoped to the same unit as the assertion it protects.** The
-row-level-security test asserts, per table, that a query without a tenant predicate returns only the
-caller's rows — a comparison that can only fail when *another* tenant owns a row in that table. One
-guard checked that a second tenant existed at all, which proves the loop ran and not that any
-iteration could have failed. Eight of nineteen tables were asserting nothing. A guard covering a
-loop is not a guard covering its iterations.
+row-level-security test asserted, per table, that a query without a tenant predicate returns only
+the caller's rows — a comparison that can only fail when *another* tenant owns a row in that table.
+One guard checked that a second tenant existed at all, which proves the loop ran and not that any
+iteration could have failed, and a large fraction of the tables were asserting nothing while the
+test reported full coverage. Two things closed it: the guard moved inside the iteration, and the
+table list stopped being maintained by hand — a cross-check against the database's own policy
+catalogue now fails when a table gains a policy and no assertion. The same shape appears in this
+suite's own chain walk, which rewrites *each* receipt in turn rather than proving once that some
+rewrite would be caught.
 
 **A readiness probe must confirm it is talking to the server it started.** The conformance harness
 probed a port, got an answer, and proceeded — against an orphaned server from a previous run, with a
-stale database. The same tree scored 17/24, 19/24, 22/24, 23/24 and 24/24 in one evening and not one
-of those failures was about the protocol. A run against a stranger is not a measurement, whichever
-way it lands.
+stale database. One tree produced five different scores in one evening and not one of those failures
+was about the protocol. What closed it: the runner checks its own process is alive before it trusts
+an HTTP answer, and every resource a run owns — database, ports, scratch directory — derives from a
+per-run token. A run against a stranger is not a measurement, whichever way it lands.
 
 The habit that catches all three: **break the thing on purpose and watch the check fail.** If you
 have never seen a check go red, you have not tested the check — you have tested the code, using an

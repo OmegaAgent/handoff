@@ -38,17 +38,26 @@ rationale: >
   A `document` field accepts any non-null JSON value (§5.3), so caller-chosen object keys travel
   into `decision.values` and from there into the hashed receipt core. The answer below carries the
   shapes where independent canonicalizers actually diverge, rather than the shapes that are easy to
-  agree on:
+  agree on. It is the same payload `scripts/verify-minted-receipts.sh` sends to the two published
+  SDKs, deliberately: the two checks should mean the same thing by "hard to canonicalize".
 
-  - `😀` (U+1F600) and `！` (U+FF01) as **object keys**. RFC 8785 orders members by UTF-16 code
-    units, so the emoji — a surrogate pair beginning 0xD83D — sorts *below* `！`, while by code point
-    it sorts above. An implementation using a code-point sort emits different bytes for this exact
-    object and computes a different digest. That was the live defect.
-  - A nested object and an array, so ordering is exercised below the top level.
-  - Strings carrying non-ASCII text and a quote: JCS emits UTF-8 as itself and escapes only what
-    RFC 8785 §3.2.2.2 requires.
-  - `9007199254740991` — 2^53 − 1, the largest integer §1.4 admits, at the boundary where a
-    canonicalizer that routes numbers through a float loses the last digit silently.
+  - `😀` (U+1F600) and `！` (U+FF01) as **object keys, together**. Neither alone proves anything.
+    RFC 8785 §3.2.3 orders members by UTF-16 code units, so the emoji — a surrogate pair beginning
+    0xD83D — sorts *below* `！`, while by code point it sorts above. An implementation using a
+    code-point sort emits different bytes for this exact object and computes a different digest.
+    That was the live defect, in a published SDK, for three rounds.
+  - The **empty-string key**, which sorts before everything and is easy to mishandle.
+  - The same pair **nested below the top level**, where a canonicalizer that sorted only the root
+    would still pass.
+  - Numbers at **both ends** of ±(2^53 − 1) — the last values a double carries intact, and the
+    boundary where a canonicalizer that routes numbers through a float loses the last digit
+    silently.
+  - A string carrying **JSON escapes and a raw non-ASCII character**, since escaping is the other
+    half of canonical string output: RFC 8785 §3.2.2.2 escapes the quote, the backslash and the
+    control characters, and emits everything else as UTF-8 rather than as a `\u` escape.
+
+  A C-26 that answered `{"decision": "approve"}` and verified the result would prove only what the
+  receipts of every other case already prove.
 
 requires:
   principals: [machine_a, human_editor]
@@ -72,11 +81,14 @@ steps:
               - name: payload
                 type: document
                 required: true
-              - name: reference
-                type: text
-                required: true
-              - name: amount_minor
+              - name: at_max_safe
                 type: number
+                required: true
+              - name: at_min_safe
+                type: number
+                required: true
+              - name: note
+                type: text
                 required: true
           capabilities: []
           authority: {min_role: editor, auth_strength: session}
@@ -95,14 +107,16 @@ steps:
       body:
         values:
           payload:
-            "😀": 2
             "！": 1
+            "😀": 2
             "a": 0
-            "zürich":
-              "😀 nested": ["ß", "日本語", 17]
-              "b": {"！": true}
-          amount_minor: 9007199254740991
-          reference: "vendor \"Ω\" — invoice 12/07, Zürich"
+            "": 3
+            "nested":
+              "😀": {"！": [1, 2]}
+              "": {"z": 0, "！": 1}
+          at_max_safe: 9007199254740991
+          at_min_safe: -9007199254740991
+          note: "café \"quoted\" \\ backslash\nsecond line\ttab"
         note: "Matches the statement line for line."
       expect:
         status: 200
@@ -126,12 +140,22 @@ steps:
               A Server that dropped or transliterated the keys would mint a perfectly verifiable
               receipt of content nobody submitted, and the digest check below would pass. What the
               receipt records has to be what the person actually answered (§9.2).
-          - path: decision.values.amount_minor
+          - path: decision.values.payload
+            contains_text: "！"
+          - path: decision.values.at_max_safe
             equals: 9007199254740991
             because: >
-              §1.4 — 2^53 − 1 is admitted exactly. A canonicalizer that took this through a float
-              would return 9007199254740992 here, which is the kind of defect that shows up years
-              later in somebody else's audit.
+              §1.4 — both ends of ±(2^53 − 1) are admitted exactly. A canonicalizer that took these
+              through a float would return 9007199254740992 here, which is the kind of defect that
+              surfaces years later in somebody else's audit.
+          - path: decision.values.at_min_safe
+            equals: -9007199254740991
+          - path: decision.values.note
+            contains_text: "café"
+            because: >
+              RFC 8785 §3.2.2.2 — non-ASCII is carried as UTF-8 rather than escaped, and the quote,
+              the backslash and the control characters are escaped rather than carried. Both halves
+              have to survive the round trip for the digest below to mean anything.
           - path: chain.digest
             same_as: digest
           - path: chain.prev_digest
@@ -144,6 +168,7 @@ steps:
       head: /receipts/chain-head
       must_include: ["${receipt}"]
       standalone: ["${receipt}"]
+      genesis: true
       at_least: 1
       because: >
         `signing.md` §2.2, computed here rather than asked for. The receipt just minted is
@@ -155,3 +180,8 @@ steps:
 
         `standalone` is the auditor's position stated exactly: one receipt, no chain, no secret,
         and the record either verifies or it does not.
+
+        `genesis` pins where the chain starts. A chain enumerated from 0 verifies against itself
+        perfectly and seals identical content over different bytes, because `height` leads the
+        hashed chain input — so the first receipt must be at height 1, and its predecessor must be
+        the 64 ASCII zeros, stored rather than implied.

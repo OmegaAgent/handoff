@@ -1,4 +1,4 @@
-//! An independent implementation of the receipt chain (§9.4, `signing.md` §2.2).
+//! An independent implementation of the receipt chain (§9.4, `signing.md` §2.2, RFC 8785).
 //!
 //! # Why the suite computes this itself
 //!
@@ -11,32 +11,57 @@
 //! one hook: **a claim the suite can compute, the suite must compute.** Asking the party under test
 //! for the answer measures the party's willingness to answer.
 //!
-//! So this module implements `signing.md` §2.2 from the specification text, and the runner walks
-//! the chain over the receipts a case read from the deployment's own HTTP surface. Nothing is
-//! narrated; a deployment that has not implemented the chain cannot produce receipts whose stored
-//! digests are the hashes this module computes.
+//! So this module implements the two-step hash of `signing.md` §2.2 and the canonicalization of
+//! RFC 8785, and the runner walks the chain over the receipts a case read from the deployment's own
+//! HTTP surface. Nothing is narrated; a deployment that has not implemented the chain cannot
+//! produce receipts whose stored digests are the hashes this module computes.
 //!
-//! # It shares no code with any server
+//! # Do not "simplify" this by calling `handoff_protocol`
 //!
-//! `Cargo.toml` says why this crate depends on no protocol crate: a shared type lets one bug in an
-//! implementation cancel against the same bug in the suite. That applies with most force here, so
-//! the canonicalizer below is written from `signing.md` §3 and RFC 8785 and is checked against the
-//! **published vectors** in `spec/fixtures/signing/`, which is the authority the specification
-//! itself names. Two implementations that agree with the fixtures agree with each other.
+//! This is the warning the next author needs, because the closed loop is shorter and looks
+//! cleaner: **this module must never call `handoff_protocol::receipt::verify_chain`,
+//! `canonical_json`, or any part of the reference implementation.** If the suite verifies a receipt
+//! with the same code that built it, a green result means the implementation agrees with itself and
+//! nothing more — and the two release-blocking defects found in review 3 are exactly what that
+//! blindness costs. Both were receipts the reference server minted, stored and happily re-verified,
+//! and that a published SDK reported as forged: one because two canonicalizers ordered members
+//! differently, one because a float reached a digest-covered position. A closed loop cannot see
+//! either. `Cargo.toml` refuses the dependency for the same reason; this comment exists because a
+//! refusal without a reason gets removed by someone tidying up.
 //!
-//! # The two rules that are easy to get subtly wrong
+//! The other half of that seam is `scripts/verify-minted-receipts.sh`, which hands the same
+//! receipts to the two **published SDKs**. That is the check for *our* divergence; this module is
+//! what a third party runs against their own server, where it is genuinely independent code.
 //!
-//! **Member order is UTF-16 code units, not code points.** They agree for every name below U+D800
-//! and diverge above it: a non-BMP character encodes as a surrogate pair beginning 0xD800, so it
-//! sorts *below* every BMP character above U+D7FF while its code point sorts above them. A
-//! `document` field carries caller-chosen object keys into `decision.values` and from there into the
-//! hashed core, so this is reachable by anyone who can answer a request — it is not a theoretical
-//! corner.
+//! # Written to the standard, not to our prose
 //!
-//! **Digest-covered content carries integer literals only** (§1.4, `signing.md` §3), bounded to
-//! ±(2^53 − 1). The rule is about the literal, not the value it denotes: `-0.0` and `2.0` have no
-//! fractional part and are still floats, and a receipt only one implementation can canonicalize is
-//! a receipt nobody can verify.
+//! Ordering follows **RFC 8785 §3.2.3**: object members are sorted by the **UTF-16 code units** of
+//! their names, compared as unsigned 16-bit values. Not code points.
+//!
+//! This distinction is why this module cites the RFC rather than `signing.md`. Until the correction
+//! landed, §3 of `signing.md` said "sorted by code point" while naming RFC 8785 in the same
+//! sentence, and its published reference verifier implemented the wrong one — so an implementation
+//! written faithfully from that prose would have reproduced the defect this module exists to catch,
+//! and C-26 would have passed against a server carrying it. An independent implementation of a
+//! wrong specification is not an independent check; it is a second copy of the same error.
+//!
+//! The two orderings agree for every name below U+D800 and diverge above it: a non-BMP character
+//! encodes as a surrogate pair beginning 0xD800, so it sorts *below* every BMP character above
+//! U+D7FF while its code point sorts above them. A `document` field carries caller-chosen object
+//! keys into `decision.values` and from there into the hashed core, so anyone who can answer a
+//! request can reach this — it is not a theoretical corner. C-26 answers with `U+1F600` and
+//! `U+FF01` as keys of one object for exactly that reason.
+//!
+//! # Numbers: the form at rest, not the value
+//!
+//! §1.4 admits integers within ±(2^53 − 1) in digest-covered content, and requires a digest-covered
+//! number to be **stored and served in the form the canonicalizer emits**. `1.0`, `-0.0` and `1e2`
+//! are accepted at the door and normalized to `1`, `0` and `100`; `1.5` is refused outright.
+//!
+//! So this module refuses a float literal in a **served** receipt rather than normalizing it. That
+//! is the point: a Server that digests `0` and serves `0.0` has minted a record whose bytes nobody
+//! else can hash back to its digest, and silently normalizing here would hide precisely that. The
+//! rule is about the form at rest, so the check has to be about the form at rest.
 
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
@@ -137,11 +162,12 @@ fn write_number(n: &serde_json::Number, at: &str, out: &mut String) -> Result<()
         return Ok(());
     }
     Err(format!(
-        "`{where_}` is {n}, and §1.4 admits integer literals only in digest-covered content — no \
-         decimal point, no exponent. The rule is about the literal rather than the value: `-0.0` \
-         and `2.0` have no fractional part and are still floats, and RFC 8785 inherits ECMAScript \
-         number formatting, which independent implementations do not reproduce alike. A Server \
-         mints no receipt it cannot canonicalize."
+        "`{where_}` is served as {n}, and §1.4 requires a digest-covered number to be stored and \
+         served in the form the canonicalizer emits — a plain integer literal, no decimal point and \
+         no exponent. `1.0` and `-0.0` are accepted at the door and normalized to `1` and `0`; what \
+         is served here was not. The bytes this Server digested and the bytes it served are \
+         therefore different bytes, so its receipt hashes to its stored digest for nobody but \
+         itself — which is the one thing a chain cannot survive."
     ))
 }
 
@@ -328,6 +354,53 @@ pub fn verify(receipts: &[Value]) -> Result<Head, String> {
     })
 }
 
+/// The first receipt of a chain, as §2.2 defines it: height 1, and the genesis predecessor stored
+/// rather than implied.
+///
+/// Both halves are asserted because both are silent when wrong. A chain enumerated from 0 verifies
+/// against itself perfectly and seals identical content over different bytes than a 1-based one,
+/// since `height` leads the hashed chain input — a verifier reading heights off the receipts rather
+/// than off its own loop counter never notices. And a first receipt with no stored `prev_digest`
+/// verifies in a walk and cannot be verified alone, which is the case a receipt exists for.
+pub fn verify_genesis(receipts: &[Value]) -> Result<(), String> {
+    let first = receipts
+        .iter()
+        .min_by_key(|r| {
+            r.get("chain")
+                .and_then(|c| c.get("height"))
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX)
+        })
+        .ok_or("there are no receipts, so there is no first receipt".to_string())?;
+    let id = id_of(first, 0);
+    let chain = member(first, "chain").ok_or_else(|| format!("{id} carries no `chain` member"))?;
+
+    match chain.get("height").and_then(Value::as_u64) {
+        Some(1) => {}
+        other => {
+            return Err(format!(
+                "the first receipt in this chain ({id}) is at height {}, and §2.2 makes height \
+                 1-based: height counts receipts, so an exported head at height n is the nth \
+                 receipt. Height 0 is the position of the predecessor the first receipt does not \
+                 have, and the 64 ASCII zeros stand there instead.",
+                other.map_or("<absent>".to_string(), |h| h.to_string())
+            ))
+        }
+    }
+    match chain.get("prev_digest").and_then(Value::as_str) {
+        Some(GENESIS_PREV_DIGEST) => Ok(()),
+        Some(other) => Err(format!(
+            "the first receipt in this chain ({id}) records prev_digest {other}, and §2.2 requires \
+             64 ASCII zeros prefixed `sha256:` — it has a predecessor it cannot have"
+        )),
+        None => Err(format!(
+            "the first receipt in this chain ({id}) stores no `prev_digest`. §2.2 requires the \
+             genesis value to be stored rather than substituted during the computation, so that a \
+             party holding one receipt can verify it without being handed the chain."
+        )),
+    }
+}
+
 /// Verify one receipt on its own, the way a party holding a single receipt has to.
 ///
 /// §2.2 stores `prev_digest` rather than implying it precisely so this is possible: the digest is
@@ -459,19 +532,28 @@ mod tests {
     }
 
     #[test]
-    fn a_float_literal_is_refused_wherever_it_sits() {
+    fn a_float_literal_in_a_served_receipt_is_refused_wherever_it_sits() {
+        // Normalizing quietly here would hide the defect this exists to find: a Server that
+        // digests `0` and serves `0.0` has a receipt only it can verify. §1.4's rule is about the
+        // form at rest, so this is a check on the form at rest.
         for bad in [json!(-0.0), json!(0.0), json!(1.5), json!(1e21)] {
             let doc = json!({"decision": {"values": {"amount": bad.clone()}}});
             let err = canonical_json(&doc).expect_err("a float is not canonicalizable");
             assert!(err.contains("decision.values.amount"), "{err}");
-            assert!(err.contains("integer literals only"), "{err}");
+            assert!(err.contains("in the form the canonicalizer emits"), "{err}");
         }
-        // The literal rule is not a rule against every number: the safe integers are fine, and the
-        // boundary itself is inside the range.
-        for good in [json!(0), json!(-1), json!(9007199254740991i64)] {
+        // Not a rule against numbers: both ends of the safe range are exactly what a conforming
+        // Server serves, including the boundary values C-26 answers with.
+        for good in [
+            json!(0),
+            json!(-1),
+            json!(9007199254740991i64),
+            json!(-9007199254740991i64),
+        ] {
             canonical_json(&json!({"n": good})).expect("an integer literal canonicalizes");
         }
         assert!(canonical_json(&json!({"n": 9007199254740992i64})).is_err());
+        assert!(canonical_json(&json!({"n": -9007199254740992i64})).is_err());
     }
 
     #[test]
@@ -527,6 +609,35 @@ mod tests {
             let err = verify(&altered).expect_err("a rewritten history must not verify");
             assert!(err.contains("recomputing it"), "{err}");
         }
+    }
+
+    #[test]
+    fn the_genesis_link_is_pinned_at_height_one_with_the_stored_zeros() {
+        assert!(verify_genesis(&three()).is_ok());
+
+        // A chain enumerated from 0. Every digest in it agrees with every other, so `verify` has
+        // nothing to complain about — which is exactly why this is asserted separately.
+        let mut zero_based = three();
+        for receipt in &mut zero_based {
+            let height = receipt["chain"]["height"].as_u64().unwrap();
+            receipt["chain"]["height"] = json!(height - 1);
+        }
+        let err = verify_genesis(&zero_based).expect_err("height is 1-based");
+        assert!(err.contains("1-based"), "{err}");
+
+        // A first receipt that implies its predecessor rather than storing it.
+        let mut implied = three();
+        implied[0]["chain"]
+            .as_object_mut()
+            .unwrap()
+            .remove("prev_digest");
+        let err = verify_genesis(&implied).expect_err("the genesis value is stored");
+        assert!(err.contains("stores no `prev_digest`"), "{err}");
+
+        // A first receipt claiming a predecessor it cannot have.
+        let mut inherited = three();
+        inherited[0]["chain"]["prev_digest"] = json!("sha256:{}".replace("{}", &"a".repeat(64)));
+        assert!(verify_genesis(&inherited).is_err());
     }
 
     #[test]

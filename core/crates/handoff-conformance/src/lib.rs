@@ -59,6 +59,7 @@ pub mod runner;
 pub mod signing;
 pub mod vars;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Version of this crate, as published to crates.io.
@@ -80,6 +81,15 @@ pub struct ConformanceMap {
     pub spec_version: String,
     /// Every case §18 defines.
     pub cases: Vec<MappedCase>,
+    /// The same case ids again, grouped by level, for a reader who wants the roster rather than
+    /// the table.
+    ///
+    /// Two representations of one fact inside one file, which is a drift hazard by construction:
+    /// a case was added to `cases` and not to this, and the file was internally inconsistent
+    /// while every check that read only `cases` reported agreement. [`audit_coverage`] now holds
+    /// the two to each other.
+    #[serde(default)]
+    pub levels: BTreeMap<String, Vec<String>>,
     /// Every invariant §17 defines, with the cases that prove it.
     pub invariants: Vec<MappedInvariant>,
 }
@@ -207,6 +217,42 @@ pub fn audit_coverage(cases: &[case::Case], map: &ConformanceMap) -> Result<(), 
         }
     }
 
+    // The map states the roster twice — once as `cases` with a level each, once as `levels` — and
+    // the second one silently fell a case behind the first. Nothing noticed, because everything
+    // that reads this file reads `cases`. Two representations of one fact are only safe while
+    // something compares them.
+    for (level, listed) in &map.levels {
+        let mut listed = listed.clone();
+        let mut derived: Vec<String> = map
+            .cases
+            .iter()
+            .filter(|c| c.level.to_string() == *level)
+            .map(|c| c.id.clone())
+            .collect();
+        listed.sort();
+        derived.sort();
+        if listed != derived {
+            let missing: Vec<&String> = derived.iter().filter(|c| !listed.contains(c)).collect();
+            let extra: Vec<&String> = listed.iter().filter(|c| !derived.contains(c)).collect();
+            problems.push(format!(
+                "spec/conformance-map.json disagrees with itself about Level {level}: `levels` \
+                 holds {} id(s) and `cases` holds {}{}{}",
+                listed.len(),
+                derived.len(),
+                if missing.is_empty() {
+                    String::new()
+                } else {
+                    format!(", missing {missing:?}")
+                },
+                if extra.is_empty() {
+                    String::new()
+                } else {
+                    format!(", naming {extra:?} which is not at that level")
+                },
+            ));
+        }
+    }
+
     if problems.is_empty() {
         Ok(())
     } else {
@@ -245,6 +291,45 @@ mod tests {
         let cases = load_cases(&root.join("conformance").join("cases")).expect("cases load");
         audit_coverage(&cases, &map).expect("cases cover §18");
         assert_eq!(map.spec_version, PROTOCOL_VERSION);
+    }
+
+    /// The map states its roster twice, and the two must agree.
+    ///
+    /// This is not hypothetical: `levels."1"` fell one case behind `cases` the day C-26 landed,
+    /// and every check in the repository read `cases`, so the file was internally inconsistent
+    /// and nothing said so.
+    #[test]
+    fn a_map_that_disagrees_with_itself_about_its_levels_is_a_failure() {
+        let map: ConformanceMap = serde_json::from_str(
+            r#"{"spec_version": "0.1",
+                "levels": {"1": ["C-1"], "2": ["C-2"]},
+                "cases": [{"id": "C-1", "level": 1, "title": "t", "invariants": ["I1"]},
+                          {"id": "C-2", "level": 2, "title": "t", "invariants": []},
+                          {"id": "C-3", "level": 1, "title": "t", "invariants": ["I1"]}],
+                "invariants": [{"id": "I1", "statement": "s", "cases": ["C-1"]}]}"#,
+        )
+        .expect("the map parses");
+        let cases: Vec<case::Case> = ["C-1", "C-2", "C-3"]
+            .iter()
+            .map(|id| {
+                let level = if *id == "C-2" { 2 } else { 1 };
+                let invariants = if *id == "C-2" { "[]" } else { "[I1]" };
+                case::parse(
+                    Path::new("test.yaml"),
+                    &format!(
+                        "id: {id}\ntitle: t\nlevel: {level}\ninvariants: {invariants}\nsteps: []\n"
+                    ),
+                )
+                .expect("the case parses")
+            })
+            .collect();
+
+        let problem = audit_coverage(&cases, &map).expect_err("the map contradicts itself");
+        assert!(
+            problem.contains("disagrees with itself about Level 1"),
+            "{problem}"
+        );
+        assert!(problem.contains("C-3"), "{problem}");
     }
 
     /// The hostile profile must differ from the honest one **only** in its hooks.

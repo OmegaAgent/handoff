@@ -473,6 +473,16 @@ pub struct VerifyChain {
     #[serde(default)]
     pub at_least: usize,
 
+    /// Require the first receipt in the walk to be at height **1** and to store the 64-zero
+    /// genesis `prev_digest`.
+    ///
+    /// A 0-based chain and a 1-based one both verify internally — every digest agrees with every
+    /// other — and they seal identical content over different bytes, because `height` is the first
+    /// field of the hashed chain input. Nothing else in the suite would notice, which is why §2.2
+    /// spends a paragraph on it and why this is asserted rather than implied.
+    #[serde(default)]
+    pub genesis: bool,
+
     /// Receipt ids that must also verify **on their own**, from the receipt's own stored
     /// `chain.prev_digest` rather than from a walk.
     ///

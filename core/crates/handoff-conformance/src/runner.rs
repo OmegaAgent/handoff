@@ -766,6 +766,14 @@ impl<'a> Runner<'a> {
             }
         };
 
+        if v.genesis {
+            if let Err(why) = chain::verify_genesis(receipts) {
+                return fail(format!(
+                    "the chain does not start where §2.2 says it does: {why}"
+                ));
+            }
+        }
+
         for wanted in &v.standalone {
             let wanted = vars::interpolate(wanted, &scope.vars)?;
             let receipt = receipts
