@@ -19,10 +19,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The commits to check are the ones the pull request proposes, taken from the event itself.
+      # `origin/<base_ref>..HEAD` was close but not the same set: for a `pull_request` event
+      # actions/checkout builds a synthetic merge of the head into the base and checks THAT out,
+      # so HEAD is a merge commit GitHub wrote, it carries no trailer the way no merge commit
+      # does, and it would be reported against a contributor who cannot sign it and did not write
+      # it. A commit the author cannot fix is not a gate, it is a wall. Both SHAs are present in
+      # the checkout because they are the two parents of the ref that was cloned at full depth.
       - name: Check Signed-off-by trailers
         run: |
-          base="origin/${{ github.base_ref }}"
-          git fetch --quiet origin "${{ github.base_ref }}"
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          for sha in "$base" "$head"; do
+            if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+              echo "::error::${sha} is not in this checkout. The job needs fetch-depth: 0."
+              exit 1
+            fi
+          done
 
           failed=0
           while read -r sha; do
@@ -47,7 +60,7 @@ jobs:
             fi
 
             echo "ok  ${sha:0:8}  $subject"
-          done < <(git rev-list "$base"..HEAD)
+          done < <(git rev-list "$base".."$head")
 
           if [ "$failed" -ne 0 ]; then
             cat <<'EOF'

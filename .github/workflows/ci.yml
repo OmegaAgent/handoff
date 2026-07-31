@@ -78,6 +78,74 @@ jobs:
       - name: handoffd is the server binary name
         run: test -x target/debug/handoffd
 
+  managed:
+    name: managed — fmt, clippy, build, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: managed
+    # `managed/` is a second Cargo workspace and the job above is pinned to `working-directory:
+    # core`, so its 76 tests ran in no job at all — including the ones that stand between the
+    # closed adapter and the open core. The tier is closed source and stays closed; that is a
+    # licence, not a reason to leave it unbuilt, and the boundary assertions in `handoff-omegas`
+    # (`no_patch_section_exists` among them) only mean something if something runs them.
+    #
+    # Five of the tests create and drop disposable `handoff_managed_*` databases through
+    # `HANDOFF_TEST_ADMIN_URL` (managed/README.md), which is why the service block is repeated.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: omega
+      PGPASSWORD: omega
+      HANDOFF_TEST_ADMIN_URL: postgres://omega:omega@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: psql, which the store suite shells out to
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      # The boundary that makes the split safe is mechanical, so assert it mechanically rather
+      # than trusting that nobody edited the manifest: nothing in this workspace is publishable
+      # and nothing in it is open-licensed.
+      - name: The closed tier is still closed
+        run: |
+          python3 - <<'PY'
+          import tomllib, sys
+          with open("Cargo.toml", "rb") as fh:
+              package = tomllib.load(fh)["workspace"]["package"]
+          if package.get("license") != "UNLICENSED" or package.get("publish") is not False:
+              sys.exit(f"managed/ must stay UNLICENSED and publish = false; found {package}")
+          print("managed/ is UNLICENSED and publish = false")
+          PY
+
   no-fork-markers:
     name: core — no [patch], no path dependency on a published crate
     runs-on: ubuntu-latest
@@ -95,6 +163,96 @@ jobs:
           fi
           echo "clean"
 
+      # The job carried both halves of the rule in its name and enforced only the first. The
+      # second is the one CONTRIBUTING.md:89 spells out — "no path dependency ... in any consumer
+      # of this repository, including our own managed service" — and it was the half under which
+      # `managed/Cargo.toml` sat unexamined. Every tracked manifest is parsed, so a new consumer
+      # cannot arrive without passing through here.
+      - name: No path dependency onto a handoff-* crate outside core/
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess, sys, tomllib
+
+          # managed/ is a consumer of the open core that has not been extracted yet. Its four path
+          # dependencies are declared here, by name, with the reason: `managed/Cargo.toml:24-32`
+          # says they become tag pins the day the workspace moves to `handoff-cloud`, and until
+          # that day a compiler cannot see the adapter and the core together without them. This is
+          # an allowance and not an exception to the rule — the rule is that a fork must be
+          # visible, and four named lines in one manifest are visible. A fifth is not allowed, a
+          # path that reaches anywhere but ../core/crates is not allowed, and the day managed/
+          # stops needing these the check below fails and tells you to delete this list.
+          ALLOWED = {
+              "managed/Cargo.toml": {
+                  "handoff-protocol": "../core/crates/handoff-protocol",
+                  "handoff-core": "../core/crates/handoff-core",
+                  "handoff-store-postgres": "../core/crates/handoff-store-postgres",
+                  "handoff-server": "../core/crates/handoff-server",
+              }
+          }
+
+          TABLES = {"dependencies", "dev-dependencies", "build-dependencies"}
+
+          def entries(node, table=None):
+              """Every dependency entry in a manifest, wherever the table is nested — plain,
+              dev, build, [workspace.dependencies], and [target.'cfg(…)'.dependencies] alike."""
+              if not isinstance(node, dict):
+                  return
+              for key, value in node.items():
+                  if key in TABLES and isinstance(value, dict):
+                      for name, spec in value.items():
+                          if isinstance(spec, dict):
+                              yield name, spec
+                  elif isinstance(value, dict):
+                      yield from entries(value, key)
+
+          manifests = [p for p in subprocess.run(["git", "ls-files"], capture_output=True,
+                                                 text=True, check=True).stdout.split()
+                       if p.endswith("Cargo.toml")]
+          if not manifests:
+              sys.exit("No Cargo.toml is tracked. This check just stopped looking at anything.")
+
+          failed, allowed_seen = [], set()
+          for rel in manifests:
+              try:
+                  with open(rel, "rb") as fh:
+                      document = tomllib.load(fh)
+              except tomllib.TOMLDecodeError as error:
+                  # A manifest this cannot read is a manifest this cannot vouch for.
+                  failed.append(f"{rel} does not parse as TOML: {error}")
+                  continue
+              for name, spec in entries(document):
+                  path = spec.get("path")
+                  if path is None or not name.startswith("handoff-"):
+                      continue
+                  if rel.startswith("core/"):
+                      # Inside the workspace this is how the crates link. It is only publishable
+                      # if it also carries a version, and an unpublishable core is its own fork.
+                      if "version" not in spec:
+                          failed.append(f"{rel}: {name} is a bare path dependency inside core/; "
+                                        "add a version so the crate can be published.")
+                      continue
+                  expected = ALLOWED.get(rel, {}).get(name)
+                  if expected is not None and path == expected:
+                      allowed_seen.add((rel, name))
+                      continue
+                  failed.append(f"{rel}: {name} = {{ path = \"{path}\" }} — a path dependency onto "
+                                "a handoff-* crate from outside core/. CONTRIBUTING.md: land the "
+                                "change here first and pin the consumer to a tag.")
+
+          for rel, allowed in ALLOWED.items():
+              for name in allowed:
+                  if (rel, name) not in allowed_seen:
+                      failed.append(f"the allowance for {name} in {rel} is no longer used. If that "
+                                    "workspace has been extracted, delete the entry — an unused "
+                                    "exemption is a hole nobody is watching.")
+
+          if failed:
+              print("\n".join(f"  {f}" for f in failed))
+              sys.exit(f"{len(failed)} fork marker(s).")
+          print(f"{len(manifests)} manifest(s): no [patch], no unallowed path dependency, "
+                f"{len(allowed_seen)} declared allowance(s) all still in use.")
+          PY
+
   python-sdk:
     name: sdk/python — lint, import, build
     runs-on: ubuntu-latest
@@ -111,10 +269,14 @@ jobs:
       - name: Byte-compile
         run: python -m compileall -q handoff human
 
+      # Both halves matter. An unpinned ruff means the rule set is whatever shipped that morning —
+      # this unchanged tree reported 7 findings on one version and 188 on another — and a pinned
+      # ruff with no `[tool.ruff]` still leaves the selection to the tool's defaults, which move
+      # between releases. The rules live in `sdk/python/pyproject.toml`.
       - name: Lint
         run: |
-          python -m pip install --quiet ruff
-          python -m ruff check .
+          python -m pip install --quiet 'ruff==0.6.1'
+          python -m ruff check --no-cache .
 
       - name: Import surface
         run: |
@@ -130,6 +292,15 @@ jobs:
           assert human.ask is handoff.ask, "the alias must forward, not reimplement"
           print("handoff", handoff.__version__, "+ deprecated `human` alias: ok")
           PY
+
+      # `sdk/python/README.md:140` documents this command and no job ran it. The directory holds
+      # the receipt-chain assertions and the SIGKILL-mid-poll durability case — the SDK half of
+      # the seam that produced the worst finding of the third review — and it was verified by
+      # nobody. A test suite outside CI is a test suite that is green when someone last looked.
+      - name: Test
+        run: |
+          python -m pip install --quiet 'pytest==8.3.2'
+          python -m pytest tests/ -q
 
       - name: Build the distribution
         run: |
@@ -310,7 +481,80 @@ jobs:
 
           # Claim 5: no fixture carries a secret value, a resolvable capability address, or a
           # request `kind`. A resolvable address is the one that would undo I8 by example.
-          address = re.compile(r"https?://(?!example\.(com|org|invalid)\b)[^\s\"']+|wss?://[^\s\"']+")
+          #
+          # Both matchers below were wrong in opposite directions, and the workflow had never run
+          # so neither said so. The secret matcher flagged any `secret|password|token|value`
+          # member over twelve characters, which is red on the pristine tree: `03-login-assistance`
+          # carries the anti-secret placeholder "<never leaves TLS>" and `07-reassign-escalate`
+          # carries a principal id. The address matcher put its only capture group inside a
+          # negative lookahead, so `re.findall` returned "" for every match and the `token=` test
+          # could not be true — a planted `…/live?token=LEAKED` passed.
+          #
+          # A stand-in for a value: the fixture says a credential goes here without carrying one.
+          # It has to be delimited, so a bare high-entropy string cannot claim to be one.
+          PLACEHOLDER = re.compile(r"<[^<>]*>|\{\{[^{}]*\}\}|\$\{[^{}]*\}|…|\.\.\.|REDACTED|redacted")
+          # A typed identifier: a short lowercase type prefix and a Crockford base32 body, the
+          # shape the spec prints throughout (`usr_01J9M7QW…`). Deliberately narrow — every
+          # credential prefix in CREDENTIAL below is either longer than four letters or uses an
+          # alphabet this excludes, so no credential can be waved through as an identifier.
+          IDENTIFIER = re.compile(r"[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{20,32}\Z")
+          # Shapes that are a credential wherever they appear, whatever the member is called.
+          CREDENTIAL = re.compile(
+              r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}"
+              r"|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|\bwhsec_[A-Za-z0-9+/=_-]{16,}"
+              r"|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bxox[abprs]-[A-Za-z0-9-]{10,}"
+              r"|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\."
+              r"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+          # A query parameter that carries capability material, with a literal after the `=`.
+          CAPABILITY_PARAM = re.compile(
+              r"[?&][a-z_]*(?:token|key|secret|sig|signature|password|auth)="
+              r"(?![<{$])[A-Za-z0-9._~+/=-]{8,}")
+          # Reserved for documentation: an address under one of these resolves for nobody.
+          RESERVED_HOST = re.compile(
+              r"\A(?:localhost|127\.0\.0\.1|\[::1\]|(?:[a-z0-9-]+\.)*example\.(?:com|org|net)"
+              r"|[a-z0-9.-]+\.(?:invalid|test|local|internal))\Z")
+          LIVE_PATH = re.compile(r"/(?:live|stream|relay|session|sessions|attach|ws)(?:/|\?|\Z)")
+          URL = re.compile(r"(?:https?|wss?)://[^\s\"']+")
+
+          def leaks(text):
+              """Every reason this text must not be published, as a list of sentences."""
+              found = [f"a credential literal: {m.group(0)[:24]}…" for m in CREDENTIAL.finditer(text)]
+              for m in URL.finditer(text):
+                  url = m.group(0)
+                  host = re.sub(r"\A(?:https?|wss?)://(?:[^@/]*@)?", "", url).split("/")[0]
+                  if CAPABILITY_PARAM.search(url):
+                      found.append(f"a capability token in a query string: {url[:60]}")
+                  elif LIVE_PATH.search(url.split("?")[0]) and not RESERVED_HOST.match(host):
+                      found.append(f"a resolvable live-session address: {url[:60]}")
+              return found
+
+          # A matcher nobody has watched fire is the defect this step is here to have fixed, so it
+          # fires on demand before it is trusted with the tree. The strings are assembled rather
+          # than written out, so that `secret-hygiene` does not find a credential in this file.
+          MUST_FIRE = [
+              "AKIA" + "IOSFODNN7EXAMPLE",
+              "whsec_" + "b" * 32,
+              "sk-" + "K" * 32,
+              "https://relay.attacker.example.net/live?token=" + "e" * 40,
+              "https://relay.omegas.dev/v1/live/hs_01K3MB2R4S8ZC4YRXB2N6VD9FT",
+          ]
+          MUST_NOT_FIRE = [
+              "<never leaves TLS>", "usr_01J9M7QW8ZC4YRXB2N6VD9FTHE", "whsec_ref_a",
+              "https://handoff.example.com/requests/req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+              "wss://relay.example.com/v1/sessions/hs_01K3MB2R4S8ZC4YRXB2N6VD9FT/stream",
+              "https://api.acme.com/handoff/signals", "https://billing.internal/inv/8821",
+          ]
+          for probe in MUST_FIRE:
+              if not leaks(probe):
+                  sys.exit(f"the leak matcher does not fire on {probe[:40]!r}. It is measuring "
+                           "nothing, which is exactly how it shipped the first time.")
+          for probe in MUST_NOT_FIRE:
+              if leaks(probe):
+                  sys.exit(f"the leak matcher fires on {probe[:40]!r}, which is published on "
+                           f"purpose: {leaks(probe)}")
+          print(f"leak matcher: fires on {len(MUST_FIRE)} known-bad, silent on "
+                f"{len(MUST_NOT_FIRE)} known-good")
+
           for path in sorted(root.rglob("fixtures/**/*.json")):
               text = path.read_text()
               document = json.loads(text)
@@ -322,19 +566,25 @@ jobs:
                           if key == "kind" and isinstance(value, str) and where.endswith("raise"):
                               failed += 1
                               print(f"{path.name}: a request `kind` at {where} — the point of use-cases is that there is none")
-                          if key in {"secret", "password", "token", "value"} and isinstance(value, str) and len(value) > 12:
-                              failed += 1
-                              print(f"{path.name}: a suspicious literal at {where}.{key}")
+                          if key in {"secret", "password", "token", "value"} and isinstance(value, str):
+                              if CREDENTIAL.search(value):
+                                  failed += 1
+                                  print(f"{path.name}: a credential literal at {where}.{key}")
+                              elif (len(value) > 12 and not PLACEHOLDER.search(value)
+                                    and not IDENTIFIER.match(value)):
+                                  failed += 1
+                                  print(f"{path.name}: an opaque literal at {where}.{key} that is "
+                                        "neither a placeholder nor a typed identifier: "
+                                        f"{value[:32]!r}")
                           walk(value, f"{where}.{key}" if where else key)
                   elif isinstance(node, list):
                       for i, item in enumerate(node):
                           walk(item, f"{where}[{i}]")
 
               walk(document)
-              for hit in address.findall(text):
-                  if "token=" in hit or "/live" in hit:
-                      failed += 1
-                      print(f"{path.name}: a resolvable capability address: {hit[:60]}")
+              for reason in leaks(text):
+                  failed += 1
+                  print(f"{path.name}: {reason}")
 
           if failed:
               sys.exit(f"{failed} fixture consistency failure(s)")
@@ -461,30 +711,132 @@ jobs:
           PGPASSWORD: omega
 
   gate-count:
-    name: conformance — GATE.md states the real case count
+    name: conformance — every document states the real case count
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # GATE.md exists to record a measured count, and it has gone stale twice, both times because
-      # a case landed and a hand-typed number did not follow. Twice is enough to stop maintaining it
-      # by hand: this asserts the document against the files on disk.
-      - name: The stated count matches the case files
+      # The Level 1 case count has gone stale four times. The first fix asserted GATE.md against
+      # the tree, which held — and the number went stale in the spec's §1.2, in §18, and in the
+      # changelog instead, because the check looked at one document and the number lives in seven.
+      # So this reads them all, and it reads the enumeration as well as the digit: "26 Level 1
+      # cases: C-1 through C-16, plus C-6b and C-18 through C-25" has a correct count and a stale
+      # last case, and an implementer who reads it ships without the case that exists because the
+      # reference server had that exact defect.
+      #
+      # `docs/` is excluded, and only `docs/`: those are dated review artifacts that quote what a
+      # document said on the day, and holding them to today's tree would make them rot.
+      - name: Every stated count and enumeration matches the case files
         run: |
           python3 - <<'PY'
-          import pathlib, re, sys
-          cases = list(pathlib.Path("conformance/cases").glob("*.yaml"))
-          level1 = [c for c in cases if re.search(r"^level:\s*1\s*$", c.read_text(), re.M)]
+          import json, pathlib, re, subprocess, sys
+
+          # Ground truth: the case files.
+          cases = {}
+          for path in sorted(pathlib.Path("conformance/cases").glob("*.yaml")):
+              text = path.read_text()
+              ident = re.search(r"^id:\s*(\S+)\s*$", text, re.M)
+              level = re.search(r"^level:\s*(\d+)\s*$", text, re.M)
+              if not ident or not level:
+                  sys.exit(f"{path} states no id or no level; a case file must state both.")
+              cases[ident.group(1)] = int(level.group(1))
+          level1 = {c for c, lvl in cases.items() if lvl == 1}
+          if not level1:
+              sys.exit("conformance/cases holds no Level 1 case. Nothing below would mean anything.")
+          count = len(level1)
+
+          def order(ident):
+              m = re.fullmatch(r"C-(\d+)([a-z]*)", ident)
+              return (int(m.group(1)), m.group(2)) if m else (10**6, ident)
+
+          terminal = max(level1, key=order)
+
+          # "26 Level 1 conformance cases", "26 Level 1 cases", "26/26 Level 1", and
+          # CONTRIBUTING.md's bare "26 Level 1, plus C-17". The lookbehind is what stops
+          # "v0.1 Level 1 compliant" being read as a count of one.
+          COUNT = re.compile(r"(?<![.\d])(\d+)(?:/\d+)?\s+Level 1\b", re.I)
+          IDENT = re.compile(r"C-\d+[a-z]*")
+          RANGE = re.compile(r"\s*(?:through|to|–|—|-|…|\.\.\.)\s*")
+          MEMBER = re.compile(r"\s*(?:,|and|plus|,\s*and|,\s*plus)\s*")
+          LEAD = re.compile(r"[^.]{0,40}")
+
+          def enumerated(rest):
+              """The identifiers a phrase names, reading forward from a stated count until the
+              text stops being an enumeration. Stopping at the first gap that is not a connector
+              is what keeps the trailing "with C-17 at Level 2" out of the Level 1 set; a fixed
+              window would swallow it."""
+              found = [(m.group(0), m.start(), m.end()) for m in IDENT.finditer(rest)]
+              if not found or not LEAD.fullmatch(rest[: found[0][1]]):
+                  return set()
+              named = {found[0][0]}
+              for i in range(1, len(found)):
+                  gap = rest[found[i - 1][2]: found[i][1]]
+                  if RANGE.fullmatch(gap):
+                      named |= {f"C-{n}" for n in
+                                range(order(found[i - 1][0])[0], order(found[i][0])[0] + 1)}
+                  elif not MEMBER.fullmatch(gap):
+                      break
+                  named.add(found[i][0])
+              return named
+
+          tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                                   check=True).stdout.split()
+          documents = [p for p in tracked if p.endswith(".md") and not p.startswith("docs/")]
+
+          failed, sites, enumerations = [], 0, 0
+          for rel in documents:
+              raw = pathlib.Path(rel).read_text(errors="replace")
+              # A count and its enumeration wrap across lines, so work on one flat string.
+              # `case(s)` is an English pluralisation, not a bracket that ends the enumeration.
+              flat = re.sub(r"\s+", " ", raw.replace("**", "").replace("case(s)", "cases"))
+              for m in COUNT.finditer(flat):
+                  sites += 1
+                  if int(m.group(1)) != count:
+                      failed.append(f"{rel}: states {m.group(1)} Level 1 cases; "
+                                    f"conformance/cases holds {count}")
+                  named = enumerated(flat[m.end():])
+                  if len(named) >= 3:
+                      enumerations += 1
+                      if named != level1:
+                          missing = sorted(level1 - named, key=order)
+                          extra = sorted(named - level1, key=order)
+                          failed.append(
+                              f"{rel}: enumerates {len(named)} Level 1 case(s)"
+                              + (f", missing {', '.join(missing)}" if missing else "")
+                              + (f", names {', '.join(extra)} which is no Level 1 case"
+                                 if extra else "")
+                              + f" — the last Level 1 case is {terminal}")
+
+          # §18's machine-readable duplicate, which an implementation iterates instead of parsing
+          # the table. It is hand-maintained too.
+          declared = set(json.loads(
+              pathlib.Path("spec/conformance-map.json").read_text())["levels"]["1"])
+          if declared != level1:
+              failed.append(
+                  f"spec/conformance-map.json levels.1 holds {len(declared)}, the tree {count}: "
+                  f"missing {sorted(level1 - declared, key=order)}, "
+                  f"extra {sorted(declared - level1, key=order)}")
+
+          # GATE.md records a measured run, in its own two formats.
           gate = pathlib.Path("conformance/GATE.md").read_text()
           stated = {int(n) for n in re.findall(r"0/(\d+) passing", gate)}
           stated |= {int(n) for n in re.findall(r"cases:\s+(\d+) from", gate)}
           if not stated:
-              sys.exit("GATE.md states no case count at all; it exists to record one.")
-          if stated != {len(level1)}:
-              sys.exit(
-                  f"GATE.md states {sorted(stated)} Level 1 cases; "
-                  f"conformance/cases holds {len(level1)}. Update the document, not this check."
-              )
-          print(f"GATE.md agrees with the tree: {len(level1)} Level 1 cases")
+              failed.append("conformance/GATE.md states no case count at all; it records one.")
+          elif stated != {count}:
+              failed.append(f"conformance/GATE.md reports {sorted(stated)}; the tree holds {count}")
+
+          # Each of the four times this went stale, the fix reached the copy the fixer was looking
+          # at. A check that silently stopped matching would be the fifth.
+          if sites < 6 or enumerations < 3:
+              failed.append(f"only {sites} stated count(s) and {enumerations} enumeration(s) were "
+                            "found across the tracked documents; a pattern has stopped matching.")
+
+          if failed:
+              print("\n".join(f"  {f}" for f in sorted(set(failed))))
+              sys.exit(f"\nThe Level 1 case count disagrees with conformance/cases in "
+                       f"{len(set(failed))} place(s). Update the documents, not this check.")
+          print(f"{count} Level 1 cases on disk, last {terminal}: {sites} stated count(s), "
+                f"{enumerations} enumeration(s), conformance-map.json and GATE.md all agree.")
           PY
 
   spec-needs-conformance:
@@ -498,19 +850,40 @@ jobs:
 
       # GOVERNANCE.md, "The spec-change process": a normative change without an executable case is
       # how a specification stops being one. Enforced here rather than left to review.
-      - name: Compare changed paths
+      #
+      # Counting changed paths was not enough. A spec edit plus the deletion of
+      # `c01_idempotent_raise.yaml` satisfied the old check and went green: the PR touched
+      # `conformance/`, so the rule was met, while the tree ended with less coverage than it
+      # started. What the rule means is that a case must arrive, so an ADDED or MODIFIED case file
+      # is what counts — and since §18 requires that a withdrawn case keep its identifier and be
+      # marked withdrawn, deleting a case file is refused outright and separately.
+      - name: A case must arrive, and none may quietly leave
         run: |
           base="origin/${{ github.base_ref }}"
           git fetch --quiet origin "${{ github.base_ref }}"
-          changed=$(git diff --name-only "$base"...HEAD)
+          changed=$(git diff --name-status -M "$base"...HEAD)
           echo "$changed"
-          spec=$(echo "$changed" | grep -c '^spec/' || true)
-          conf=$(echo "$changed" | grep -c '^conformance/' || true)
-          if [ "$spec" -gt 0 ] && [ "$conf" -eq 0 ]; then
-            echo "::error::This PR changes spec/ but no conformance case. See GOVERNANCE.md."
-            exit 1
+          echo "---"
+
+          spec=$(echo "$changed" | grep -cE '^[A-Z][0-9]*[[:space:]]+spec/' || true)
+          carried=$(echo "$changed" | grep -cE '^[AM][[:space:]]+conformance/cases/.*\.yaml$' || true)
+          removed=$(echo "$changed" | grep -E '^D[[:space:]]+conformance/cases/.*\.yaml$' || true)
+
+          rc=0
+          if [ -n "$removed" ]; then
+            echo "$removed"
+            echo "::error::A conformance case was deleted. Specification §18: a withdrawn case keeps"
+            echo "::error::its identifier and is marked withdrawn. Deleting the file removes the"
+            echo "::error::coverage and frees the number for reuse."
+            rc=1
           fi
-          echo "ok (spec files: $spec, conformance files: $conf)"
+          if [ "$spec" -gt 0 ] && [ "$carried" -eq 0 ]; then
+            echo "::error::This PR changes spec/ and adds or modifies no conformance case."
+            echo "::error::See GOVERNANCE.md, 'The spec-change process'."
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "ok (spec files: $spec, cases added or modified: $carried, cases deleted: 0)"
 
   secret-hygiene:
     name: no credentials or capability tokens in the tree
@@ -522,19 +895,140 @@ jobs:
       # not routine housekeeping. Every pattern below matches a literal VALUE. Naming an
       # environment variable, or interpolating one into a URL, must not trip the check — a token
       # in a query string only counts when a literal follows the `=`.
-      - name: Scan the working tree
+      #
+      # The five patterns this began with covered six of the credential shapes a repository of
+      # this kind actually leaks, and among the twenty they missed was `whsec_…`, the callback
+      # secret format `spec/signing.md` §1.2 defines. Missing the one format the specification
+      # itself mints is the whole defect in miniature: the check was written from a general idea
+      # of what a secret looks like rather than from this protocol's own documents.
+      #
+      # `git ls-files` rather than a recursive grep, because the question is what is published.
+      - name: Scan the tree
         run: |
-          set +e
-          hits=$(grep -rInE \
-            '[?&][a-z_]*token=[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16}|Bearer [A-Za-z0-9._-]{24,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
-            --exclude-dir=.git --exclude-dir=target --exclude-dir=node_modules .)
-          set -e
-          if [ -n "$hits" ]; then
-            echo "$hits"
-            echo "::error::Possible credential or capability token committed. Rotate it first, then remove it."
-            exit 1
-          fi
-          echo "clean"
+          python3 - <<'PY'
+          import pathlib, re, subprocess, sys
+
+          PATTERNS = {
+              "AWS access key id": r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+              "OpenAI or Anthropic key": r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}",
+              "Stripe secret or restricted key": r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}",
+              "webhook signing secret": r"\bwhsec_[A-Za-z0-9+/=_-]{16,}",
+              "GitHub token": r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}",
+              "GitHub fine-grained token": r"\bgithub_pat_[A-Za-z0-9_]{40,}",
+              "GitLab token": r"\bglpat-[A-Za-z0-9_-]{16,}",
+              "Slack token": r"\bxox[abprs]-[A-Za-z0-9-]{10,}",
+              "Slack app-level token": r"\bxapp-[0-9]-[A-Za-z0-9-]{10,}",
+              "Slack incoming webhook": r"https://hooks\.slack\.com/services/T[A-Za-z0-9/+_-]{20,}",
+              "Discord webhook": r"https://discord(?:app)?\.com/api/webhooks/[0-9]{10,}/[A-Za-z0-9_-]{20,}",
+              "SendGrid key": r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+              "Google API key": r"\bAIza[0-9A-Za-z_-]{35}\b",
+              "Google OAuth access token": r"\bya29\.[0-9A-Za-z_-]{20,}",
+              "Twilio SID-shaped credential": r"\b(?:AC|SK)[0-9a-f]{32}\b",
+              "npm token": r"\bnpm_[A-Za-z0-9]{36}\b",
+              "PyPI token": r"\bpypi-[A-Za-z0-9_-]{32,}",
+              "DigitalOcean token": r"\bdop_v1_[a-f0-9]{64}\b",
+              "Shopify token": r"\bshp(?:at|ss|ca|pa)_[a-f0-9]{32}\b",
+              "Hugging Face token": r"\bhf_[A-Za-z0-9]{30,}\b",
+              "Figma token": r"\bfigd_[A-Za-z0-9_-]{20,}",
+              "JSON Web Token": r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+              "private key block": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+              "Authorization: Bearer literal": r"\bBearer [A-Za-z0-9._-]{24,}",
+              "capability token in a URL": r"[?&][a-z_]*(?:token|key|secret|sig|password)=[A-Za-z0-9._~-]{16,}",
+              "password in a connection string": r"\b[a-z][a-z0-9+.-]*://[^\s:@/\"']+:[^\s:@/\"']{6,}@",
+              "Authorization: Basic literal": r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/]{20,}={0,2}",
+          }
+
+          # Published on purpose, with the document that publishes them. `spec/signing.md` §1.6
+          # tells every implementer to reproduce these exact bytes, so they are the opposite of a
+          # leaked secret — but they are a real `whsec_` and the scan must be able to see one. The
+          # allowance is therefore tied to the file that publishes it: rotate the vector and this
+          # entry stops matching, the check fails, and it is deleted rather than left as a hole.
+          PUBLISHED = {
+              "whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05": "spec/signing.md",
+              "whsec_9d41c07be5a2f36819b4d0e7c5a81f62": "spec/signing.md",
+          }
+          # A body of nothing but zeros is a stand-in for a retired secret, not a secret.
+          ALL_ZERO = re.compile(r"\A[a-z_]+_0+\Z")
+
+          # A pattern nobody has watched fire has not been tested. Assembled rather than written
+          # out so this file does not become a finding of its own.
+          CANARIES = {
+              "AWS access key id": "AKIA" + "IOSFODNN7EXAMPLE",
+              "OpenAI or Anthropic key": "sk-ant-" + "A" * 40,
+              "Stripe secret or restricted key": "sk_live_" + "9" * 24,
+              "webhook signing secret": "whsec_" + "b" * 32,
+              "GitHub token": "ghp_" + "C" * 36,
+              "GitHub fine-grained token": "github_pat_" + "D" * 48,
+              "GitLab token": "glpat-" + "E" * 20,
+              "Slack token": "xoxb-" + "1234567890-1234567890-abcdefghij",
+              "Slack app-level token": "xapp-" + "1-A01B2C3D4E5-1234567890",
+              "Slack incoming webhook": "https://hooks.slack.com/services/T" + "0" * 10 + "/B" + "1" * 10 + "/" + "z" * 24,
+              "Discord webhook": "https://discord.com/api/webhooks/" + "1" * 18 + "/" + "y" * 30,
+              "SendGrid key": "SG." + "F" * 22 + "." + "G" * 43,
+              "Google API key": "AIza" + "H" * 35,
+              "Google OAuth access token": "ya29." + "I" * 40,
+              "Twilio SID-shaped credential": "AC" + "0123456789abcdef" * 2,
+              "npm token": "npm_" + "J" * 36,
+              "PyPI token": "pypi-" + "K" * 40,
+              "DigitalOcean token": "dop_v1_" + "a1b2c3d4" * 8,
+              "Shopify token": "shpat_" + "fedcba9876543210" * 2,
+              "Hugging Face token": "hf_" + "L" * 34,
+              "Figma token": "figd_" + "M" * 30,
+              "JSON Web Token": "eyJ" + "N" * 20 + ".eyJ" + "O" * 30 + "." + "P" * 43,
+              "private key block": "-----BEGIN " + "EC PRIVATE KEY-----",
+              "Authorization: Bearer literal": "Bearer " + "Q" * 40,
+              "capability token in a URL": "https://relay.example.com/live?token=" + "R" * 40,
+              "password in a connection string": "postgres://omega:" + "s3cr3tvalue" + "@db:5432/x",
+              "Authorization: Basic literal": "Authorization: Basic " + "T" * 32,
+          }
+          compiled = {name: re.compile(pattern) for name, pattern in PATTERNS.items()}
+          missing = [name for name in compiled if name not in CANARIES]
+          if missing:
+              sys.exit(f"no canary for {missing}; every pattern must be watched firing.")
+          for name, probe in CANARIES.items():
+              if not compiled[name].search(probe):
+                  sys.exit(f"the {name!r} pattern does not fire on its own canary. It is measuring "
+                           "nothing, which is how six checks in this repository shipped.")
+
+          # Naming a variable, or interpolating one, is not a value.
+          BENIGN = ["PGPASSWORD", "export HANDOFF_API_KEY=$HANDOFF_API_KEY",
+                    "https://relay.example.com/live?token=${CAPABILITY}",
+                    "Authorization: Bearer <token>", "postgres://omega@localhost:5432/postgres"]
+          for probe in BENIGN:
+              fired = [name for name, rx in compiled.items() if rx.search(probe)]
+              if fired:
+                  sys.exit(f"{fired} fires on {probe!r}, which names a secret without carrying one.")
+          print(f"{len(compiled)} credential shapes, each watched firing on a canary and silent "
+                f"on {len(BENIGN)} benign strings")
+
+          hits = []
+          for rel in subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                                    check=True).stdout.split():
+              try:
+                  text = pathlib.Path(rel).read_text()
+              except (OSError, UnicodeDecodeError):
+                  continue
+              for name, rx in compiled.items():
+                  for m in rx.finditer(text):
+                      value = m.group(0)
+                      if PUBLISHED.get(value) == rel or ALL_ZERO.match(value):
+                          continue
+                      if value in PUBLISHED:
+                          continue
+                      hits.append(f"{rel}:{text[:m.start()].count(chr(10)) + 1}: "
+                                  f"{name}: {value[:32]}…")
+
+          for value, home in PUBLISHED.items():
+              if value not in pathlib.Path(home).read_text():
+                  hits.append(f"{home} no longer publishes {value[:16]}…; the allowance for it in "
+                              "this check is stale and must be deleted.")
+
+          if hits:
+              print("\n".join(f"  {h}" for h in hits))
+              sys.exit("Possible credential or capability token committed. Rotate it first, "
+                       "then remove it.")
+          print("clean")
+          PY
 
       - name: No ignored-by-policy files were committed
         run: |
