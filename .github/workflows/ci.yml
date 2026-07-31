@@ -710,27 +710,145 @@ jobs:
           PGUSER: omega
           PGPASSWORD: omega
 
+  cross-implementation-receipts:
+    name: receipts minted by handoffd verify under both published SDKs
+    runs-on: ubuntu-latest
+    # The conformance harness shares the handoff-protocol crate with the server it tests, so it is
+    # structurally incapable of noticing the two disagreeing: both sides canonicalize with the same
+    # code. That is how a Python SDK sorting object members by code point instead of UTF-16 code
+    # unit survived to a third review, and it is why the suite's own cross-implementation case does
+    # not settle the question on its own — a Rust verifier written from the same reading of
+    # signing.md §2.2 by the same people can share a misreading. `verify-minted-receipts.sh` is the
+    # only thing in this repository that spans that seam, so it is a release gate rather than a
+    # convenience. (No case identifier is named above on purpose: gate-count holds every one
+    # mentioned in the tree to a file on disk, and a check that trips over its own prose gets
+    # loosened.)
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: omega
+      PGPASSWORD: omega
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: psql, which the disposable database is created through
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      # Not `if: exists`. A gate that steps aside when its subject is missing is the shape of every
+      # finding in the third review: the job stays green and the sentence in the documentation goes
+      # on describing a check nobody runs.
+      - name: The script exists
+        run: |
+          if [ ! -f scripts/verify-minted-receipts.sh ]; then
+            echo "::error::scripts/verify-minted-receipts.sh is missing. It is the only check that"
+            echo "::error::spans the server/SDK seam, so its absence is a red build, not a skip."
+            exit 1
+          fi
+          echo "found"
+
+      # The red direction first, and it is the whole reason to trust the green one. Sorting member
+      # names by code point is the exact defect the seam exists to catch, and it only shows up if
+      # the payload carries a name that sorts differently under the two orderings — a non-BMP
+      # character. So this mutation tests the script AND its fixture at once: a script whose
+      # payload is a plain `{"decision":"approve"}` passes here and fails this step, correctly.
+      #
+      # If the substitution stops applying the step fails rather than passing quietly, because a
+      # mutation that no longer mutates anything proves the same nothing as no mutation at all.
+      - name: The script goes red against a canonicalizer that sorts by code point
+        run: |
+          python3 - <<'MUTATE'
+          import pathlib
+          p = pathlib.Path("sdk/python/handoff/_document.py")
+          p.write_text(p.read_text().replace("sorted(value, key=_utf16_units)", "sorted(value)"))
+          MUTATE
+          if git diff --quiet -- sdk/python/handoff/_document.py; then
+            echo "::error::The mutation changed nothing. sdk/python/handoff/_document.py no longer"
+            echo "::error::sorts with _utf16_units, so this meta-test is measuring nothing and must"
+            echo "::error::be rewritten against whatever the canonicalizer does now."
+            exit 1
+          fi
+          # No pipe: `cmd | tee` reports tee's status, which is how a green build gets reported for
+          # a red run.
+          set +e
+          bash scripts/verify-minted-receipts.sh > /tmp/mutated.out 2>&1
+          rc=$?
+          set -e
+          git checkout -- sdk/python/handoff/_document.py
+          tail -40 /tmp/mutated.out
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::A receipt with a mis-sorted canonicalizer verified anyway. Either the"
+            echo "::error::script does not verify with the Python SDK, or its payload carries no"
+            echo "::error::name that sorts differently by code point than by UTF-16 code unit."
+            exit 1
+          fi
+          echo "The script reports red when the two implementations disagree."
+
+      - name: Receipts minted through the ordinary answer path verify under both SDKs
+        run: |
+          set +e
+          bash scripts/verify-minted-receipts.sh > /tmp/cross.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/cross.out
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::A receipt handoffd minted does not verify under one of the published"
+            echo "::error::SDKs. Read the output above: the disagreement is the finding."
+            exit 1
+          fi
+          # A script that exits 0 having printed nothing has not been shown to do anything, and
+          # this job is the only place the seam is measured.
+          if [ ! -s /tmp/cross.out ]; then
+            echo "::error::The script exited 0 and said nothing. It must report what it verified."
+            exit 1
+          fi
+          echo "handoffd's receipts verify under both published SDKs."
+
   gate-count:
-    name: conformance — every document states the real case count
+    name: conformance — the case count agrees everywhere it is written
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The Level 1 case count has gone stale four times. The first fix asserted GATE.md against
-      # the tree, which held — and the number went stale in the spec's §1.2, in §18, and in the
-      # changelog instead, because the check looked at one document and the number lives in seven.
-      # So this reads them all, and it reads the enumeration as well as the digit: "26 Level 1
-      # cases: C-1 through C-16, plus C-6b and C-18 through C-25" has a correct count and a stale
-      # last case, and an implementer who reads it ships without the case that exists because the
-      # reference server had that exact defect.
+      # The Level 1 case count has gone stale four times, and the last fix is the reason this job
+      # is written the way it is. That fix held GATE.md to the tree, which worked, and the number
+      # then went stale in the specification, in the changelog and in the readme instead. Naming
+      # the places the number lives fixes the places the number lives; it has now gone stale in a
+      # file nobody had listed three separate times, so this DISCOVERS rather than enumerates. It
+      # greps every tracked file for the shapes the claim takes and holds each one to a count
+      # DERIVED from `conformance/cases/*.yaml` -- never to another document, because a quorum of
+      # prose agreeing with itself is exactly the failure. A file written next week is covered on
+      # the day it is written, with no maintenance.
       #
-      # `docs/` is excluded, and only `docs/`: those are dated review artifacts that quote what a
-      # document said on the day, and holding them to today's tree would make them rot.
-      - name: Every stated count and enumeration matches the case files
+      # It also reads the enumeration and not only the digit. A sentence with the right count and a
+      # last case one short is the shape that sent an implementer past the case which exists
+      # because the reference server had that exact defect.
+      - name: Every mention of the count agrees with the case files
         run: |
           python3 - <<'PY'
-          import json, pathlib, re, subprocess, sys
+          import pathlib, re, subprocess, sys
 
-          # Ground truth: the case files.
+          # Ground truth, and the only thing anything is compared against.
           cases = {}
           for path in sorted(pathlib.Path("conformance/cases").glob("*.yaml")):
               text = path.read_text()
@@ -744,16 +862,19 @@ jobs:
               sys.exit("conformance/cases holds no Level 1 case. Nothing below would mean anything.")
           count = len(level1)
 
-          def order(ident):
-              m = re.fullmatch(r"C-(\d+)([a-z]*)", ident)
-              return (int(m.group(1)), m.group(2)) if m else (10**6, ident)
+          def order(i):
+              m = re.fullmatch(r"C-(\d+)([a-z]*)", i)
+              return (int(m.group(1)), m.group(2)) if m else (10**6, i)
 
           terminal = max(level1, key=order)
 
-          # "26 Level 1 conformance cases", "26 Level 1 cases", "26/26 Level 1", and
-          # CONTRIBUTING.md's bare "26 Level 1, plus C-17". The lookbehind is what stops
-          # "v0.1 Level 1 compliant" being read as a count of one.
-          COUNT = re.compile(r"(?<![.\d])(\d+)(?:/\d+)?\s+Level 1\b", re.I)
+          # The four shapes the claim takes in this repository. The lookbehind on COUNT is what
+          # stops a version number -- "v0.1 Level 1 compliant" -- being read as a count of one.
+          COUNT = re.compile(r"(?<![.\d])(\d+)(?:/\d+)?\s+Level 1\b")
+          REPORT = re.compile(r"(?<![.\d/])\d+/(\d+) passing")
+          MANIFEST = re.compile(r"cases:\s+(\d+) from")
+          NAMED = re.compile(r"\bC-(\d+)[a-z]*\b")
+
           IDENT = re.compile(r"C-\d+[a-z]*")
           RANGE = re.compile(r"\s*(?:through|to|–|—|-|…|\.\.\.)\s*")
           MEMBER = re.compile(r"\s*(?:,|and|plus|,\s*and|,\s*plus)\s*")
@@ -762,8 +883,8 @@ jobs:
           def enumerated(rest):
               """The identifiers a phrase names, reading forward from a stated count until the
               text stops being an enumeration. Stopping at the first gap that is not a connector
-              is what keeps the trailing "with C-17 at Level 2" out of the Level 1 set; a fixed
-              window would swallow it."""
+              is what keeps a trailing Level 2 aside out of the Level 1 set; a fixed window would
+              swallow it."""
               found = [(m.group(0), m.start(), m.end()) for m in IDENT.finditer(rest)]
               if not found or not LEAD.fullmatch(rest[: found[0][1]]):
                   return set()
@@ -778,65 +899,113 @@ jobs:
                   named.add(found[i][0])
               return named
 
-          tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
-                                   check=True).stdout.split()
-          documents = [p for p in tracked if p.endswith(".md") and not p.startswith("docs/")]
-
-          failed, sites, enumerations = [], 0, 0
-          for rel in documents:
-              raw = pathlib.Path(rel).read_text(errors="replace")
-              # A count and its enumeration wrap across lines, so work on one flat string.
-              # `case(s)` is an English pluralisation, not a bracket that ends the enumeration.
-              flat = re.sub(r"\s+", " ", raw.replace("**", "").replace("case(s)", "cases"))
+          def inspect(raw):
+              """Every disagreement in one document, as (shape, stated, line, quote)."""
+              flat = raw.replace("**", "")
+              at = lambda i: flat[:i].count("\n") + 1
+              out = []
               for m in COUNT.finditer(flat):
-                  sites += 1
-                  if int(m.group(1)) != count:
-                      failed.append(f"{rel}: states {m.group(1)} Level 1 cases; "
-                                    f"conformance/cases holds {count}")
+                  stated = int(m.group(1))
+                  if stated != count:
+                      out.append(("count", stated, at(m.start()), m.group(0)))
+                      continue
                   named = enumerated(flat[m.end():])
-                  if len(named) >= 3:
-                      enumerations += 1
-                      if named != level1:
-                          missing = sorted(level1 - named, key=order)
-                          extra = sorted(named - level1, key=order)
-                          failed.append(
-                              f"{rel}: enumerates {len(named)} Level 1 case(s)"
-                              + (f", missing {', '.join(missing)}" if missing else "")
-                              + (f", names {', '.join(extra)} which is no Level 1 case"
-                                 if extra else "")
-                              + f" — the last Level 1 case is {terminal}")
+                  if len(named) >= 3 and named != level1:
+                      missing = sorted(level1 - named, key=order)
+                      extra = sorted(named - level1, key=order)
+                      out.append(("enumeration", stated, at(m.start()),
+                                  f"enumerates {len(named)}"
+                                  + (f", missing {' '.join(missing)}" if missing else "")
+                                  + (f", names {' '.join(extra)}" if extra else "")))
+              for m in REPORT.finditer(flat):
+                  if int(m.group(1)) != count:
+                      out.append(("report", int(m.group(1)), at(m.start()), m.group(0)))
+              for m in MANIFEST.finditer(flat):
+                  if int(m.group(1)) != count:
+                      out.append(("manifest", int(m.group(1)), at(m.start()), m.group(0)))
+              for m in NAMED.finditer(flat):
+                  if f"C-{m.group(1)}" not in cases:
+                      out.append(("named", int(m.group(1)), at(m.start()), m.group(0)))
+              return out
 
-          # §18's machine-readable duplicate, which an implementation iterates instead of parsing
-          # the table. It is hand-maintained too.
-          declared = set(json.loads(
-              pathlib.Path("spec/conformance-map.json").read_text())["levels"]["1"])
-          if declared != level1:
-              failed.append(
-                  f"spec/conformance-map.json levels.1 holds {len(declared)}, the tree {count}: "
-                  f"missing {sorted(level1 - declared, key=order)}, "
-                  f"extra {sorted(declared - level1, key=order)}")
+          # Mentions that are historical on purpose: a review dated last month quoting what a
+          # document said that day, and a dev stub whose docstring shows sample output. Each is
+          # keyed to one file and the one number it is allowed to state -- keyed to the number
+          # rather than to a line, because a line moves the moment a paragraph is added above it
+          # and a key that goes stale for the wrong reason teaches people to widen it. Every
+          # allowance is listed in the job output, because silence about a skipped file is how
+          # this became a fourth recurrence, and an allowance that stops matching fails the build
+          # so the list cannot outlive its reasons. Adding one is a visible diff with a reason.
+          ALLOWED = {
+              # `stub_501.py` prints a sample report in its module docstring.
+              ("core/crates/handoff-conformance/dev/stub_501.py", "report", 22),
+              # docs/ holds dated reviews. They quote counts that were true when they were written
+              # and must stay quoted verbatim, or the record of what was found stops being one.
+              ("docs/hostile-review.md", "count", 24),
+              ("docs/hostile-review.md", "count", 23),
+              ("docs/hostile-review.md", "report", 23),
+              ("docs/review-2.md", "count", 25),
+              ("docs/review-2.md", "count", 24),
+              ("docs/review-2.md", "report", 25),
+              ("docs/review-2.md", "report", 24),
+              ("docs/review-2.md", "report", 1),
+              ("docs/review-2.md", "manifest", 24),
+              ("docs/review-3.md", "count", 25),
+              ("docs/review-3.md", "count", 24),
+              ("docs/review-3.md", "report", 25),
+          }
 
-          # GATE.md records a measured run, in its own two formats.
-          gate = pathlib.Path("conformance/GATE.md").read_text()
-          stated = {int(n) for n in re.findall(r"0/(\d+) passing", gate)}
-          stated |= {int(n) for n in re.findall(r"cases:\s+(\d+) from", gate)}
-          if not stated:
-              failed.append("conformance/GATE.md states no case count at all; it records one.")
-          elif stated != {count}:
-              failed.append(f"conformance/GATE.md reports {sorted(stated)}; the tree holds {count}")
+          # Prove the matchers fire before trusting them with the tree. The probes are built from
+          # ground truth rather than written out, so that this file states no count of its own for
+          # the scan below to find -- a checker that trips over its own examples gets loosened.
+          ordered = sorted(level1, key=order)
+          correct = (f"passes all {count} Level 1 conformance cases of §18: "
+                     + ", ".join(ordered[:-1]) + f" and {ordered[-1]}.")
+          probes = [
+              ("count", f"passes all {count - 1} Level 1 cases."),
+              ("enumeration", f"passes all {count} Level 1 cases: "
+                              + ", ".join(ordered[:-2]) + f" and {ordered[-2]}."),
+              ("report", f"0/{count - 1} passing"),
+              ("manifest", f"cases:  {count - 1} from conformance/cases"),
+              ("named", f"see C-{order(terminal)[0] + 1} for the rest"),
+          ]
+          if inspect(correct):
+              sys.exit(f"the matchers complain about a correct document: {inspect(correct)}")
+          for shape, probe in probes:
+              if shape not in {s for s, *_ in inspect(probe)}:
+                  sys.exit(f"the {shape!r} matcher does not fire on its own canary. It is "
+                           "measuring nothing, which is how six checks here shipped.")
+          print(f"matchers: {len(probes)} shapes, each watched firing, none firing on a correct "
+                "document")
 
-          # Each of the four times this went stale, the fix reached the copy the fixer was looking
-          # at. A check that silently stopped matching would be the fifth.
-          if sites < 6 or enumerations < 3:
-              failed.append(f"only {sites} stated count(s) and {enumerations} enumeration(s) were "
-                            "found across the tracked documents; a pattern has stopped matching.")
+          failed, skipped, used = [], [], set()
+          for rel in subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                                    check=True).stdout.split():
+              try:
+                  raw = pathlib.Path(rel).read_text()
+              except (OSError, UnicodeDecodeError):
+                  continue
+              for shape, stated, line, quote in inspect(raw):
+                  if (rel, shape, stated) in ALLOWED:
+                      used.add((rel, shape, stated))
+                      skipped.append(f"{rel}:{line}  {shape} {stated}  {quote[:44]}")
+                      continue
+                  failed.append(f"{rel}:{line}  states {stated} where the tree holds {count}: "
+                                f"{quote[:60]}")
+
+          if skipped:
+              print(f"allowed as historical, {len(skipped)} mention(s), none of them silent:")
+              print("\n".join(f"    {s}" for s in sorted(skipped)))
+          for key in sorted(ALLOWED - used):
+              failed.append(f"the allowance {key} matches nothing now. Delete it — an exemption "
+                            "nobody needs is one nobody is watching.")
 
           if failed:
               print("\n".join(f"  {f}" for f in sorted(set(failed))))
-              sys.exit(f"\nThe Level 1 case count disagrees with conformance/cases in "
-                       f"{len(set(failed))} place(s). Update the documents, not this check.")
-          print(f"{count} Level 1 cases on disk, last {terminal}: {sites} stated count(s), "
-                f"{enumerations} enumeration(s), conformance-map.json and GATE.md all agree.")
+              sys.exit(f"\n{len(set(failed))} disagreement(s) with conformance/cases, which holds "
+                       f"{count} Level 1 case(s), the last of them {terminal}. Update the "
+                       "documents, not this check.")
+          print(f"{count} Level 1 case(s) on disk, last {terminal}: every mention agrees.")
           PY
 
   spec-needs-conformance:
