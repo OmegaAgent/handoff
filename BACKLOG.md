@@ -152,7 +152,9 @@ direction section below is still the direction.
   design: a paging failure never blocks request creation.
 - Demo wall: a self-controlled portal whose verification step requires a genuinely trusted click,
   with the payoff held in a `<template>` so it is absent from the DOM until a human clears it.
-- Public: https://handoff.omegas.dev · https://github.com/OmegaAgent/handoff (MIT).
+- Public at the time: a hosted deployment plus the MIT repository. The hostname is deliberately
+  not repeated here — that deployment had no authentication, and its own docs recorded that anyone
+  holding the URL could ring a real phone. See SECURITY.md.
 
 ## Direction (owner, 2026-07-25): the multi-channel communication layer, person-centric
 

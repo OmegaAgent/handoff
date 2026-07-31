@@ -1,6 +1,6 @@
 # Demo runbook — Handoff
 
-Live: **https://handoff.omegas.dev** · Repo: **https://github.com/OmegaAgent/handoff**
+Live: **https://handoff.example.invalid** · Repo: **https://github.com/OmegaAgent/handoff**
 
 Two minutes, one uninterrupted take. The whole story is: the agent stops, a phone rings, a person
 takes the wheel, the agent finishes. Do not explain the architecture on stage — show the phone.
@@ -8,10 +8,10 @@ takes the wheel, the agent finishes. Do not explain the architecture on stage �
 ## Before you record
 
 ```bash
-curl -s https://handoff.omegas.dev/healthz     # expect {"ok":true,...}
+curl -s https://handoff.example.invalid/healthz     # expect {"ok":true,...}
 
 # Rehearse silently first. --no-page means your phone stays quiet.
-cd ~/human && HANDOFF_URL=https://handoff.omegas.dev python3 demo/agent.py --scripted --no-page
+cd ~/human && HANDOFF_URL=https://handoff.example.invalid python3 demo/agent.py --scripted --no-page
 ```
 
 **Freeze deploys before you go on stage.** Request state lives in the server process, so a deploy
@@ -30,11 +30,11 @@ Have ready, in this order, on one screen if possible:
 
 ```bash
 # Recommended: drives a real browser the human can take over.
-export SPRITES_API_TOKEN=<from ~/hipocampus/.env>
+export SPRITES_API_TOKEN=...   # redacted: never name the file that holds a working key
 cd ~/human && python3 demo/agent_sprite.py --page          # --page rings the phone
 
 # Simpler fallback, no sandbox, but the live view is not its browser:
-HANDOFF_URL=https://handoff.omegas.dev python3 demo/agent.py --scripted
+HANDOFF_URL=https://handoff.example.invalid python3 demo/agent.py --scripted
 ```
 
 `agent_sprite.py` takes roughly 25 to 40 seconds to reach the wall because every browser step goes
@@ -91,37 +91,39 @@ carried on from exactly where it stopped."*
   Clear the wall in a normal tab instead, then press *I cleared it*. The point survives.
 - **Agent errored out** — resolve any pending request by hand and rerun. State fresh in ~15s:
   ```bash
-  curl -s https://handoff.omegas.dev/v1/requests | python3 -m json.tool | head -30
+  curl -s https://handoff.example.invalid/v1/requests | python3 -m json.tool | head -30
   ```
 - **Everything is on fire** — demo the page by itself. Create a request, let it ring, clear it. That
   alone shows the product.
 
 ## Making a request by hand
 
-Paging ON (rings the phone):
+Paging (redacted — see the note below):
 ```bash
-curl -s -X POST https://handoff.omegas.dev/v1/requests \
+curl -s -X POST https://handoff.example.invalid/v1/requests \
   -H 'content-type: application/json' \
   -d '{"kind":"clear_wall",
        "reason":"A human-verification checkbox is blocking the Northwind partner portal",
        "agent":"demo-agent",
-       "live_view_url":"https://handoff.omegas.dev/demo/wall",
-       "timeout_s":900,"page":true}'
+       "live_view_url":"https://handoff.example.invalid/demo/wall",
+       "timeout_s":900,"page":false}'
 ```
+
+**Redacted for publication.** The host is a placeholder and `page` is `false`. The original text carried a working request against a live, unauthenticated deployment that rang a real phone — publishing that is a denial-of-service handed to the first reader. The shape is kept because it is the historical record; the payload is not.
 
 Add `"page":false` to rehearse silently. The response carries `page_url` — open it.
 
 Ask a question instead of a wall:
 ```bash
-curl -s -X POST https://handoff.omegas.dev/v1/requests \
+curl -s -X POST https://handoff.example.invalid/v1/requests \
   -H 'content-type: application/json' \
   -d '{"kind":"question","question":"Which shipping address should I use?",
-       "agent":"demo-agent","timeout_s":900,"page":true}'
+       "agent":"demo-agent","timeout_s":900,"page":false}'
 ```
 
 ## Letting a judge try it themselves
 
-Send them to **https://handoff.omegas.dev/try**. It mints a handoff and drops them on the exact page
+Send them to **https://handoff.example.invalid/try**. It mints a handoff and drops them on the exact page
 a paged human sees, with the live view and the resolve button. Paging is off on that path on
 purpose: a public button that rings a phone is a public button for waking someone up. Say that out
 loud if a judge asks why their click did not ring anything.

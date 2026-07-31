@@ -4,7 +4,7 @@
 
 **Team name:** Omegas.dev
 
-**Email:** noureddin@omegas.dev
+**Email:** (redacted for publication)
 
 **1-liner (50 char max):**
 Handoff: your agent calls you when it's stuck
@@ -21,10 +21,10 @@ Handoff is an open-source "await human()" API for AI agents. When an agent hits 
 
 **Demo video:** (record via Loom/phone — 4 beats are in ~/human/RUNBOOK.md, keep under 60s)
 
-**Demo Link (no auth):** https://handoff-human.fly.dev/try
-(303s straight into a live handoff page; landing is https://handoff-human.fly.dev)
+**Demo Link:** (redacted — the deployment was unauthenticated)
+(303s straight into a live handoff page; landing is (redacted)
 
-**Live project/Website URL:** https://handoff-human.fly.dev
+**Live project/Website URL:** (redacted)
 
 **Team photo:** (yours — phone selfie is fine)
 

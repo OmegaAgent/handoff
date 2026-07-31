@@ -29,15 +29,15 @@ Result:
 ```
 handoff-conformance 0.1.0 — protocol 0.1, Level 1
 target: http://127.0.0.1:8080/v1
-cases:  24 from conformance/cases
+cases:  25 from conformance/cases
 
 FAIL  C-1    One Idempotency-Key raises one request — 201, then 200  [I20]
       step: raise a request with an idempotency key
       POST /requests returned 501 but the specification requires 201
 …
-0/24 passing
-not conformant: 24 Level 1 case(s) failing — C-1, C-2, C-3, C-4, C-5, C-6, C-6b, C-7,
-C-8, C-9, C-10, C-11, C-12, C-13, C-14, C-15, C-16, C-18, C-19, C-20, C-21, C-22, C-23, C-24
+0/25 passing
+not conformant: 25 Level 1 case(s) failing — C-1, C-2, C-3, C-4, C-5, C-6, C-6b, C-7,
+C-8, C-9, C-10, C-11, C-12, C-13, C-14, C-15, C-16, C-18, C-19, C-20, C-21, C-22, C-23, C-24, C-25
 ```
 
 Exit code: **1**.
@@ -61,19 +61,24 @@ those are two different questions and only the second one is executable:
 
 - 21 invariants declared in spec §17. Against the **map**, every one has at least one case.
 - No Level 1 case maps to zero invariants.
-- §18 and the map both enumerate **24** Level 1 cases (C-1…C-16, C-6b, C-18…C-24) plus C-17 at
+- §18 and the map both enumerate **25** Level 1 cases (C-1…C-16, C-6b, C-18…C-25) plus C-17 at
   Level 2, and `conformance/cases/` holds a file for every one of them.
 
 **Closed:** `C-23` initially had no case file. It is the sole case for **I12** — every state
 transition emits its event in the same transaction as the state change, probed by killing the Server
 between the two writes. The spec itself observes that C-23 "is the case an implementation is most
 tempted to skip", which is exactly why it was not quietly dropped: the case was written rather than
-the map edited down. All 24 Level 1 cases now exist on disk and all 24 run.
+the map edited down. All 25 Level 1 cases now exist on disk and all 25 run.
 
-**This file was itself found stale by the hostile review** — it recorded 23 cases after C-24 landed,
-which is a small thing except that the file exists precisely to record that count. A document whose
-one job is to hold a number, holding the wrong number, is the same failure it was written to guard
-against.
+**This file has now been found stale twice**, by two independent reviews, for the same reason both
+times: a case landed and the hand-typed count did not follow. The second time was one commit after
+the first was fixed.
+
+A document whose one job is to record a measured count, holding the wrong count, is the failure it
+was written to guard against — and after twice, the honest conclusion is that the number should not
+be maintained by hand at all. CI now asserts that the count stated here equals the number of Level 1
+case files on disk (`.github/workflows/ci.yml`, job `gate-count`), so the third occurrence fails a
+build instead of surviving into a review.
 
 ### A note on how that gap was found, because it generalizes
 

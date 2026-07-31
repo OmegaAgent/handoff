@@ -389,6 +389,33 @@ jobs:
           PGUSER: omega
           PGPASSWORD: omega
 
+  gate-count:
+    name: conformance — GATE.md states the real case count
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # GATE.md exists to record a measured count, and it has gone stale twice, both times because
+      # a case landed and a hand-typed number did not follow. Twice is enough to stop maintaining it
+      # by hand: this asserts the document against the files on disk.
+      - name: The stated count matches the case files
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          cases = list(pathlib.Path("conformance/cases").glob("*.yaml"))
+          level1 = [c for c in cases if re.search(r"^level:\s*1\s*$", c.read_text(), re.M)]
+          gate = pathlib.Path("conformance/GATE.md").read_text()
+          stated = {int(n) for n in re.findall(r"0/(\d+) passing", gate)}
+          stated |= {int(n) for n in re.findall(r"cases:\s+(\d+) from", gate)}
+          if not stated:
+              sys.exit("GATE.md states no case count at all; it exists to record one.")
+          if stated != {len(level1)}:
+              sys.exit(
+                  f"GATE.md states {sorted(stated)} Level 1 cases; "
+                  f"conformance/cases holds {len(level1)}. Update the document, not this check."
+              )
+          print(f"GATE.md agrees with the tree: {len(level1)} Level 1 cases")
+          PY
+
   spec-needs-conformance:
     name: a spec change must carry a conformance case
     runs-on: ubuntu-latest

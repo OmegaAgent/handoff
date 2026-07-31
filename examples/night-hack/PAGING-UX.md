@@ -49,6 +49,6 @@ before create-phone-call; post-call, extract structured answers from the transcr
 and resolve each parked request; anything marked link-me/deferred → Slack DM with URLs.
 
 ## Channels & costs
-- Tonight's free text channel = Slack DM (bot token in ~/hipocampus/.env; push still buzzes the phone).
+- Tonight's free text channel = Slack DM (bot token in a private env file; push still buzzes the phone).
 - Real SMS: Retell add-on is $20/mo — post-hack decision; or any SMS provider later.
 - Call = existing proven Retell recipe (update begin_message → create-phone-call).
