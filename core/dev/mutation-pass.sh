@@ -58,23 +58,26 @@ expect "callbacks signed with unknown secrets" "C-18" "HANDOFF_CALLBACK_SECRETS=
 echo
 echo "source mutations -- the invariant is removed from the code that enforces it"
 
-# Aimed at the shared predicate, not at one call site. The first version of this mutation neutered
-# `require_person` in routes.rs, and the suite stayed at 26/26 -- correctly, because I15 is enforced
-# at THREE independent points: routes.rs, plan.rs, and store.rs "before anything else is read".
-# Removing one leaves two, the refusal still happens, and C-5 is right to pass. That is defence in
-# depth working as intended, and it means a single-site mutation cannot answer the question this
-# script asks. `may_answer` is the predicate all three call, so mutating it removes the invariant
-# everywhere at once. Worth remembering when adding a mutation: aim at the property, not at a line.
-python3 - <<'PY'
-import pathlib
-p = pathlib.Path("core/crates/handoff-core/src/auth.rs"); s = p.read_text()
-old = "        !matches!(self.kind, PrincipalKind::Machine)"
-assert s.count(old) == 1, "may_answer no longer looks like this -- re-derive the mutation"
-p.write_text(s.replace(old, "        true // MUTATION", 1))
-PY
-expect "any principal may answer (I15 removed)" "C-5" ""
-git checkout -- core/crates/handoff-core/src/auth.rs
-
+# There is no I15 mutation here, and the reason is a finding about the server rather than an
+# omission. I15 -- a requester principal can never answer its own request -- turned out to be
+# unremovable by any mutation small enough to resemble a plausible defect. Five independent
+# expressions enforce it, and disabling them one at a time never changed the answer:
+#
+#   routes.rs    require_person, a direct `principal.kind == PrincipalKind::Machine`
+#   plan.rs      `!principal.may_answer()`
+#   store.rs     `!command.principal.may_answer()`, before anything else is read
+#   requires.rs  `presented.principal.is_machine()`, first check in evaluate()
+#   the receipt   refuses to record a machine as a `user` actor at all
+#
+# With the first four disabled and handoffd rebuilt, a machine answering its own request still got
+# 400: "an actor of type `user` must be a person, not a machine". The receipt cannot be constructed,
+# so the effect cannot exist. The same shape holds for authority: InsufficientAuthority is raised
+# from ten sites across five files.
+#
+# So a green suite under an I15 mutation says nothing about C-5's sensitivity -- it says the property
+# survived the edit. Reporting it as "the suite does not measure what it claims" would have been
+# false, and reporting it as a pass would have been worse. Whether C-5 is a strong case is a coverage
+# question and is answered in review-3.md N-8, not here.
 python3 - <<'PY'
 import pathlib, re
 p = pathlib.Path("core/crates/handoff-server/src/routes.rs"); s = p.read_text()
