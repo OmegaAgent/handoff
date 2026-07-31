@@ -44,6 +44,7 @@ pub async fn verify_chains(store: &PgStore, tenant: Option<&str>) -> Result<bool
                 .map_err(|e| ProtocolError::new(ErrorCode::InvalidRequest, e.to_string()))?;
 
         let mut receipts = Vec::with_capacity(rows.len());
+        let mut unparseable = 0usize;
         for row in &rows {
             let body: serde_json::Value = row.get("body");
             match serde_json::from_value::<Receipt>(body) {
@@ -51,9 +52,24 @@ pub async fn verify_chains(store: &PgStore, tenant: Option<&str>) -> Result<bool
                 Err(e) => {
                     println!("{tenant}: BROKEN — a stored receipt no longer parses: {e}");
                     all_verified = false;
-                    continue;
+                    unparseable += 1;
                 }
             }
+        }
+
+        // A tenant with an unreadable receipt is broken, and must not then be reported OK for the
+        // rows that happen to survive. Verifying the parseable subset would print a head that is
+        // not the head, over a shorter chain that verifies perfectly — and an operator or a script
+        // grepping this tool's output for OK would find it. Tail truncation is exactly the attack
+        // §9.4 says an unanchored chain cannot detect; printing OK over a subset would hand the
+        // same result to someone who had not even truncated carefully.
+        if unparseable > 0 {
+            println!(
+                "{tenant}: BROKEN — {unparseable} of {} receipt(s) unreadable; not verifying the \
+                 remainder, because a chain over the survivors is a different chain",
+                rows.len()
+            );
+            continue;
         }
 
         match verify_chain(&receipts, now()) {

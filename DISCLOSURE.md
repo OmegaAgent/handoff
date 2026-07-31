@@ -61,9 +61,24 @@ Measured against the deployed server: the blocked long-poll returned 3 seconds a
 resolved, inside a 25-second wait window, so the resume tracked the click rather than a polling
 tick. `POST /resume` reached the browser sandbox with its bearer token. A real phone call fired from
 the deployed server through Retell AI. In `--scripted` mode the demo agent ran the full loop and read
-the payoff only after clearance, passing ten of ten assertions against production: the 403 while
+the payoff only after clearance, passing its scripted assertions against production **(number unverifiable — see below)**: the 403 while
 pending names the state as `pending` rather than an unknown handoff, the agent process was confirmed
 still blocked while it waited, and the wall was checked as production serves it over HTTPS, where a
 scripted `.click()` is rejected and only a trusted CDP click reveals the payoff.
 
-Source: https://github.com/OmegaAgent/handoff · Live: https://handoff.omegas.dev
+Source: https://github.com/OmegaAgent/handoff
+
+---
+
+## Corrections to this document
+
+Kept rather than rewritten, because a disclosure that quietly edits itself is worth less than one
+that shows what it got wrong.
+
+- **"ten of ten assertions against production" is unsupported.** The only assertion set preserved
+  in this repository is an offline `selftest()` in `examples/night-hack/demo/agent.py` with
+  **eight** asserts over a hardcoded sample. The production run may well have happened; the
+  artifact was not kept — which is precisely the failure this document exists to prevent. Treat
+  the number as unsupported.
+- **The live deployment is deliberately not linked here.** It had no authentication, and its own
+  runbook recorded that anyone holding the URL could ring a real phone. See `SECURITY.md`.

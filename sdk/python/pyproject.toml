@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Noureddin Bakir" }]
-keywords = ["ai", "agents", "human-in-the-loop", "captcha", "browser-automation"]
+keywords = ["ai", "agents", "human-in-the-loop", "approvals", "audit", "protocol"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,7 +17,7 @@ classifiers = [
 dependencies = []  # the SDK is standard library only, on purpose
 
 [project.urls]
-Homepage = "https://handoff.omegas.dev"
+Homepage = "https://github.com/OmegaAgent/handoff"
 Source = "https://github.com/OmegaAgent/handoff"
 Issues = "https://github.com/OmegaAgent/handoff/issues"
 

@@ -55,7 +55,9 @@ writing, and `BACKLOG.md` states the gaps plainly rather than leaving them to be
 | `managed/` — the hosted adapter | Closed-source, unpublished. Refuses where a dependency does not exist rather than pretending. |
 | `ui/responder` — a standalone human-facing page | **Not built.** It appears in the layout below as intended; it is absent on disk. |
 
-Nothing has been published to crates.io, npm, or PyPI, and the package names are not yet reserved.
+Nothing in this tree has been published. The one exception predates it: `handoff-human` 0.1.0 is
+already on PyPI from the hackathon build, under the MIT grant `NOTICE` relies on. The 0.2.0 in
+`sdk/python` is not published, and the crate and npm names are not yet reserved.
 
 This table is the honest state as of the last commit. If it disagrees with something else in this
 repository, this table is what was checked — and the disagreement is a defect worth reporting,
@@ -81,7 +83,7 @@ and for the process a spec change has to go through, which is stricter than the 
 
 ```
 spec/               The normative protocol. Apache-2.0.
-core/               Rust workspace. Apache-2.0. Published to crates.io.
+core/               Rust workspace. Apache-2.0. Intended for crates.io; not yet published.
   crates/handoff-protocol/        types, state machine, policy evaluation. No I/O.
   crates/handoff-core/            the engine and the port traits a deployment implements
   crates/handoff-store-postgres/  reference store and its own migration set
