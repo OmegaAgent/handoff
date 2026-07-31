@@ -3,8 +3,9 @@ title: Numbers outside the deterministic band are rejected, and canonicalization
 level: 1
 invariants: [I2, I21]
 spec:
-  - "§1.4 — digest-covered numbers MUST be integers"
+  - "§1.4 — a digest-covered number MUST be integral in value"
   - "§1.4 — and MUST be within +/-(2^53 - 1)"
+  - "§1.4 rule 3 — and MUST be stored and served in the exact form the canonicalizer emits for it"
   - "§1.4 — a Server MUST reject a number outside either bound with 422 answer_validation_failed"
   - "§9.2 — the receipt records what the person saw, addressed by digest"
   - "§19 — fail closed: nothing is created from input the Server cannot represent"
@@ -38,6 +39,28 @@ rationale: >
   operative upper limit for whole numbers, and it bites well below 1e21. So the accepted upper
   boundary tested here is 9007199254740991, not 1e20. Both rules are stated because each carries a
   reason the other does not, but an implementer only ever has to enforce the tighter one.
+
+  ## Validation is not enough: the form at rest is its own rule
+
+  Rules 1 and 2 constrain the **value** — integral, in range — and a Server that checks only those
+  still ships an unverifiable receipt. `-0.0` is the proof, and it is why this case tests the
+  receipt that comes back and not only the status code that goes out. It has no fractional part and
+  no magnitude problem, so validation passes it; the canonicalizer renders it `0`, correctly. A
+  Server that then stores the number as it arrived is holding `-0.0` and digesting `0`, and a
+  receipt is verifiable only when the bytes an auditor canonicalizes are the bytes that were sealed.
+  Nothing errors anywhere along that path. One published SDK verified such a receipt and the other
+  refused it, which is the disagreement the chain exists to make impossible.
+
+  So rule 3 is a property of the record: a digest-covered number is stored and served in the form
+  the canonicalizer emits for it. That also reaches routes an ingest check cannot — a migration, an
+  operator path, a field added later — none of which pass through the answer endpoint.
+
+  It is deliberately **not** a rule about how the number was written. `JSON.parse` discards the
+  lexeme irrecoverably, so a lexical requirement would be enforceable in Rust and Python and
+  impossible in TypeScript, leaving two conforming Servers disagreeing about what is legal — the
+  exact failure §1.4 exists to prevent. Rule 3 is checkable in every language, and checkable from
+  outside: canonicalize what a Server served and compare it with what it served. That is what the
+  steps below do.
 
   ## Why each rejection sends every other field valid
 
@@ -176,7 +199,7 @@ steps:
             is_null: true
             because: "§9.1 — a receipt is minted only by an outcome, and no outcome occurred"
 
-  - name: zero and both boundary values are accepted
+  - name: zero and both boundary values are accepted, however they are written
     http:
       method: POST
       path: /requests/${req}/answer
@@ -184,19 +207,25 @@ steps:
       headers:
         Idempotency-Key: "c24-accept-${run_id}"
       body:
-        values: '!json:{"at_zero":0,"at_lower_bound":1,"at_max_safe_integer":9007199254740991,"ordinary":2}'
+        values: '!json:{"at_zero":-0.0,"at_lower_bound":1e0,"at_max_safe_integer":9007199254740991,"ordinary":2.0}'
       expect:
         status: 200
         body:
           - path: request.state
             equals: answered
-            because: "§1.4 — zero and the safe-integer bound are both inclusive"
+            because: >
+              §1.4 — zero and the safe-integer bound are both inclusive, and rules 1 and 2 constrain
+              the value rather than the way it was written. -0.0, 1e0 and 2.0 are all integral and
+              in range, so all three are legal answers. A Server that refused them would be
+              enforcing a rule §1.4 deliberately does not state, because JSON.parse discards the
+              lexeme and a rule a third of the ecosystem cannot check is not one two Servers can
+              agree on
           - path: receipt.id
             matches: "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$"
       capture:
         receipt: receipt.id
 
-  - name: the receipt carries a well-formed chain digest over those values
+  - name: the receipt serves those values in the form the canonicalizer emits
     http:
       method: GET
       path: /receipts/${receipt}
@@ -204,11 +233,25 @@ steps:
       expect:
         status: 200
         body:
+          - path: decision.values.at_zero
+            matches: "^0$"
+            because: >
+              §1.4 rule 3 — the receipt must be *served* in the form the canonicalizer emits, and
+              this is asserted as a pattern rather than `equals: 0` on purpose. -0.0 and 0 are the
+              same value, so an equality check passes whether or not the Server normalized and
+              measures nothing. Rendered, they are different bytes, and the bytes are the whole
+              point: this is the exact defect the case was extended for. A Server that stored what
+              arrived held -0.0 and digested 0, so an auditor canonicalizing the served receipt was
+              not canonicalizing the bytes that were sealed
+          - path: decision.values.ordinary
+            matches: "^2$"
+            because: "§1.4 rule 3 — 2.0 is legal on the way in and is 2 at rest"
           - path: decision.values.at_lower_bound
-            equals: 1
-            because: "§9.2 — the receipt records the typed answer as the person gave it"
+            matches: "^1$"
+            because: "§1.4 rule 3 — and exponent notation is normalized away with it"
           - path: decision.values.at_max_safe_integer
             equals: 9007199254740991
+            because: "§9.2 — the receipt records the typed answer as the person gave it"
           - path: chain.digest
             matches: "^sha256:[0-9a-f]{64}$"
             because: "signing.md §2.2 — the chain digest is taken over the canonicalized receipt core"
@@ -253,9 +296,10 @@ steps:
         output_matches:
           - '^\{"hi":9007199254740991,"lo":-9007199254740991,"zero":0\}$'
         because: >
-          §1.4 — one exact match pins three things at once: members sorted by code point, no
-          insignificant whitespace, and both safe-integer bounds emitted in plain decimal with no
-          exponent. Every value here is exact in IEEE-754 and renders identically in every language
+          §1.4 — one exact match pins three things at once: members sorted by the UTF-16 code units
+          of their names, no insignificant whitespace, and both safe-integer bounds emitted in plain
+          decimal with no exponent. Every value here is exact in IEEE-754 and renders identically in
+          every language
 
   - name: a non-integer is refused by the canonicalizer, not rendered by it
     hook:
@@ -272,3 +316,19 @@ steps:
           content carries integers only and a canonicalizer that renders 1.5 at all has produced
           bytes no other implementation is obliged to agree with. Both published SDKs refuse it,
           and a receipt only one implementation can canonicalize is a receipt nobody can verify
+
+  - name: a float that denotes a whole number canonicalizes to that whole number
+    hook:
+      hook: canonicalize
+      args:
+        json: '{"count":2.0,"amount":-0.0,"scaled":1e2}'
+      expect:
+        exit_code: 0
+        output_matches:
+          - '^\{"amount":0,"count":2,"scaled":100\}$'
+        because: >
+          §1.4 rule 3 — this is what "the form the canonicalizer emits" means, pinned as bytes. All
+          three are integral in value and legal, and all three canonicalize to a plain integer, so a
+          Server that stores what it received rather than this holds one byte sequence and digests
+          another. -0.0 is the one that made the rule: nothing errors, the canonicalizer is correct,
+          and the receipt is still unverifiable to anyone who canonicalizes what was served

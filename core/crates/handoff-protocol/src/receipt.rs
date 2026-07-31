@@ -14,11 +14,13 @@
 //!
 //! Two deliberate narrowings, both fail-closed:
 //!
-//! * **Numbers outside the range where the shortest round-trip decimal is unambiguous are
-//!   rejected** rather than serialized approximately. Concretely: non-finite values, values at or
-//!   above `1e21`, and non-zero values below `1e-6` — exactly the range where JSON serializers
-//!   start disagreeing about exponent form. A receipt nobody can re-canonicalize is a receipt
-//!   nobody can verify.
+//! * **Numbers must be integral in value and within ±(2^53 − 1)**, and are rejected rather than
+//!   serialized approximately. Floating point is exactly where JSON serializers start disagreeing,
+//!   and a receipt nobody can re-canonicalize is a receipt nobody can verify. A number that is
+//!   integral but written as a float — `-0.0`, `1.0`, `1e2` — is legal, and [`normalize_numbers`]
+//!   puts it into the form this function emits *before* anything digests, stores or serves it
+//!   (§1.4 rule 3). Canonicalizing at digest time while storing what arrived is how the two came
+//!   apart, and a receipt is verifiable only when those bytes are the same bytes.
 //! * **Object keys are sorted by UTF-16 code unit**, as JCS specifies, not by Rust's byte-wise
 //!   string order. The two agree for ASCII and diverge above the basic multilingual plane.
 
@@ -215,7 +217,9 @@ fn write_number(n: &serde_json::Number, out: &mut String) -> Result<()> {
         ));
     }
     if f == 0.0 {
-        // Covers negative zero, which ECMAScript renders as `0` and Rust as `-0`.
+        // Covers negative zero, which ECMAScript renders as `0` and Rust as `-0`. This is the
+        // *definition* of `-0.0`'s canonical form, not a repair of it — which is why §1.4 rule 3
+        // requires the stored form to be this rather than the form that arrived.
         out.push('0');
         return Ok(());
     }
@@ -250,6 +254,46 @@ fn write_number(n: &serde_json::Number, out: &mut String) -> Result<()> {
     // about.
     out.push_str(&format!("{}", f as i64));
     Ok(())
+}
+
+/// Rewrite every number to the exact form [`canonical_json`] emits for it (§1.4 rule 3).
+///
+/// Canonicalizing is not enough on its own, and `-0.0` is the proof. The canonicalizer renders it
+/// `0`, correctly; a Server that stored the number *as it arrived* then held one byte sequence and
+/// digested another, and a receipt is verifiable only when the bytes an auditor canonicalizes are
+/// the bytes that were sealed. One published SDK verified that receipt and the other refused it,
+/// which is the disagreement the chain exists to make impossible.
+///
+/// So the normal form is imposed on the record rather than filtered at the door. `-0.0`, `1.0` and
+/// `1e2` are integral in value and therefore legal; they are stored and served as `0`, `1` and
+/// `100`. A number this leaves alone is one [`canonical_json`] will refuse — a fractional part or a
+/// magnitude past ±(2^53 − 1) — and refusing it is validation's job, not this function's. Applying
+/// this to a value costs nothing when there is nothing to change and makes the property checkable
+/// from outside: canonicalize what a Server served and compare it with what it served.
+pub fn normalize_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if let Some(normalized) = normalized_number(number) {
+                *number = normalized;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_numbers),
+        Value::Object(members) => members.values_mut().for_each(normalize_numbers),
+        _ => {}
+    }
+}
+
+/// The integer form of a float that denotes one, or `None` when there is nothing to normalize.
+fn normalized_number(number: &serde_json::Number) -> Option<serde_json::Number> {
+    if !number.is_f64() {
+        return None;
+    }
+    let f = number.as_f64()?;
+    if !f.is_finite() || f.fract() != 0.0 || f.abs() > MAX_SAFE_INTEGER {
+        return None;
+    }
+    // `f as i64` renders `-0.0` as `0`, which is exactly what the canonicalizer emits for it.
+    Some(serde_json::Number::from(f as i64))
 }
 
 /// The one message every arm of [`write_number`] uses for an out-of-range integer.
@@ -1027,6 +1071,41 @@ mod tests {
     }
 
     #[test]
+    fn normalizing_makes_the_stored_form_the_form_that_gets_canonicalized() {
+        // §1.4 rule 3, stated as the check an outsider can run: canonicalize what a Server serves
+        // and you get back what it served. That fails whenever a number is kept in one form and
+        // digested in another, which is precisely what `-0.0` did.
+        let mut served = json!({
+            "negative_zero": -0.0,
+            "whole_float": 2400.0,
+            "exponent": 1e2,
+            "already_integer": 7,
+            "nested": {"deep": [3.0, {"deeper": -0.0}]},
+        });
+        normalize_numbers(&mut served);
+
+        // Serialized rather than compared as values: `-0.0 == 0` is true, so a value comparison
+        // would pass with or without normalization and would be measuring nothing.
+        assert_eq!(
+            serde_json::to_string(&served).expect("serialize"),
+            r#"{"already_integer":7,"exponent":100,"negative_zero":0,"nested":{"deep":[3,{"deeper":0}]},"whole_float":2400}"#
+        );
+
+        // The property itself: the bytes at rest and the canonical bytes are the same bytes.
+        assert_eq!(
+            canonical_json(&served).expect("canonical"),
+            serde_json::to_vec(&served).expect("serialize"),
+        );
+
+        // A number with no canonical form is left alone rather than mangled into one — refusing it
+        // is validation's job, and `canonical_json` still does refuse it.
+        let mut fractional = json!({"amount": 1.5});
+        normalize_numbers(&mut fractional);
+        assert_eq!(fractional, json!({"amount": 1.5}));
+        assert!(canonical_json(&fractional).is_err());
+    }
+
+    #[test]
     fn numbers_are_deterministic_or_refused_never_approximated() {
         for (value, expected) in [
             (json!(0), "0"),
@@ -1034,6 +1113,7 @@ mod tests {
             (json!(2400), "2400"),
             // The same number, whether the client wrote it as an integer or a float.
             (json!(2400.0), "2400"),
+            (json!(1e2), "100"),
             (json!(-17), "-17"),
             (json!(9_007_199_254_740_991i64), "9007199254740991"),
             (json!(-9_007_199_254_740_991i64), "-9007199254740991"),

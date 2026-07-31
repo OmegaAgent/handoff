@@ -166,7 +166,11 @@ pub fn plan_answer(input: AnswerInput<'_>) -> Result<AnswerPlan> {
     }
 
     let secret_fields = declared_secret_fields(request);
-    let values = reduce_secrets(&command.values, &secret_fields);
+    // §1.4 rule 3. Everything below this line — the receipt, its digest, and the decision the
+    // waiter is handed — sees numbers in the one form the canonicalizer emits, so the bytes that
+    // get sealed are the bytes an auditor will canonicalize.
+    let mut values = reduce_secrets(&command.values, &secret_fields);
+    normalize_numbers(&mut values);
     let settles = !command.partial && command.disposition == Disposition::Decide;
 
     let actor = match principal.kind {
@@ -459,6 +463,13 @@ pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 ///   approving `100000000000000000001` would get a receipt saying `100000000000000000000`. A
 ///   receipt that misstates what was approved is the one thing a receipt may never do.
 ///
+/// This is a rule about the **value**, and deliberately not about how the number was written.
+/// `-0.0`, `1.0` and `1e2` are integral and therefore legal here; what they must not do is reach
+/// the record in that form, and [`normalize_numbers`] is what stops them. Phrasing the constraint
+/// over the written form instead was considered and rejected: `JSON.parse` discards the lexeme
+/// irrecoverably, so a lexical rule is enforceable in Rust and Python and impossible in TypeScript,
+/// which leaves two conforming Servers disagreeing about what is legal.
+///
 /// A Client with an exact decimal quantity — money, most obviously — declares the field as `text`,
 /// which sidesteps binary floating point instead of negotiating with it.
 ///
@@ -513,6 +524,19 @@ fn first_bad_number(value: &Value) -> Option<String> {
         Value::Array(items) => items.iter().find_map(first_bad_number),
         Value::Object(fields) => fields.values().find_map(first_bad_number),
         _ => None,
+    }
+}
+
+/// Put every number in `values` into the form the canonicalizer emits for it (§1.4 rule 3).
+///
+/// Validation has already refused everything that has no such form, so this only ever rewrites a
+/// float that denotes an integer — `-0.0` to `0`, `1.0` to `1`, `1e2` to `100`. It runs on the way
+/// *into* the receipt rather than at the edge, because the record is what carries the consequence:
+/// a number stored as it arrived and canonicalized at digest time gives an auditor different bytes
+/// than the ones that were sealed, and a receipt is verifiable only when those agree.
+pub fn normalize_numbers(values: &mut Map<String, Value>) {
+    for value in values.values_mut() {
+        handoff_protocol::receipt::normalize_numbers(value);
     }
 }
 
@@ -639,6 +663,39 @@ mod tests {
             let err = check_number_bounds(&values).unwrap_err();
             assert_eq!(err.code, ErrorCode::AnswerValidationFailed, "{bad}");
             assert_eq!(err.fields()[0].name, "ordinary");
+        }
+    }
+
+    #[test]
+    fn a_float_denoting_a_whole_number_is_normalized_rather_than_stored_as_it_arrived() {
+        // §1.4 rule 3, and the whole of it: these values are legal, and the form they are kept in
+        // is not optional. `-0.0` is the case that made the rule — it has no fractional part and
+        // no magnitude problem, so validation passes it, and the canonicalizer renders it `0`.
+        // A Server that stored what arrived then held `-0.0` and digested `0`, so an auditor
+        // canonicalizing the served receipt was not canonicalizing the bytes that were sealed.
+        let mut values = Map::new();
+        values.insert("negative_zero".into(), json!(-0.0));
+        values.insert("whole_float".into(), json!(2.0));
+        values.insert("exponent".into(), json!(1e2));
+        values.insert("nested".into(), json!({"deep": [3.0, {"deeper": -0.0}]}));
+
+        check_number_bounds(&values).expect("all four are integral and in range, so all are legal");
+        normalize_numbers(&mut values);
+
+        // Serialized, because the point is the bytes at rest and not the value they parse to:
+        // `-0.0 == 0` is true, so an equality assertion here would pass without normalization and
+        // measure nothing.
+        assert_eq!(
+            serde_json::to_string(&Value::Object(values.clone())).expect("serialize"),
+            r#"{"exponent":100,"negative_zero":0,"nested":{"deep":[3,{"deeper":0}]},"whole_float":2}"#
+        );
+
+        // And that form is exactly what the canonicalizer emits, which is the property rule 3
+        // actually asserts: canonicalize what is served and it is what is served.
+        for value in values.values() {
+            let mut normalized = value.clone();
+            handoff_protocol::receipt::normalize_numbers(&mut normalized);
+            assert_eq!(&normalized, value, "normalizing twice must change nothing");
         }
     }
 
