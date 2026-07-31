@@ -103,7 +103,7 @@ apart, which is the normal way a protocol project dies.
 core/           Rust workspace. cargo fmt, cargo clippy -- -D warnings, cargo test.
 sdk/python/     Python 3.9+, standard library only. Keep it that way; it is a product property.
 sdk/ts/         TypeScript. Zero runtime dependencies.
-conformance/    Declarative YAML cases. 25 Level 1, plus C-17 at Level 2.
+conformance/    Declarative YAML cases. 26 Level 1, plus C-17 at Level 2.
 spec/           Normative. Read GOVERNANCE.md before proposing a change.
 ```
 
