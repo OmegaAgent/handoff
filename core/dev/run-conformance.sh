@@ -59,8 +59,11 @@ export HANDOFF_DATABASE_URL="postgres://$PG_USER@$PG_HOST:$PG_PORT/$DB"
 export HANDOFF_BOOTSTRAP="$HERE/bootstrap.json"
 export HANDOFF_BIND="${HANDOFF_BIND:-127.0.0.1:$(free_port)}"
 export HANDOFF_PUBLIC_BASE="http://$HANDOFF_BIND"
-export HANDOFF_LINK_ONLY_PERMITTED=false
-export HANDOFF_CALLBACK_SECRETS="whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05,whsec_9d41c07be5a2f36819b4d0e7c5a81f62"
+# Overridable so a caller can contradict the profile on purpose -- that is what
+# mutation-pass.sh does, and a script that hardcodes its own environment cannot be reused
+# by the thing testing whether the suite notices when the environment is wrong.
+export HANDOFF_LINK_ONLY_PERMITTED="${HANDOFF_LINK_ONLY_PERMITTED:-false}"
+export HANDOFF_CALLBACK_SECRETS="${HANDOFF_CALLBACK_SECRETS:-whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05,whsec_9d41c07be5a2f36819b4d0e7c5a81f62}"
 export HANDOFF_SWEEP_INTERVAL_MS=250
 export HANDOFF_CRASH_PORT="${HANDOFF_CRASH_PORT:-$(free_port)}"
 export CARGO_INCREMENTAL=0
