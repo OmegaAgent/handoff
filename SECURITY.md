@@ -91,11 +91,19 @@ fail-closed policy on `handoff_principals` makes every authenticated request ans
 cross-tenant sweeps that settle expired requests are in the same position.
 
 So RLS catches **a query that named its tenant and then lost its `WHERE tenant_ref = …`**. It does
-not catch a query that never named a tenant at all. Nearly every request-scoped path names one —
-`every_request_scoped_path_names_its_tenant` measures this by tightening the policy to fail closed
-and driving the API — and the exceptions it currently pins are `GET /deliveries/{id}` and the
-idempotency record written by a keyed `POST`. Both carry their own tenant predicate, which is the
-primary defence and is present regardless; what they lack is the second line under it.
+not catch a query that never named a tenant at all, and that is the sentence to read carefully:
+against a least-privilege role, with two tenants holding rows, a connection that has named no
+tenant and issues a query with no predicate **sees every tenant's rows**. That is the policy
+working as designed, not a defect, and it is why the paragraph above says what the second half is
+for.
+
+Every request-scoped path therefore names its tenant, and that is a check rather than a convention:
+`every_request_scoped_path_names_its_tenant` tightens the policy to fail closed on all nineteen
+tables authentication does not have to read first, drives seventeen routes, and asserts each still
+works. Three paths did not, when it was written — `GET /deliveries/{id}`,
+`POST /deliveries/{id}/redeliver`, and the replay record a keyed `POST` writes — because they
+issued their statements against the connection pool rather than inside a tenant transaction. They
+now do, and the test's list of exceptions is empty. It may shrink and cannot grow.
 
 **Export the receipt chain head somewhere you do not control.** Height contiguity detects alteration
 anywhere in a tenant's chain and excision from the middle. It cannot detect **truncation of the

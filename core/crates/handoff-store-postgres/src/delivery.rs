@@ -546,6 +546,7 @@ impl PgStore {
     /// having answered, and re-delivering that would ask them again for a decision already on a
     /// receipt. Returns `false` when there is nothing to do.
     pub async fn redeliver(&self, tenant: &str, id: DeliveryId, now: Timestamp) -> Result<bool> {
+        let mut tx = self.tenant_tx(tenant).await?;
         let updated = sqlx::query(
             "update handoff_deliveries \
              set next_attempt_at = $3, lease_until = null, \
@@ -556,29 +557,37 @@ impl PgStore {
         .bind(tenant)
         .bind(id.to_string())
         .bind(to_chrono(now))
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await
         .map_err(store_error)?;
+        tx.commit().await.map_err(store_error)?;
         Ok(updated.rows_affected() > 0)
     }
 
     /// One delivery, within the caller's tenant and nowhere else.
+    ///
+    /// Both statements run in one transaction that has named the tenant, so the view is read at a
+    /// single point in time and row-level security is holding underneath the predicates rather
+    /// than only beside them.
     pub async fn delivery(
         &self,
         tenant: &str,
         id: DeliveryId,
     ) -> Result<Option<handoff_core::model::DeliveryView>> {
+        let mut tx = self.tenant_tx(tenant).await?;
         let row = sqlx::query("select * from handoff_deliveries where tenant_ref = $1 and id = $2")
             .bind(tenant)
             .bind(id.to_string())
-            .fetch_optional(self.pool())
+            .fetch_optional(&mut *tx)
             .await
             .map_err(store_error)?;
         let Some(row) = row else {
+            tx.commit().await.map_err(store_error)?;
             return Ok(None);
         };
         let mut view = crate::store::row_to_delivery(&row)?;
-        view.attempts = self.delivery_attempts(tenant, id).await?;
+        view.attempts = Self::attempts_in(&mut tx, tenant, id).await?;
+        tx.commit().await.map_err(store_error)?;
         Ok(Some(view))
     }
 
@@ -588,13 +597,26 @@ impl PgStore {
         tenant: &str,
         id: DeliveryId,
     ) -> Result<Vec<handoff_core::model::DeliveryAttemptView>> {
+        let mut tx = self.tenant_tx(tenant).await?;
+        let attempts = Self::attempts_in(&mut tx, tenant, id).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(attempts)
+    }
+
+    /// The attempt query itself, so [`delivery`](Self::delivery) can read the delivery and its
+    /// attempts in the transaction it has already opened rather than opening a second one.
+    async fn attempts_in(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant: &str,
+        id: DeliveryId,
+    ) -> Result<Vec<handoff_core::model::DeliveryAttemptView>> {
         let rows = sqlx::query(
             "select n, started_at, ended_at, outcome, transport_status, error \
              from handoff_delivery_attempts where tenant_ref = $1 and delivery_id = $2 order by n",
         )
         .bind(tenant)
         .bind(id.to_string())
-        .fetch_all(self.pool())
+        .fetch_all(&mut **tx)
         .await
         .map_err(store_error)?;
         Ok(rows

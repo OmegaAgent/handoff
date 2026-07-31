@@ -83,7 +83,7 @@ Two integration tests hold this down, and both refuse to pass vacuously:
 | Test | What it asserts |
 |---|---|
 | `row_level_security_holds_on_every_tenant_scoped_table` | Per table, on **length and identity**, that a query without the predicate returns exactly the caller's rows. It first asserts that the *other* tenant owns a row in that table, because otherwise the comparison is between two empty sets; and that the role it used does not bypass RLS. |
-| `every_request_scoped_path_names_its_tenant` | Tightens the policy to fail closed on all but `handoff_principals` and drives the API, so "each request-scoped transaction names its tenant" is measured rather than asserted. The paths that do not are listed in the test, and the list may shrink but not grow. |
+| `every_request_scoped_path_names_its_tenant` | Tightens the policy to fail closed on all but `handoff_principals`, then drives seventeen routes and asserts each still answers, so "each request-scoped transaction names its tenant" is measured rather than asserted. Its list of exceptions is empty; it may shrink and cannot grow. |
 
 The tenant predicate in every query is the primary defence; RLS is the one that catches the day
 somebody forgets it.

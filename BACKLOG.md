@@ -14,24 +14,30 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
   exactly the case where it mattered. A second assertion compares the list against `pg_policies`, so a
   table that gains a policy without gaining an entry fails rather than being silently exempt.
 
-- **Row-level security does not protect a query that never named a tenant, and two request-scoped
-  paths do not name one.** The policy passes when `handoff.tenant_ref` is unset, and that half
-  cannot be removed: authentication resolves a credential to a tenant (§4.1), so the query that
-  discovers the tenant cannot name it, and a fail-closed policy on `handoff_principals` makes every
-  request answer `401` — measured, not reasoned. With the other nineteen tables fail-closed,
-  `every_request_scoped_path_names_its_tenant` finds two paths that stop working: `GET
-  /deliveries/{id}` and the idempotency record a keyed `POST` writes. Both are in
-  `handoff-store-postgres`, both issue their statements against the pool rather than inside
-  `tenant_tx`, and both carry their own `WHERE tenant_ref = …` — so this is a missing second line
-  of defence rather than a leak. Closing it means moving `remember_idempotent`, `delivery` and
-  `delivery_attempts` into `tenant_tx`; the test's list may shrink and cannot grow.
+- ~~**Row-level security does not protect a query that never named a tenant, and two request-scoped
+  paths do not name one.**~~ **Closed for the request-scoped surface.** It was three paths, not two
+  — `POST /deliveries/{id}/redeliver` was in the same state and no probe had reached it, which is
+  the argument for probing widely rather than probing the paths you already suspect. `delivery`,
+  `delivery_attempts`, `redeliver`, `idempotent_replay` and `remember_idempotent` now open a
+  `tenant_tx` instead of issuing against the pool, and
+  `every_request_scoped_path_names_its_tenant` drives seventeen routes with an **empty** exception
+  list. The rows returned did not change: each of those queries already carried
+  `WHERE tenant_ref = …`, and the policy's restrictive branch is that same predicate, so this moved
+  row-level security from beside the primary defence to underneath it.
 
-  The remaining step after that is a **deliberate cross-tenant marker** — a distinct GUC value the
-  sweeps and the delivery claim set on purpose — so the policy can deny by default and the paths
-  that genuinely have no tenant say so rather than being indistinguishable from a mistake. That is
-  a store-wide change: every statement issued on the pool has to move inside a transaction that
-  names something, because a session-level setting on a pooled connection leaks to whoever gets
-  that connection next.
+- **The policy still passes when no tenant is named, and cannot be made to fail closed without a
+  deliberate cross-tenant marker.** Authentication resolves a credential to a tenant (§4.1), so the
+  query that discovers the tenant cannot have named it: a fail-closed policy on
+  `handoff_principals` makes every authenticated request answer `401`. Measured, not reasoned. The
+  deadline sweep and the delivery claim are in the same position by construction — they act across
+  every tenant, so there is nothing for them to name.
+
+  Closing this needs a distinct GUC value those three set on purpose, so that "no tenant, and I
+  meant it" is a different state from "no tenant, because somebody forgot". That is a store-wide
+  change rather than a local one: every statement still issued on the pool has to move inside a
+  transaction that names something, because a transaction-local setting cannot attach to a
+  pool statement and a session-level one leaks to whoever borrows that connection next. Until then,
+  a query that names no tenant sees every tenant's rows, and `SECURITY.md` says so in those words.
 
 An empty directory named after a package is worse than an absent one, because it implies a
 deliverable. These are the things a reader might reasonably expect to find and will not.

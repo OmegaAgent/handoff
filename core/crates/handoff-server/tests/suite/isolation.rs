@@ -14,9 +14,10 @@
 //! What that defence does **not** cover is a query that never named a tenant at all: the policy
 //! passes when the tenant setting is unset, because `handoffd` legitimately runs queries that have
 //! no tenant to name — authentication, which discovers the tenant from the credential (§4.1), and
-//! the cross-tenant sweeps. `every_request_scoped_path_names_its_tenant` measures which paths would
-//! survive a fail-closed policy and pins the ones that would not, so the conditional half of the
-//! guarantee is a check rather than a convention.
+//! the cross-tenant sweeps. So the guarantee has a condition attached, and
+//! `every_request_scoped_path_names_its_tenant` is what turns that condition from a convention into
+//! a check: it tightens the policy until an unnamed query sees nothing, drives the request-scoped
+//! surface, and asserts every route still answers.
 
 use super::harness::*;
 use std::collections::BTreeSet;
@@ -489,21 +490,21 @@ async fn row_level_security_holds_on_every_tenant_scoped_table() {
 
 /// The request-scoped paths that run on the pool without naming a tenant.
 ///
-/// This list is the finding, not the fixture: each entry is a path that would stop working if the
-/// policy were fail-closed, which is the same thing as saying row-level security is not protecting
-/// it. Today's permissive policy makes that harmless — every one of them carries its own
-/// `WHERE tenant_ref = …`, the primary defence — but they are the paths where a forgotten
-/// predicate would not be caught by anything. Both are in `handoff-store-postgres`:
-/// `remember_idempotent` and `delivery`/`delivery_attempts` issue their statements against the pool
-/// rather than inside `tenant_tx`.
+/// **Empty, and that is the claim.** Every path [`probe`] drives keeps working when the database
+/// refuses any query that has not named a tenant, so row-level security is underneath all of them
+/// rather than beside them.
 ///
-/// This list may shrink and must not grow. Fixing one of them means removing its line, and adding
-/// a pool query to a request-scoped path means this test fails until somebody writes the line
-/// admitting it.
-const PATHS_THAT_DO_NOT_NAME_THEIR_TENANT: &[&str] = &[
-    "GET /deliveries/{id}",
-    "POST /requests/{id}/answer, with an Idempotency-Key",
-];
+/// It was not empty when this test was written. `GET /deliveries/{id}` answered `404` and a keyed
+/// `POST /requests/{id}/answer` answered `400`, because `delivery`, `delivery_attempts` and
+/// `remember_idempotent` issued their statements against the pool. Each carried its own
+/// `WHERE tenant_ref = …`, so nothing leaked — but the primary defence was carrying the whole
+/// weight on those three, and a forgotten predicate there would have had nothing under it. They
+/// now open a `tenant_tx` like everything else.
+///
+/// This list may shrink and must not grow. Adding a pool query to a request-scoped path fails this
+/// test until somebody writes the line admitting it, and the line has to say **why**, so the next
+/// reader knows whether it is a structural limit like `authenticate` or an oversight.
+const PATHS_THAT_DO_NOT_NAME_THEIR_TENANT: &[&str] = &[];
 
 /// Tighten the policy on every table except the one authentication must read first.
 const FAIL_CLOSED: &str = "\
@@ -521,21 +522,46 @@ begin
 end $$;";
 
 /// One pass over the request-scoped surface, recording what each path answered.
-async fn probe(deployment: &Deployment, run: &str) -> Vec<(&'static str, u16)> {
+///
+/// Breadth is the whole value here. An empty
+/// [`PATHS_THAT_DO_NOT_NAME_THEIR_TENANT`] says nothing about a path this function never calls, so
+/// every route that reaches the store on behalf of a caller belongs in it. The delivery worker and
+/// the deadline sweep are deliberately absent: they are cross-tenant by construction, have no
+/// tenant to name, and are the reason the policy keeps its permissive branch at all.
+async fn probe(deployment: &Deployment, run: &str, capability: &str) -> Vec<(&'static str, u16)> {
     let base = &deployment.base;
     let mut seen: Vec<(&'static str, u16)> = Vec::new();
 
+    // Gated, and declaring a capability, so one raise reaches grants and authorizations as well as
+    // requests and deliveries.
+    let mut body = raise_body(&format!("run:guc-{run}"), "Approve the release?");
+    body["mode"] = serde_json::json!("gated");
+    body["requires"]["capabilities"] = serde_json::json!([{
+        "handle": capability,
+        "type": "interactive_surface",
+        "scope": "view",
+        "provider": "test/browser",
+        "resource_ref": "opaque:bs_guc",
+        "label": "the browser the agent is driving",
+        "purpose": "Watch what the agent is doing.",
+        "optional": false,
+        "ttl": "PT15M",
+    }]);
     let (status, raised) = post(
         base,
         "/requests",
         MACHINE_A,
         &format!("guc-raise-{run}"),
-        raise_body(&format!("run:guc-{run}"), "Approve the release?"),
+        body,
     )
     .await;
     seen.push(("POST /requests", status));
     let request = raised["id"].as_str().unwrap_or_default().to_string();
     let delivery = raised["deliveries"][0]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let grant = raised["requires"]["capabilities"][0]["handle"]
         .as_str()
         .unwrap_or_default()
         .to_string();
@@ -553,9 +579,42 @@ async fn probe(deployment: &Deployment, run: &str) -> Vec<(&'static str, u16)> {
     seen.push(("GET /requests/{id}/deliveries", status));
     let (status, _) = get(base, &format!("/deliveries/{delivery}"), MACHINE_A).await;
     seen.push(("GET /deliveries/{id}", status));
+    let (status, _) = post(
+        base,
+        &format!("/deliveries/{delivery}/redeliver"),
+        MACHINE_A,
+        &format!("guc-redeliver-{run}"),
+        serde_json::json!({}),
+    )
+    .await;
+    seen.push(("POST /deliveries/{id}/redeliver", status));
+
+    let (status, grant_view) = get(base, &format!("/grants/{grant}"), EDITOR_A).await;
+    seen.push(("GET /grants/{handle}", status));
+    let radius = grant_view["blast_radius_digest"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (status, _) = post(
+        base,
+        &format!("/grants/{grant}/sessions"),
+        EDITOR_A,
+        &format!("guc-session-{run}"),
+        serde_json::json!({"scopes": ["view"], "accepted_blast_radius_digest": radius}),
+    )
+    .await;
+    seen.push(("POST /grants/{handle}/sessions", status));
+
+    let (status, _) = get(
+        base,
+        &format!("/waiters/run%3Aguc-{run}/signals"),
+        MACHINE_A,
+    )
+    .await;
+    seen.push(("GET /waiters/{ref}/signals", status));
 
     // Without a key, §3.1 stores no replay record, so this is the answer path alone.
-    let (status, _) = post_without_key(
+    let (status, answered) = post_without_key(
         base,
         &format!("/requests/{request}/answer"),
         EDITOR_A,
@@ -563,12 +622,30 @@ async fn probe(deployment: &Deployment, run: &str) -> Vec<(&'static str, u16)> {
     )
     .await;
     seen.push(("POST /requests/{id}/answer", status));
+    let authorization = answered["authorization"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
     let (status, _) = get(base, &format!("/requests/{request}/receipt"), MACHINE_A).await;
     seen.push(("GET /requests/{id}/receipt", status));
+    let (status, _) = get(base, "/receipts", MACHINE_A).await;
+    seen.push(("GET /receipts", status));
     let (status, _) = get(base, "/receipts/chain-head", MACHINE_A).await;
     seen.push(("GET /receipts/chain-head", status));
+    let (status, _) = get(base, &format!("/authorizations/{authorization}"), MACHINE_A).await;
+    seen.push(("GET /authorizations/{id}", status));
+    let (status, _) = post(
+        base,
+        &format!("/authorizations/{authorization}/redeem"),
+        MACHINE_A,
+        &format!("guc-redeem-{run}"),
+        serde_json::json!({"effect_key": format!("refund:guc-{run}")}),
+    )
+    .await;
+    seen.push(("POST /authorizations/{id}/redeem", status));
 
-    // With a key, on a request of its own, because the record it writes is what differs.
+    // With a key, on a request of its own, because the replay record it writes is what differs.
     let (_, second) = post(
         base,
         "/requests",
@@ -591,6 +668,26 @@ async fn probe(deployment: &Deployment, run: &str) -> Vec<(&'static str, u16)> {
         status,
     ));
 
+    // Cancelling needs a request nobody has decided, so it gets one of its own.
+    let (_, third) = post(
+        base,
+        "/requests",
+        MACHINE_A,
+        &format!("guc-raise-cancel-{run}"),
+        raise_body(&format!("run:guc-cancel-{run}"), "Approve the third one?"),
+    )
+    .await;
+    let cancelled = third["id"].as_str().unwrap_or_default().to_string();
+    let (status, _) = post(
+        base,
+        &format!("/requests/{cancelled}/cancel"),
+        MACHINE_A,
+        &format!("guc-cancel-{run}"),
+        serde_json::json!({"reason": "the run is over"}),
+    )
+    .await;
+    seen.push(("POST /requests/{id}/cancel", status));
+
     seen
 }
 
@@ -605,9 +702,8 @@ async fn probe(deployment: &Deployment, run: &str) -> Vec<(&'static str, u16)> {
 /// authenticated request answer `401`, which is why that one table is exempted below rather than
 /// tightened.
 ///
-/// So this asserts what is actually assertable: with the other nineteen tables fail-closed, every
-/// request-scoped path works except the ones named in
-/// [`PATHS_THAT_DO_NOT_NAME_THEIR_TENANT`], and those two fail.
+/// So this asserts what is actually assertable, and with the other nineteen tables fail-closed it
+/// now holds for every path [`probe`] drives: [`PATHS_THAT_DO_NOT_NAME_THEIR_TENANT`] is empty.
 #[tokio::test]
 async fn every_request_scoped_path_names_its_tenant() {
     let deployment = Deployment::start_as_least_privilege("guc").await;
@@ -621,7 +717,7 @@ async fn every_request_scoped_path_names_its_tenant() {
 
     // The anti-vacuity guard, one per probe rather than one per run: a path that is already broken
     // would otherwise read as a path that failed because of the tightening.
-    let permissive = probe(&deployment, "permissive").await;
+    let permissive = probe(&deployment, "permissive", "hg_01K3M7QW8ZC4YRXB2N6VD9FTHC").await;
     for (path, status) in &permissive {
         assert!(
             (200..300).contains(status),
@@ -670,7 +766,7 @@ async fn every_request_scoped_path_names_its_tenant() {
     );
     drop(as_handoffd);
 
-    let fail_closed = probe(&deployment, "failclosed").await;
+    let fail_closed = probe(&deployment, "failclosed", "hg_01K3M7QW8ZC4YRXB2N6VD9FTHD").await;
     let mut surprises: Vec<String> = Vec::new();
     for ((path, status), (_, before)) in fail_closed.iter().zip(&permissive) {
         let should_work = !PATHS_THAT_DO_NOT_NAME_THEIR_TENANT.contains(path);

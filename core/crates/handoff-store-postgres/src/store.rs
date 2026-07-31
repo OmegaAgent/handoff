@@ -3000,11 +3000,21 @@ impl Store for PgStore {
         })
     }
 
+    /// The replay record for one key, and the write that stores it.
+    ///
+    /// Both name their tenant, like every other request-scoped path. They did not always: they ran
+    /// against the pool, which under the policy of `RLS_HELPER` means the connection has named no
+    /// tenant and the permissive branch applies. The rows returned were the same either way,
+    /// because the `WHERE` clause here already carries `tenant_ref` — but that is the primary
+    /// defence carrying the whole weight, and the point of row-level security is to be underneath
+    /// it rather than beside it. `every_request_scoped_path_names_its_tenant` is what catches this
+    /// coming back.
     fn idempotent_replay(
         &self,
         slot: IdempotencySlot,
     ) -> BoxFuture<'_, Result<Option<StoredResponse>>> {
         Box::pin(async move {
+            let mut tx = self.tenant_tx(&slot.tenant).await?;
             let row = sqlx::query(
                 "select body_digest, response_status, response_body from handoff_idempotency \
                  where tenant_ref = $1 and principal_ref = $2 and operation = $3 \
@@ -3015,9 +3025,10 @@ impl Store for PgStore {
             .bind(&slot.operation)
             .bind(&slot.object)
             .bind(&slot.key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(db)?;
+            tx.commit().await.map_err(db)?;
             let Some(row) = row else { return Ok(None) };
             if row.get::<String, _>("body_digest") != slot.body_digest.to_string() {
                 return Err(ProtocolError::new(
@@ -3039,6 +3050,7 @@ impl Store for PgStore {
         now: Timestamp,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            let mut tx = self.tenant_tx(&slot.tenant).await?;
             sqlx::query(
                 "insert into handoff_idempotency \
                  (tenant_ref, principal_ref, operation, object, key, body_digest, \
@@ -3054,9 +3066,10 @@ impl Store for PgStore {
             .bind(response.status as i32)
             .bind(&response.body)
             .bind(to_chrono(now))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(db)?;
+            tx.commit().await.map_err(db)?;
             Ok(())
         })
     }
