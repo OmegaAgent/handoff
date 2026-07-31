@@ -304,7 +304,12 @@ jobs:
       # nobody. A test suite outside CI is a test suite that is green when someone last looked.
       - name: Test
         run: |
-          python -m pip install --quiet 'pytest==8.3.2'
+          # `cryptography` is a TEST dependency only -- the SDK itself is standard library and the
+          # `python-sdk-stdlib-only` job enforces that. Two tests execute the reference verifier
+          # published in spec/signing.md, which imports it, and without it here they error rather
+          # than run: the first CI execution reported ModuleNotFoundError, not a failure, which is
+          # the difference between a test that ran and a test that was never asked.
+          python -m pip install --quiet 'pytest==8.3.2' 'cryptography==43.0.1'
           python -m pytest tests/ -q
 
       - name: Build the distribution

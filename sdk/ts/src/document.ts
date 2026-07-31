@@ -83,6 +83,21 @@ export function toHex(bytes: Uint8Array): string {
   return out;
 }
 
+/** A plain `ArrayBuffer` holding the same bytes.
+ *
+ * `crypto.subtle` takes a `BufferSource`, which newer `@types/node` narrows to
+ * `ArrayBufferView<ArrayBuffer> | ArrayBuffer` — and a `Uint8Array` is typed over `ArrayBufferLike`,
+ * which includes `SharedArrayBuffer` and so is not assignable. The previous code cast the problem
+ * away with `as unknown as ArrayBufferView`, which compiled against one version of the types and
+ * failed against the one CI installed. A copy is a few bytes and no cast, and it cannot go stale
+ * when the ambient types change again.
+ */
+export function asBuffer(bytes: Uint8Array): ArrayBuffer {
+  const out = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(out).set(bytes);
+  return out;
+}
+
 /**
  * SHA-256 over raw bytes, as lowercase hex.
  *
@@ -91,7 +106,7 @@ export function toHex(bytes: Uint8Array): string {
  * async; the benefit is that there is nothing to install and nothing to shim.
  */
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const buffer = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBufferView);
+  const buffer = await crypto.subtle.digest("SHA-256", asBuffer(bytes));
   return toHex(new Uint8Array(buffer));
 }
 

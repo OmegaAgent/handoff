@@ -18,7 +18,7 @@
  * from a callback body, on purpose.
  */
 
-import { canonicalBytes, constantTimeEquals, sha256Hex, toHex, type JsonObject } from "./document.ts";
+import { asBuffer, canonicalBytes, constantTimeEquals, sha256Hex, toHex, type JsonObject } from "./document.ts";
 import { CallbackSignatureError, NonConformingDocument } from "./errors.ts";
 import { Signal } from "./models.ts";
 
@@ -70,7 +70,7 @@ const encoder = new TextEncoder();
 async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(secret) as unknown as ArrayBufferView,
+    asBuffer(encoder.encode(secret)),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -78,7 +78,7 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   const signature = await crypto.subtle.sign(
     "HMAC",
     key,
-    encoder.encode(message) as unknown as ArrayBufferView,
+    asBuffer(encoder.encode(message)),
   );
   return toHex(new Uint8Array(signature));
 }

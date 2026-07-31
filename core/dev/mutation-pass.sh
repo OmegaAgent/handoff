@@ -53,7 +53,12 @@ expect "unmutated" "" ""
 echo
 echo "configuration mutations -- the deployment contradicts the profile it publishes"
 expect "link_only permitted, profile forbids it" "C-6b" "HANDOFF_LINK_ONLY_PERMITTED=true"
-expect "callbacks signed with unknown secrets" "C-18" "HANDOFF_CALLBACK_SECRETS=whsec_ffffffffffffffffffffffffffffffff,whsec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+# All-zero bodies, because the secret-hygiene scanner recognises those as stand-ins rather than
+# secrets, and it flagged this line on the first CI run when the values were runs of f and e. They
+# are wrong secrets on purpose -- the point is that the server signs with something the profile does
+# not know -- but a scanner cannot tell a deliberate non-secret from a real one, and a check that has
+# to special-case its own repository is weaker than one that does not need to.
+expect "callbacks signed with unknown secrets" "C-18" "HANDOFF_CALLBACK_SECRETS=whsec_00000000000000000000000000000000,whsec_0000000000000000"
 
 echo
 echo "source mutations -- the invariant is removed from the code that enforces it"
