@@ -56,7 +56,7 @@ implementation passing the suite.
 ### Added — artifacts
 
 - `openapi.yaml` — OpenAPI 3.1, 30 operations across 28 paths, 87 schemas, three security schemes,
-  and the complete 32-code error taxonomy as a single `ErrorCode` enum.
+  and the complete 33-code error taxonomy as a single `ErrorCode` enum.
 - `schemas/request.schema.json`, `receipt.schema.json`, `policy.schema.json`,
   `delivery-attempt.schema.json` — JSON Schema 2020-12.
 - `signing.md` — the callback (HMAC-SHA-256) and receipt (Ed25519) schemes with exact canonical
@@ -70,11 +70,11 @@ implementation passing the suite.
 ### Security
 
 The twelve protocol-level security requirements of §16 are normative, realized by invariants
-**I1–I21** (§17) and tested by the 24 Level 1 conformance cases of §18 (**C-1**–**C-16**, **C-6b**,
-**C-18**–**C-24**), with **C-17** at Level 2. Every invariant maps to at least one case and every
-Level 1 case maps to at least one invariant; the mapping is duplicated machine-readably in
-`conformance-map.json`. The requirements that constrain implementations most
-sharply:
+**I1–I21** (§17) and tested by the 26 Level 1 conformance cases of §18 —
+C-1 through C-16, plus C-6b and C-18 through C-26 — with **C-17** the only Level 2 case. Every
+invariant maps to at least one case and every Level 1 case maps to at least one invariant; the
+mapping is duplicated machine-readably in `conformance-map.json`. The requirements that constrain
+implementations most sharply:
 
 - **Requester ≠ decider, enforced by principal type** — not by role, permission, or configuration.
   There is no deployment mode in which a machine principal can satisfy a human-intervention request
@@ -124,11 +124,15 @@ new error code are additive.
   `CalendarDuration`.
 - **Canonical JSON did not pin number serialization**, leaving three implementations free to diverge
   at exactly the boundary where RFC 8785 inherits ECMAScript's switch to exponential notation. §1.4
-  now constrains digest-covered numbers to `0` or `1e-6 ≤ |x| < 1e21`, requires integers within
-  ±(2^53 − 1), and rejects the rest with `422 answer_validation_failed`. The emitted output is a
-  strict subset of legal JCS, so a full canonicalizer and one that refuses to emit outside the band
-  produce identical bytes and neither can silently diverge. Added **C-24**, which also pins the two
-  signing fixtures' byte lengths and digests as the cross-implementation check.
+  now requires every digest-covered number to be written as an integer literal within ±(2^53 − 1),
+  and rejects the rest with `422 answer_validation_failed` in an answer and `400 invalid_request` at
+  raise. The emitted output is a strict subset of legal JCS, so a full canonicalizer and one that
+  refuses to emit outside that subset produce identical bytes and neither can silently diverge.
+  Added **C-24**, which also pins the two signing fixtures' byte lengths and digests as the
+  cross-implementation check. The first attempt at this rule admitted any number in
+  `1e-6 ≤ |x| < 1e21` instead — right about the notation, wrong about the values. What that cost,
+  and the second narrowing that followed it, are below under *the chain, and the numbers that made
+  it unverifiable*; the band survives there as the reason the rule is necessary, not as the rule.
 - **Two diagrams were ambiguous.** Delivery grades are now stated as an ordered ladder with monotone
   advancement that MAY skip a rung, bounded by the channel's `max_grade`, and a Server MUST NOT
   synthesize a grade it did not observe. In the waiter machine, W2 and W8 now partition the terminal
@@ -210,13 +214,23 @@ A second defect sat underneath it and only an out-of-process hasher could have e
 re-rendered the receipt field by field with a different null policy, spelling `rendered.ref` as
 `reference`, so the bytes an auditor hashes were not the bytes that were sealed.
 
-**Digest-covered numbers are now integers only.** Fixing the construction still left 17 of 18,
-because §1.4 admitted non-integers inside `1e-6 ≤ |x| < 1e21` while both SDKs refuse to canonicalize
-a non-integer at all. A person answering a `number` field with `1.5` produced a receipt no published
-client could verify. The band was right about notation and wrong about values: RFC 8785 inherits
-ECMAScript number formatting, which is exactly what independent implementations do not reproduce.
-Integers are exact to 2^53 − 1 and render identically everywhere. A Client with an exact decimal
-quantity sends `text`.
+**Digest-covered numbers must now be written as integer literals.** Fixing the construction still
+left 17 of 18, because §1.4 admitted non-integers inside `1e-6 ≤ |x| < 1e21` while both SDKs refuse
+to canonicalize a non-integer at all. A person answering a `number` field with `1.5` produced a
+receipt no published client could verify. The band was right about notation and wrong about values:
+RFC 8785 inherits ECMAScript number formatting, which is exactly what independent implementations do
+not reproduce. Integers are exact to 2^53 − 1 and render identically everywhere. A Client with an
+exact decimal quantity sends `text`.
+
+One value still got past the integers-only wording, and it is why the rule is now stated over the
+written form rather than the value. `-0.0` has no fractional part, so a Server testing the parsed
+number was told it was an integer, and a JSON float landed in a digest-covered position — a receipt
+one published SDK verified and the other refused, which is the original failure in a smaller
+spelling. §1.4 now requires an **integer literal**: no decimal point, no exponent, so `2.0` and
+`-0.0` are refused at the boundary instead of normalized after it. `-0` remains legal, because
+ECMAScript, Python and Rust all render it `0`. The rule cannot be checked against a parsed value in
+every language — `JSON.parse` collapses `2.0` and `2` — so §1.4 says out loud that a Server reads
+the source text.
 
 The result is now **18 of 18 real receipts verified by an independent implementation**.
 
@@ -225,3 +239,46 @@ same Rust that produced it, so any self-consistent construction passed. The chec
 checked were one implementation. C-24 now asserts a canonicalizer **refuses** a non-integer rather
 than rendering it, and the server suite verifies a minted receipt against §2.2 written out inline,
 calling none of the production helpers.
+
+### Fixed — the normative documents disagreed with each other, and with what was built
+
+A third review read the specification the way an implementer would, and found five places where two
+sentences of one unreleased version contradicted each other. None is a protocol change; all five are
+the documents disagreeing about what the protocol already is. Two of them — the chain height, and
+the number rule in `signing.md` — would have produced a Server that cannot interoperate with the
+reference implementation while following the specification exactly.
+
+- **§1.2 and §18 defined Level 1 differently.** §1.2 said 24 cases ending at C-24 and §18 said 25
+  ending at C-25 — the fourth time this hand-maintained count went stale, and the one time it
+  mattered, because the case §1.2 omitted exists precisely because the reference implementation had
+  that defect. Both now say **26**, adding **C-26**, and both spell the count and the enumeration
+  the same way, each on one line, so that one pattern finds every location. The Security section
+  above carried the stale number too, in this same release.
+- **The chain height was specified 0-based and implemented 1-based.** `signing.md` §2.2,
+  `schemas/receipt.schema.json` and `openapi.yaml` all called `height` the receipt's 0-based
+  position; the implementation mints the first receipt at height 1 and its verifier *rejects* a
+  receipt whose height disagrees. `height` is the first field of the chain input, so this is not
+  cosmetic: a Server built from the specification would have sealed its first receipt over different
+  bytes for identical content, and had every receipt refused by the reference verifier. Nothing
+  caught it because both SDKs read `height` off the receipt rather than off their own position.
+  **The specification moved, not the code** — 1-based is what is built, stored and enforced, and it
+  is the reading that makes `ChainHead.height` the number of receipts. Height 0 is now stated to be
+  the predecessor the first receipt does not have, which the 64 zeros in its `prev_digest` stand in
+  for. `ChainHead.height` keeps `minimum: 0`; it is a count, and a chain with no receipts has none.
+- **`signing.md` §3 still stated the superseded band as normative**, so the two documents in this
+  release disagreed about what a Server must reject — and the one that was wrong is the document an
+  independent verifier reads. It now states the integer-literal rule, and keeps the band above it as
+  the reason the narrowing is necessary rather than as the rule.
+- **`schemas/request.schema.json` admitted a document the reference server rejects.** A `number`
+  field's `min` and `max` were typed `number` while `requires` is digest-covered through
+  `request_digest`, so a client generated from the published schema could produce `min: 0.5` and
+  take a `400 invalid_request` for a request its own validator called legal. Both are now `integer`
+  and bounded to ±(2^53 − 1), in the schema and in `openapi.yaml`. They were the only two
+  digest-covered `number` declarations in the schema set.
+- **This changelog made two contradictory "now" statements about one unreleased version**, carrying
+  both the band and the integers-only rule in the present tense. Folded into the final rule.
+
+Also corrected here: the error taxonomy is **33** codes, not 32. The thirty-third is
+`waiter_not_found`, added so that a `waiter_ref` a Server has never issued is distinguishable from a
+real waiter with nothing queued — without it, "the waiter was told nothing" is unfalsifiable by any
+black-box client (§8.5).

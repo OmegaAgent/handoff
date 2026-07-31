@@ -2273,11 +2273,19 @@ components:
           description: For `text`. Enforced server-side, not only in the surface.
           minimum: 1
         min:
-          type: number
-          description: For `number`, inclusive lower bound.
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+          description: |
+            For `number`, inclusive lower bound. `requires` is digest-covered through
+            `request_digest`, so §1.4 applies: an integer literal within ±(2^53 − 1). A non-integer
+            bound is refused at raise with `400 invalid_request` rather than surfacing later as a
+            receipt nobody can verify.
         max:
-          type: number
-          description: For `number`, inclusive upper bound.
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+          description: For `number`, inclusive upper bound. Digest-covered on the same terms as `min`.
         initial:
           description: |
             Pre-filled value. For `document` this is what the human edits — the review-and-correct
@@ -3906,7 +3914,12 @@ components:
       properties:
         height:
           type: integer
-          minimum: 0
+          description: |
+            1-based position in the org's chain; the first receipt is at height 1. Height 0 is not a
+            receipt — it is the predecessor the first receipt does not have, and `prev_digest`'s 64
+            zeros stand in for it. `height` is the first field of the chain input (`signing.md`
+            §2.2), so enumerating from 0 seals different bytes for identical content.
+          minimum: 1
         prev_digest:
           anyOf:
             - $ref: '#/components/schemas/Digest'
@@ -3942,7 +3955,10 @@ components:
           $ref: '#/components/schemas/OrgId'
         height:
           type: integer
-          description: Number of receipts in the chain. It only ever increases.
+          description: |
+            Number of receipts in the chain. It only ever increases. Because `ChainLink.height` is
+            1-based, this equals the height of the last link. `minimum` is 0 here and 1 there on
+            purpose: this is a count, and a chain with no receipts has none.
           minimum: 0
         head_digest:
           $ref: '#/components/schemas/Digest'

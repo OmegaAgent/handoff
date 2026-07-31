@@ -269,12 +269,24 @@ chain.digest = "sha256:" ‖ lowercase_hex( SHA-256( chain_input ) )
 
 | Element | Definition |
 |---|---|
-| `height` | The receipt's 0-based position in the tenant's chain, ASCII decimal |
+| `height` | The receipt's **1-based** position in the tenant's chain, ASCII decimal. The first receipt in a tenant is at height `1` |
 | `prev_digest` | The previous receipt's `chain.digest`, in full including the `sha256:` prefix. For the first receipt in a tenant, 64 ASCII zeros prefixed `sha256:` |
 | `core_hash` | From step 1, **without** a `sha256:` prefix |
 
 Including `height` binds a receipt to its position, so an entry cannot be excised and the remaining
 entries re-linked without detection.
+
+**Why 1-based**, since it is the sort of choice a verifier gets wrong silently. Height counts
+receipts, so the exported `ChainHead.height` — the number of receipts in the tenant's chain — is the
+height of the last link, and one number names both. Height `0` is not a receipt: it is the position
+of the predecessor the first receipt does not have, and the 64 ASCII zeros in its `prev_digest`
+stand there in its place.
+
+This is not a presentational choice, because `height` is the first field of `chain_input`. A Server
+enumerating from `0` seals its first receipt over different bytes for identical content, and every
+digest after it differs too. A verifier that reads `height` off each receipt rather than off its own
+loop counter will not notice, which is how the two conventions can coexist in one release without
+anything going red.
 
 **Verifying a chain.** Recompute every `chain.digest` from `height`, the predecessor's digest, and
 the core hash. Any historical alteration changes that receipt's core hash, which changes its digest,
@@ -428,13 +440,19 @@ across two:
    match it, and independent implementations disagree most often at exactly those boundaries.
 
 `handoff-protocol-v0.1.md` §1.4 constrains this away rather than relying on three languages agreeing
-about floating point: numbers in digest-covered objects MUST be `0` or within `1e-6 ≤ |x| < 1e21`,
-integers MUST be within ±(2^53 − 1), and a Server MUST reject anything outside with
-`422 answer_validation_failed`. Everything this protocol digests therefore falls in the plain-decimal
-band.
+about floating point. The band above is why the narrowing is **necessary**; it is not the rule. The
+rule is that every number in a digest-covered object MUST be written as an **integer literal** — no
+decimal point, no exponent — and MUST be within ±(2^53 − 1). A Server rejects anything else with
+`422 answer_validation_failed` naming the field, or with `400 invalid_request` at raise, where
+`metadata` and `requires` are digest-covered through `request_digest`.
+
+Nothing this protocol digests therefore reaches `Number::toString`'s notation switch at all. §1.4
+states the rule over the written form rather than the value because `-0.0` has no fractional part:
+once parsed it is the same double as `0`, so an implementation testing the value admits it, which is
+how a float reached a digest-covered position in a shipped receipt.
 
 The consequence for an implementer is worth stating plainly, because it is what makes the constraint
-worth having: **a complete JCS canonicalizer and one that refuses to emit numbers outside the band
-produce identical bytes for every object this protocol digests.** Both are conforming. They cannot
-diverge, so a receipt signed by one always verifies under the other — which is the only property that
-matters once receipts outlive the implementation that minted them.
+worth having: **a complete JCS canonicalizer and one that refuses to emit anything outside this
+subset produce identical bytes for every object this protocol digests.** Both are conforming. They
+cannot diverge, so a receipt signed by one always verifies under the other — which is the only
+property that matters once receipts outlive the implementation that minted them.

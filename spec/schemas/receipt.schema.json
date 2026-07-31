@@ -642,8 +642,8 @@
       "properties": {
         "height": {
           "type": "integer",
-          "minimum": 0,
-          "description": "0-based position in this tenant's chain. Binding it prevents an entry being excised and the rest re-linked."
+          "minimum": 1,
+          "description": "1-based position in this tenant's chain; the first receipt is at height 1. Binding it prevents an entry being excised and the rest re-linked. Height 0 is not a receipt — it is the predecessor the first receipt does not have, and prev_digest's 64 zeros stand in for it."
         },
         "prev_digest": {
           "$ref": "request.schema.json#/$defs/Digest",

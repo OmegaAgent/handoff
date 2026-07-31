@@ -40,8 +40,8 @@ Requirements are placed on three kinds of party, and each requirement names the 
 
 | Level | Requirement |
 |---|---|
-| **Level 1** | REQUIRED of every conforming Server. All of this document except §14 (`continuation`), and all 24 Level 1 conformance cases of §18: C-1 through C-16, plus C-6b and C-18 through C-24. |
-| **Level 2** | OPTIONAL. Level 1 plus the `continuation` extension of §14, and conformance case C-17. |
+| **Level 1** | REQUIRED of every conforming Server. All of this document except §14 (`continuation`), and all 26 Level 1 conformance cases of §18: C-1 through C-16, plus C-6b and C-18 through C-26. |
+| **Level 2** | OPTIONAL. Level 1 plus the `continuation` extension of §14, and conformance case C-17. C-17 is the only Level 2 case. |
 
 A Server MUST declare its level at `GET /v1/meta`. A Server MUST NOT advertise Level 2 unless it
 passes C-17. A Server that fails any Level 1 test MUST NOT describe itself as conforming to this
@@ -88,12 +88,34 @@ receipts that one implementation can verify and another cannot.
 This protocol therefore emits a **strict subset** of legal JCS output. In any object over which a
 digest defined by this specification is computed:
 
-1. Every JSON number MUST be finite and MUST be an **integer**. A number with a fractional part
-   MUST be rejected.
+1. Every JSON number MUST be written as an **integer literal**: RFC 8259's `number` grammar with
+   neither its `frac` nor its `exp` production present. `0`, `-7` and `9007199254740991` conform.
+   `2.0`, `-0.0`, `1e2` and `1.5` do not, whatever value they denote.
 2. Every JSON number MUST be within ±(2^53 − 1), so that it round-trips through an IEEE-754 double
    without loss.
-3. A Server MUST reject an answer carrying a number outside either rule with
-   `422 answer_validation_failed`, naming the offending field.
+3. A Server MUST reject a number violating either rule, and MUST NOT normalize one. In an answer
+   this is `422 answer_validation_failed` naming the offending field, and no receipt is minted. At
+   raise — where `metadata` and `requires` are digest-covered through `request_digest` — it is
+   `400 invalid_request`, and no request is created.
+4. A Server MUST NOT serve a digest-covered object containing a number in any other form, so that a
+   Client can check a receipt it holds without knowing what was sent to produce it.
+
+> **Why this is a rule about how the number is written and not about what it means.** `-0.0` has no
+> fractional part. An implementation that asks *is this an integer?* of the parsed value is told yes,
+> because by then `-0.0`, `2.0` and `2` are one IEEE-754 double and the text that distinguished them
+> is gone. That is how it happened: a reference server checked exactly that predicate, accepted
+> `-0.0`, and stored a JSON float in a digest-covered position — a receipt one published SDK verified
+> and the other refused. The canonicalizer was not at fault and rendered `0` correctly; the value was
+> admitted before the canonicalizer ever saw it. A lexical rule is checkable where the information
+> still exists, and costs a producer nothing, since anything meaning an integer has no reason to be
+> written any other way. `-0` is an integer literal and is accepted: ECMAScript, Python and Rust all
+> render it `0`, so it canonicalizes identically everywhere.
+>
+> A Server MUST therefore apply rule 1 to the received JSON text rather than to a parsed value whose
+> type has already been widened. Python and Rust keep the distinction through the parse — `2.0`
+> arrives as a float and `2` as an integer. ECMAScript does not: `JSON.parse` yields the same `2` for
+> both and `Number.isInteger(2.0)` is `true`, so a Server written in ECMAScript MUST read the source
+> text and not the parsed number, or it will accept precisely the values this rule exists to refuse.
 
 > **Why integers only, when JCS permits more.** An earlier revision of this section admitted any
 > number in `1e-6 ≤ |x| < 1e21`, reasoning that `Number::toString` produces plain decimal there. That
@@ -108,14 +130,14 @@ digest defined by this specification is computed:
 > sidesteps binary floating point rather than negotiating with it.
 >
 > Two consequences worth stating rather than leaving to be discovered. `metadata` is digest-covered
-> through `request_digest`, so a non-integer there fails a raise closed rather than surfacing later
-> at the receipt. And a complete JCS canonicalizer and one that refuses to emit outside this subset
-> produce identical bytes for every object this protocol digests — **both are conforming**, which is
-> the property that makes the narrowing safe rather than merely strict.
+> through `request_digest`, so a number written any other way there fails a raise closed rather than
+> surfacing later at the receipt. And a complete JCS canonicalizer and one that refuses to emit
+> outside this subset produce identical bytes for every object this protocol digests — **both are
+> conforming**, which is the property that makes the narrowing safe rather than merely strict.
 
 Output meeting these constraints is valid JCS, so an implementation with a complete JCS
 canonicalizer is conforming and needs no change. An implementation that refuses to *emit* numbers
-outside the band is equally conforming, and cannot silently diverge from one that does. A Client
+outside this subset is equally conforming, and cannot silently diverge from one that does. A Client
 SHOULD carry monetary amounts and other exact decimal quantities as `text` rather than `number`,
 which sidesteps binary floating point entirely.
 
@@ -1466,9 +1488,14 @@ Additions take the next free number.
 
 ## 18. Conformance suite
 
-A Server is **Handoff v0.1 Level 1 compliant** when it passes all 25 Level 1 cases: C-1 through
-C-16, plus C-6b and C-18 through C-25. Level 2 adds C-17. Each test is black-box,
-against the HTTP API.
+A Server is **Handoff v0.1 Level 1 compliant** when it passes all 26 Level 1 conformance cases:
+C-1 through C-16, plus C-6b and C-18 through C-26. Level 2 adds C-17, the only Level 2 case.
+Each test is black-box, against the HTTP API.
+
+The count and the enumeration appear in exactly two normative places — here and in §1.2 — in the
+same words and each on one line, so that a check can find every occurrence of both. They have
+disagreed before, and an implementer reading only §1.2 would have shipped without the case that
+exists because the reference implementation had that exact defect.
 
 **Case identifiers are stable and MUST NOT be renumbered.** A case that is withdrawn keeps its
 identifier and is marked withdrawn; new cases take the next free number. `C-6b` is a suffixed variant
@@ -1507,8 +1534,9 @@ Level 1 invariant, and C-17 is the only such case.
 | C-23 | 1 | Drive every transition in §6.2 and §8.2. For each one, the state change and its event are observable together: no state exists whose event is missing, and no event exists whose state change was rolled back. Kill the Server between the state write and the event write → after restart, either both are present or neither is | I12 |
 | C-24 | 1 | Answer a `number` field with a non-integer, with `1e21`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1`, and `9007199254740991` (2^53 − 1) → accepted. A canonicalizer MUST refuse a non-integer rather than render it. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
 | C-25 | 1 | Answer request A with a key, then answer request B with the **same** key and an identical body → B is answered, naming B, with its own receipt and its own authorization. A retry of A with that key still replays A's receipt | I20, I10, I1 |
+| C-26 | 1 | A receipt the Server minted through the ordinary answer path verifies under an implementation **sharing no code with the Server**: re-derive the receipt core and the chain digest from `signing.md` §2.2 and match them against the receipt as served. The decision carries a `document` value whose object keys include a non-BMP character, and a `number` field at ±(2^53 − 1) | I2 |
 
-Four notes for implementers:
+Five notes for implementers:
 
 - **C-19 and C-20 are the tests that pass in development and fail in production.** A globally unique
   key does not error on collision; it drops the second tenant's row. A query missing its tenant
@@ -1520,6 +1548,15 @@ Four notes for implementers:
 - **C-23 is the case an implementation is most tempted to skip**, because emitting the event just
   after the commit passes every happy-path test. It only fails under a crash, and by then the record
   and the state disagree permanently.
+- **C-26 must not reuse the Server's own canonicalizer**, which is the whole of it. C-15 verifies the
+  chain and C-24 verifies a canonicalizer against fixtures; neither hands a *minted* receipt to an
+  outside implementation, so a construction that disagrees with this specification while agreeing
+  with itself passes both. That is not a hypothetical — it is how a reference server shipped a chain
+  neither published SDK could verify. The two inputs the case names are the two that got past a
+  verifier sharing code with its producer: object keys inside a `document` value are the only
+  caller-chosen strings that reach the receipt core, and they order differently under UTF-16 code
+  units than under code points; and a number is the value most likely to survive validation and
+  fail canonicalization.
 
 A version of this protocol is "released" when the conformance suite passes. A change that cannot be
 expressed as a conformance test is not a protocol change; it is an implementation detail.
