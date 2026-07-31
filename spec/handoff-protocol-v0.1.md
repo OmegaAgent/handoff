@@ -106,6 +106,12 @@ digest defined by this specification is computed:
 >
 > A Client carrying an exact decimal quantity — money, most obviously — sends it as `text`, which
 > sidesteps binary floating point rather than negotiating with it.
+>
+> Two consequences worth stating rather than leaving to be discovered. `metadata` is digest-covered
+> through `request_digest`, so a non-integer there fails a raise closed rather than surfacing later
+> at the receipt. And a complete JCS canonicalizer and one that refuses to emit outside this subset
+> produce identical bytes for every object this protocol digests — **both are conforming**, which is
+> the property that makes the narrowing safe rather than merely strict.
 
 Output meeting these constraints is valid JCS, so an implementation with a complete JCS
 canonicalizer is conforming and needs no change. An implementation that refuses to *emit* numbers

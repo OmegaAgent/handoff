@@ -412,7 +412,20 @@ steps:
         request_id: "${req}"
       expect:
         exit_code: 0
+        output_matches:
+          - "crash_point_reached=\\S+"
+          - "instance_exit=[1-9][0-9]*"
+          - "agree=yes"
         because: >
           §18 C-23 — kill the Server between the state write and the event write; after restart,
           either both are present or neither is. This is the only assertion that distinguishes a
           real transaction from an emit-after-commit that happens not to have crashed yet.
+
+          Which is exactly why an exit code cannot be the whole assertion here. "State and event
+          agree" is equally true of an answer that committed normally, so a deployment that never
+          implemented fault injection, answered the request and shut down tidily satisfies the
+          arithmetic without ever having crashed. The hook must therefore report that the crash
+          point was reached — that the process was interrupted at the seam this case is about —
+          and that it left by a fault rather than by exiting 0. A deployment that cannot induce
+          the crash has not demonstrated the property and must fail here rather than report
+          agreement it did not test.

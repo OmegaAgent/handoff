@@ -143,6 +143,17 @@ steps:
         request_id: "${req}"
       expect:
         exit_code: 0
+        output_matches:
+          - "observation=\\S+"
+          - "request=${req}"
+          - "request_state=pending"
+          - "receipts=0"
+        because: >
+          §9.7 — the observation has to have been recorded for the two steps below to be about
+          anything. `true` observes nothing and exits 0, and the assertions that follow then say
+          only that a request nobody touched is still pending, which is true of every request in
+          the suite. The hook must name the observation it recorded, on the request the case named,
+          and report that recording it moved neither the state nor the receipt count.
 
   - name: an observation alone decides nothing
     http:

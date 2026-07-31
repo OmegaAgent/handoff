@@ -24,15 +24,26 @@ rationale: >
 
   - `storage_update_receipt` — attempt an `UPDATE` on the named receipt row **as the application's
     own database role**, and exit with whatever the engine returns. A conforming deployment has a
-    rule, trigger, or grant that refuses it, so the command exits non-zero.
+    rule, trigger, or grant that refuses it, so the command exits non-zero. Print the receipt id it
+    attempted and the engine's refusal.
   - `storage_delete_receipt` — the same for `DELETE`.
   - `receipt_chain_verify` — re-walk the org's receipt chain from its first entry, recomputing each
     `chain.digest` over the canonical form of the receipt including `prev_digest`, and exit zero
-    only if every link agrees with the stored head.
+    only if every link agrees with the stored head. Print `chain_verified head=<digest> height=<n>`.
   - `chain_tamper_is_detected` — alter one historical receipt **in a disposable copy of the store**,
     re-run the same verification against the copy, and exit zero only when the head no longer
     verifies. This proves the chain is load-bearing rather than decorative; it must never touch the
-    live store.
+    live store. Print `tamper_detected altered=<id> head_before=<digest> head_after=did-not-verify`.
+
+  ## Why each hook must show its work
+
+  Every one of these four exits the way the case wants when it is replaced by a one-word shell
+  command: `false` for the two that must be refused, `true` for the two that must succeed. An exit
+  code is a claim. So each step also requires evidence in the hook's output that it did the thing,
+  and two of them require that evidence to agree with what the case independently read over HTTP —
+  the receipt id, and the chain head. A deployment that has not implemented storage-level
+  immutability cannot produce the engine's refusal, and one that has not implemented chain
+  verification cannot produce the head digest.
 
 requires:
   principals: [machine_a, human_editor]
@@ -111,10 +122,18 @@ steps:
         request_id: "${req}"
       expect:
         exit_code_not: 0
+        output_matches:
+          - "${receipt}"
+          - "(?i)(append.?only|immutab|refus|reject|denied|not permitted|violat|read.?only)"
         because: >
           §9.4.2 — the storage engine itself MUST reject mutation. This must be asserted from the
           storage layer directly: an application that has no update route still fails this
           requirement if its database role can write the row.
+
+          The output requirements are what stop `false` from being a conforming implementation of
+          this hook. `false` exits non-zero, which is exactly what a refused mutation looks like
+          from the outside, so the exit code alone distinguishes nothing. The hook must name the
+          receipt it tried to mutate and carry the engine's own refusal.
 
   - name: the storage engine refuses a DELETE on the receipt
     hook:
@@ -123,7 +142,10 @@ steps:
         receipt_id: "${receipt}"
       expect:
         exit_code_not: 0
-        because: "§9.4.2 — deletion is rejected by storage for the same reason"
+        output_matches:
+          - "${receipt}"
+          - "(?i)(append.?only|immutab|refus|reject|denied|not permitted|violat|read.?only)"
+        because: "§9.4.2 — deletion is rejected by storage for the same reason, and shown the same way"
 
   - name: the receipt is exactly what it was
     http:
@@ -163,7 +185,15 @@ steps:
         org_head: "${head}"
       expect:
         exit_code: 0
-        because: "§9.4.3 — the chain must verify over the full history, not just the newest entry"
+        output_matches:
+          - "chain_verified head=${head} height=${height}"
+        because: >
+          §9.4.3 — the chain must verify over the full history, not just the newest entry. The
+          verifier has to report the head it arrived at, and it has to be the head
+          `GET /receipts/chain-head` returned above: a hook that exits 0 without walking anything
+          cannot produce that digest, and one that walked a different store produces a different
+          one. This is the only step in the case where the storage-level verifier and the HTTP
+          surface are required to agree with each other.
 
   - name: altering any historical entry invalidates the head
     hook:
@@ -172,7 +202,16 @@ steps:
         receipt_id: "${receipt}"
       expect:
         exit_code: 0
+        output_matches:
+          - "tamper_detected altered=\\S+"
+          - "head_before=${head}"
+          - "head_after=did-not-verify"
         because: >
           §9.4 — altering any historical receipt MUST invalidate the chain head. A chain that still
           verifies after history is rewritten is tamper-evidence in name only. This hook must
           operate on a disposable copy; it must never mutate the live store.
+
+          It must also say which receipt it altered, what the head was before, and that the head no
+          longer verifies afterwards. `head_before` has to be the head this case read over HTTP,
+          which means the copy that was rewritten is a copy of the history the case is talking
+          about — otherwise `true` and a plausible sentence would be enough.

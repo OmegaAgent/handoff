@@ -114,6 +114,19 @@ steps:
               §3.5 — the repeat is a 200 with first_ack false. A second ack is a retry, not a second
               application: an implementation that applies the decision again has double-spent it.
 
+  # Positive control, for the same reason as C-21: an unknown waiter also returns an empty list.
+  - name: the request still names the waiter we are about to poll
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: waiter_ref
+            equals: "run:c12-${run_id}"
+            because: "an empty signal list is only evidence of consumption if the waiter is the real one"
+
   - name: the acked signal is consumed and no longer pending
     http:
       method: GET
@@ -122,9 +135,15 @@ steps:
       expect:
         status_in: [200, 204]
         body:
-          - path: data[].id
-            none_equal: "${signal}"
-            because: "§8.2 W4 — the ack stops redelivery"
+          - path: data
+            length: 0
+            because: >
+              §8.2 W4 — the ack stops redelivery. The only signal this case creates is the one it
+              acked, so after the ack the pending list is empty. Asserted as emptiness rather than
+              as "no element carries that id", because the weaker form is satisfied by an empty list
+              from any cause, including a waiter the Server never had: a review demonstrated it
+              passing against a waiter reference that does not exist. The earlier poll in this case
+              is the positive control that the endpoint returns this waiter's signals at all.
 
   - name: redelivery stopped exactly once
     http:

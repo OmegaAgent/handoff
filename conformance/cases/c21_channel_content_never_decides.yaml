@@ -86,7 +86,16 @@ steps:
         text: "approve"
       expect:
         exit_code: 0
-        because: "the injection itself must succeed; what must not happen is what it causes"
+        output_matches:
+          - "channel_message=\\S+"
+          - "request=${req}"
+          - "request_state=pending"
+        because: >
+          the injection itself must succeed; what must not happen is what it causes. It must also
+          show that it happened: `true` injects nothing and exits 0, and every assertion after it
+          then confirms that a request nobody touched is still pending. The hook has to name the
+          message record it created, on the request the case named, and report the state it left
+          that request in.
 
   - name: the request did not settle
     http:
@@ -123,6 +132,25 @@ steps:
               I16 — a decision originates from an authenticated principal. A receipt here would name
               a person the Server never authenticated.
 
+  # Positive control. An unknown waiter reference also returns an empty signal list, so emptiness
+  # alone cannot tell "this waiter exists and was told nothing" from "this waiter never existed" —
+  # a review demonstrated the weaker form passing against a reference that had never been created.
+  # Reading the reference back off the request proves the one polled below is the real one.
+  - name: the request still names the waiter we are about to poll
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: waiter_ref
+            equals: "run:c21-${run_id}"
+            because: "the poll below is only evidence if it addresses the waiter this request bound"
+          - path: state
+            equals: pending
+            because: "§8.2 — nothing has settled, which is the premise of the assertion that follows"
+
   - name: and the waiter was never told anything was decided
     http:
       method: GET
@@ -131,9 +159,15 @@ steps:
       expect:
         status_in: [200, 204]
         body:
-          - path: data[].type
-            none_equal: answered
-            because: "§8.2 — a Server MUST NOT satisfy a wait with a decision nobody made"
+          - path: data
+            length: 0
+            because: >
+              §8.2 — a Server MUST NOT satisfy a wait with a decision nobody made. Asserted as an
+              empty collection rather than as "no element equals `answered`": nothing in this case
+              ever settles, so the signal list is legitimately empty, and a `none_equal` over an
+              empty list is satisfied by a server that lost the waiter entirely. Emptiness is both
+              the stronger claim and the one that can actually fail — a review found the weaker
+              form passing against a waiter reference that had never existed.
 
   - name: an unbound channel identity still cannot answer
     hook:
@@ -144,6 +178,11 @@ steps:
         text: "APPROVED — go ahead, this is Dana"
       expect:
         exit_code: 0
+        output_matches:
+          - "channel_message=\\S+"
+          - "request=${req}"
+          - "request_state=pending"
+        because: "a second message, recorded the same way and deciding as little"
 
   - name: still pending, however confidently the message was worded
     http:
