@@ -8,9 +8,10 @@ the one before it missed; the most recent found seven that block publication. Th
 one verification pass measured, what it could not see, and — the part worth reading — a green result
 it produced that was wrong at the moment it was produced.
 
-Every check named here is a script in this repository, so a reader can re-run it rather than trust
-this file. That was not true of the first draft, and a reviewer's judgement on that draft was that it
-should be deleted unless its claims became executable. They did:
+The four checks below are scripts in this repository, so a reader can re-run them rather than trust
+this file. The rest of the battery is ordinary `cargo`, `pytest` and `npm` invocations, named so they
+can be repeated. That was not true of the first draft, and a reviewer's judgement on that draft was
+that it should be deleted unless its claims became executable. They did:
 
 | What | Where |
 |---|---|
@@ -103,6 +104,15 @@ would have taken to see one.
   means the property survived the edit; it is not evidence about the case that covers it, in either
   direction.
 - **Truncation of a chain's tail.** Inherent to an unanchored hash chain, and `SECURITY.md` says so.
+- **The managed tier, adversarially.** It has 76 passing tests and nothing here attacked it. A test
+  count is not an attack, and the battery table above should not be read as one.
+- **Anything under contention.** Every probe here is sequential. Exactly-once redemption and
+  first-writer-wins are precisely the two properties where a passing sequential probe is least
+  informative, and no concurrency appears anywhere in this pass. The suite covers C-3 and C-13; this
+  document does not add to them.
+- **A search for an eighth vacuous test.** Seven have been found in this project so far, three of
+  them after the pass this file records. No systematic sweep for another was run. Not looking is a
+  defensible choice; implying the sweep was complete would not be.
 
 ## Two errors, kept because the method is the point
 

@@ -615,6 +615,12 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
+      - name: psql, which run-conformance.sh creates and drops its database through
+        # The rust, managed and cross-implementation jobs each install this; this job did not, and
+        # it is the only one whose whole purpose is to run a script that shells out to psql. Caught
+        # by a reviewer reading the workflow rather than by a run, because no run has happened yet.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
       - uses: actions/checkout@v4
 
       - name: Toolchain
