@@ -4,6 +4,16 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
 
 ## Stated gaps — things that do not exist, said plainly
 
+- **Row-level security is proven on 11 of 19 tenant-scoped tables.** The test asserts, per table,
+  that a query without a tenant predicate returns exactly the caller's rows — but that comparison
+  can only fail when the *other* tenant owns a row in that table, and this fixture creates none in
+  `handoff_delivery_attempts`, `handoff_callback_attempts`, `handoff_redemptions`, `handoff_grants`,
+  `handoff_grant_sessions`, `handoff_sinks`, `handoff_channel_messages` or `handoff_observations`.
+  The test now prints exactly which tables are uncovered instead of reading as full coverage; the
+  fix is a fixture that exercises a second tenant through a grant, a sink, a callback and an
+  observation. Note RLS is the second line of defence — the tenant predicate in every query is the
+  first, and it is present on all 19.
+
 An empty directory named after a package is worse than an absent one, because it implies a
 deliverable. These are the things a reader might reasonably expect to find and will not.
 

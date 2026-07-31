@@ -177,6 +177,7 @@ async fn row_level_security_holds_on_every_tenant_scoped_table() {
     let least_privilege = LeastPrivilegeRole::create(&deployment).await;
     let restricted = least_privilege.pool().await;
 
+    let mut uncovered: Vec<(&str, i64)> = Vec::new();
     for (table, id_column) in TENANT_SCOPED_TABLES {
         // The predicate a correct query would carry.
         let with_predicate: Vec<String> = sqlx::query_scalar(&format!(
@@ -211,6 +212,42 @@ async fn row_level_security_holds_on_every_tenant_scoped_table() {
              clause leaks another tenant's rows.",
             without_predicate.len(),
             with_predicate.len()
+        );
+
+        // Per table, not once for the whole loop. The comparison above can only fail when the
+        // *other* tenant owns a row in this table: with both sides empty it holds against a table
+        // that has no policy at all. A review found eight of these tables empty in this fixture,
+        // so eight assertions were proving nothing while reading as coverage.
+        let b_rows: i64 = sqlx::query_scalar(&format!(
+            "select count(*) from {table} where tenant_ref = $1"
+        ))
+        .bind(ORG_B)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("{table}: {e}"));
+        uncovered.push((table, b_rows));
+    }
+
+    // A table the fixture never populates for tenant B is *not* covered by the loop above, and
+    // saying so is the point: silence here is what made the weakness invisible. Listing them keeps
+    // the gap in view until the fixture grows rows for them.
+    let empty: Vec<&str> = uncovered
+        .iter()
+        .filter(|(_, rows)| *rows == 0)
+        .map(|(table, _)| *table)
+        .collect();
+    let covered = uncovered.len() - empty.len();
+    assert!(
+        covered > 0,
+        "no table has rows for tenant B, so nothing above proved anything"
+    );
+    if !empty.is_empty() {
+        eprintln!(
+            "row-level security: {covered} of {} tenant-scoped tables carry a tenant-B row and are \
+             genuinely covered. NOT covered, because this fixture creates no tenant-B rows in \
+             them: {}",
+            uncovered.len(),
+            empty.join(", ")
         );
     }
 
