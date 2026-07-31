@@ -80,6 +80,12 @@ apart, which is the normal way a protocol project dies.
 - **A `handoff-core` behaviour change that is not covered by a conformance case is not merged.**
   If the behaviour cannot be expressed as a conformance case, that is evidence the behaviour is not
   actually part of the protocol — say so in the PR and we will discuss where it belongs.
+- **Show the check failing.** A new guard, matcher, or conformance case must arrive with evidence of
+  it going red — break the thing it protects, paste the failure, restore. A check nobody has watched
+  fail has not been tested; it has tested the code, with an instrument of unknown sensitivity. Six
+  checks in this repository passed for months while measuring nothing, and every one was written by
+  somebody trying to prevent exactly what it missed. `conformance/README.md` names the three shapes
+  that recur.
 - **No `[patch]`, no path dependency, no fork of a `handoff-*` crate** in any consumer of this
   repository, including our own managed service. If the managed service needs a change to the core,
   the change lands here first and the managed pin is bumped. CI greps for this. A

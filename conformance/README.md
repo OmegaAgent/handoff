@@ -88,6 +88,37 @@ run** for that version: the case list, the result per case, the suite version, a
 somewhere a skeptic can find them and rerun them against your endpoint. See
 [`TRADEMARKS.md`](../TRADEMARKS.md).
 
+## Three ways a check passes without measuring anything
+
+Every one of these was found in this repository, in a check written by someone trying to prevent
+exactly the thing it failed to catch. They are listed because the pattern recurs and the failure is
+always silent: a check that measures nothing looks identical to one that measures everything, and
+the only signal is that it has never been seen to fail.
+
+**A verifier that shares code with the producer proves only self-consistency.** The receipt chain
+was verified by calling the same canonicalization the server used to build it, so any
+self-consistent construction passed — including one that disagreed with the specification and with
+both published SDKs, which could verify none of the receipts the server minted. A verifier must
+implement the spec independently, or assert against published vectors. Ours now does both.
+
+**An anti-vacuity guard must be scoped to the same unit as the assertion it protects.** The
+row-level-security test asserts, per table, that a query without a tenant predicate returns only the
+caller's rows — a comparison that can only fail when *another* tenant owns a row in that table. One
+guard checked that a second tenant existed at all, which proves the loop ran and not that any
+iteration could have failed. Eight of nineteen tables were asserting nothing. A guard covering a
+loop is not a guard covering its iterations.
+
+**A readiness probe must confirm it is talking to the server it started.** The conformance harness
+probed a port, got an answer, and proceeded — against an orphaned server from a previous run, with a
+stale database. The same tree scored 17/24, 19/24, 22/24, 23/24 and 24/24 in one evening and not one
+of those failures was about the protocol. A run against a stranger is not a measurement, whichever
+way it lands.
+
+The habit that catches all three: **break the thing on purpose and watch the check fail.** If you
+have never seen a check go red, you have not tested the check — you have tested the code, using an
+instrument of unknown sensitivity. Every guard in this suite has been shown failing at least once,
+and the demonstration belongs in the pull request that adds it.
+
 ## Contributing a case
 
 Cases are declarative YAML under `cases/`, so a case is readable by someone who does not write Rust.
