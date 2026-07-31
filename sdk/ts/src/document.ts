@@ -5,8 +5,9 @@
  * This is how the canonical fixtures in `spec/fixtures` are stored, and the form this SDK is
  * asserted byte-identical against.
  *
- * `canonicalBytes` — RFC 8785 (JCS): members sorted by code point, no insignificant whitespace,
- * no trailing newline. Every digest in the protocol (§1.4) is taken over this.
+ * `canonicalBytes` — RFC 8785 (JCS): members sorted by the UTF-16 code units of their names, no
+ * insignificant whitespace, no trailing newline. Every digest in the protocol (§1.4) is taken
+ * over this.
  *
  * Member order is preserved rather than normalized for two reasons. Protocol §19 makes new
  * response fields additive, so a client that drops members it does not recognize corrupts
@@ -127,7 +128,11 @@ function canonicalize(value: any, path: string): any {
   if (Array.isArray(value)) return value.map((item, index) => canonicalize(item, `${path}[${index}]`));
   if (value && typeof value === "object") {
     const out: JsonObject = {};
-    // Sorted by code point, which is what JCS specifies for these member names.
+    // JCS orders members by the UTF-16 code units of their names, which is exactly what the
+    // default `Array.prototype.sort` comparator does — it compares UTF-16 code units, not code
+    // points. The two orders diverge for any non-BMP name against any BMP name above U+D7FF, and
+    // a `document` field puts caller-chosen keys into the receipt core, so the distinction is
+    // load-bearing rather than theoretical.
     for (const key of Object.keys(value).sort()) {
       out[key] = canonicalize(value[key], path ? `${path}.${key}` : key);
     }

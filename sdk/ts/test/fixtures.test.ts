@@ -139,6 +139,25 @@ test("canonicalization refuses non-integer numbers", () => {
   assert.throws(() => canonicalBytes({ amount: 2400.5 }), /non-integer number/);
 });
 
+test("members are ordered by UTF-16 code units, not code points", () => {
+  // RFC 8785 §3.2.3. The same expectation the Python SDK and `receipt.rs` are asserted against,
+  // written out here so agreement between the three is a checked fact rather than an accident of
+  // `Array.prototype.sort` happening to compare UTF-16 code units.
+  //
+  // U+1F600 is non-BMP: it encodes as the surrogate pair 0xD83D 0xDE00, so it sorts below U+FF01
+  // by code unit and above it by code point. A `document` field carries any JSON value (§5.3), so
+  // keys like these reach `decision.values` and from there the receipt core.
+  const document = { "！": 1, "\u{1F600}": 2, a: 0 };
+  const expected = new TextEncoder().encode('{"a":0,"\u{1F600}":2,"！":1}');
+
+  assert.deepEqual(canonicalBytes(document), expected);
+  assert.notDeepEqual(
+    new TextEncoder().encode('{"a":0,"！":1,"\u{1F600}":2}'),
+    expected,
+    "code-point order must be a different byte sequence, or this test is not measuring anything",
+  );
+});
+
 test("a signal's string form redacts its resume token", () => {
   // The resume token authorizes the ack. It is not an identifier and must not be logged.
   const signal = Signal.from(read(join(FIXTURES, "05-signal-answered.json")));

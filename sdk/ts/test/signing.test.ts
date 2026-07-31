@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -266,26 +266,31 @@ test("receipt core hash and chain digest match the worked vector", async () => {
   assert.ok(await verifyReceiptChain(receipt));
 });
 
-/**
- * `09-receipt-policy.json` presents itself as the next entry after `08` — its `prev_digest` is
- * `08`'s digest and its height is one higher — but its stored `chain.digest` does not recompute
- * from its own content (see the note at the end of this file). The chain mechanism is therefore
- * asserted over a recomputed second entry, so that this test states something true about the
- * implementation rather than about a fixture.
- */
-async function relinkedPolicyReceipt(): Promise<Record<string, any>> {
-  const policy = readJson("09-receipt-policy.json");
-  policy.chain.digest = await chainDigest(
-    policy.chain.height,
-    policy.chain.prev_digest,
-    await receiptCoreHash(policy),
+test("every published receipt fixture verifies as published", async () => {
+  // Verbatim, with nothing recomputed first. This is the assertion the suite was missing, and its
+  // absence is how `09-receipt-policy.json` shipped with a `chain.digest` that did not recompute
+  // from its own content. Every other receipt test here rewrote the digest before checking it,
+  // which measures the implementation against itself and says nothing about the bytes an
+  // independent implementer will actually download.
+  const published = readdirSync(FIXTURES)
+    .filter((entry) => entry.includes("receipt") && entry.endsWith(".json"))
+    .sort();
+  assert.deepEqual(
+    published,
+    ["08-receipt-decision.json", "09-receipt-policy.json"],
+    "a new receipt fixture must be added to this assertion, not silently skipped",
   );
-  return policy;
-}
+
+  for (const file of published) {
+    assert.ok(await verifyReceiptChain(readJson(file)), `${file} does not verify as published`);
+  }
+});
 
 test("a two-receipt chain verifies end to end", async () => {
+  // `09` is the next entry after `08` — its `prev_digest` is `08`'s digest and its height is one
+  // higher — so the two verify as a chain exactly as published.
   const decision = readJson("08-receipt-decision.json");
-  const policy = await relinkedPolicyReceipt();
+  const policy = readJson("09-receipt-policy.json");
   assert.equal(policy.chain.prev_digest, decision.chain.digest);
   assert.equal(policy.chain.height, decision.chain.height + 1);
   assert.ok(await verifyChain([decision, policy]));
@@ -294,7 +299,7 @@ test("a two-receipt chain verifies end to end", async () => {
 test("altering a historical receipt invalidates the rest of the chain", async () => {
   // §9.4, C-15: the property the chain exists for.
   const decision = readJson("08-receipt-decision.json");
-  const policy = await relinkedPolicyReceipt();
+  const policy = readJson("09-receipt-policy.json");
   assert.ok(await verifyChain([decision, policy]));
 
   decision.decision.values.note = "tampered";
@@ -314,11 +319,3 @@ test("receipt negative vectors are rejected", async () => {
   }
 });
 
-// NOTE — fixture defect, reported upstream, not worked around here:
-// `spec/fixtures/09-receipt-policy.json` carries
-//   chain.digest = sha256:c1a4f0bb7d2e6935481acdf20e7b3c56d9084e1fa27bc3d5608e94af1236b7d0
-// but recomputing it from that receipt's own core (a4070dc2…) at height 4212 with its stated
-// prev_digest yields
-//   sha256:1c4738c06a55a1ecc2217b55ac20fa6ba65319e81fc3b7ac49a726536afeb669
-// `08-receipt-decision.json` recomputes exactly, matching signing.md §2.5, so the canonicalization
-// is right and the fixture's digest is a placeholder.

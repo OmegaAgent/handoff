@@ -209,20 +209,34 @@ def test_receipt_core_hash_and_chain_digest_match_the_worked_vector():
     assert verify_receipt_chain(receipt)
 
 
+def test_every_published_receipt_fixture_verifies_as_published():
+    """Verbatim, with nothing recomputed first.
+
+    This is the assertion the suite was missing, and its absence is how `09-receipt-policy.json`
+    shipped with a `chain.digest` that did not recompute from its own content. Every other receipt
+    test here rewrote the digest before checking it, which measures the implementation against
+    itself and says nothing about the bytes an independent implementer will actually download. A
+    published fixture that fails the project's own verifier is the first thing they will find.
+    """
+    published = sorted(FIXTURES.glob("*receipt*.json"))
+    assert [p.name for p in published] == [
+        "08-receipt-decision.json",
+        "09-receipt-policy.json",
+    ], "a new receipt fixture must be added to this assertion, not silently skipped"
+
+    for path in published:
+        receipt = json.loads(path.read_bytes())
+        assert verify_receipt_chain(receipt), f"{path.name} does not verify as published"
+
+
 def test_a_two_receipt_chain_verifies_end_to_end():
-    """`09-receipt-policy.json` presents itself as the next entry after `08` — its `prev_digest`
-    is `08`'s digest and its height is one higher — but its stored `chain.digest` does not
-    recompute from its own content (see the module note at the bottom of this file). The chain
-    mechanism is therefore asserted over a recomputed second entry, so that this test states
-    something true about the implementation rather than about a fixture."""
+    """`09-receipt-policy.json` is the next entry after `08` — its `prev_digest` is `08`'s digest
+    and its height is one higher — so the two verify as a chain exactly as published."""
     decision = json.loads((FIXTURES / "08-receipt-decision.json").read_bytes())
     policy = json.loads((FIXTURES / "09-receipt-policy.json").read_bytes())
     assert policy["chain"]["prev_digest"] == decision["chain"]["digest"]
     assert policy["chain"]["height"] == decision["chain"]["height"] + 1
 
-    policy["chain"]["digest"] = chain_digest(
-        policy["chain"]["height"], policy["chain"]["prev_digest"], receipt_core_hash(policy)
-    )
     assert verify_chain([decision, policy])
 
 
@@ -246,9 +260,6 @@ def test_altering_a_historical_receipt_invalidates_the_rest_of_the_chain():
     hash, which changes its digest, which breaks the link every later entry depends on."""
     decision = json.loads((FIXTURES / "08-receipt-decision.json").read_bytes())
     policy = json.loads((FIXTURES / "09-receipt-policy.json").read_bytes())
-    policy["chain"]["digest"] = chain_digest(
-        policy["chain"]["height"], policy["chain"]["prev_digest"], receipt_core_hash(policy)
-    )
     assert verify_chain([decision, policy])
 
     decision["decision"]["values"]["note"] = "tampered"
@@ -261,13 +272,3 @@ def test_a_chain_with_a_relinked_gap_is_rejected():
     excised = dict(decision)
     excised["chain"] = dict(decision["chain"], height=decision["chain"]["height"] - 1)
     assert not verify_receipt_chain(excised)
-
-
-# NOTE — fixture defect, reported upstream, not worked around here:
-# `spec/fixtures/09-receipt-policy.json` carries
-#   chain.digest = sha256:c1a4f0bb7d2e6935481acdf20e7b3c56d9084e1fa27bc3d5608e94af1236b7d0
-# but recomputing it from that receipt's own core (a4070dc2…) at height 4212 with its stated
-# prev_digest yields
-#   sha256:1c4738c06a55a1ecc2217b55ac20fa6ba65319e81fc3b7ac49a726536afeb669
-# `08-receipt-decision.json` recomputes exactly, matching signing.md §2.5, so the canonicalization
-# is right and the fixture's digest is a placeholder.

@@ -8,8 +8,8 @@ The protocol uses two encodings and they are not interchangeable:
     byte-identical against.
 
 ``canonical_bytes``
-    RFC 8785 (JCS): members sorted by code point, no insignificant whitespace, no trailing
-    newline. Every digest in the protocol (§1.4) is taken over this.
+    RFC 8785 (JCS): members sorted by the UTF-16 code units of their names, no insignificant
+    whitespace, no trailing newline. Every digest in the protocol (§1.4) is taken over this.
 
 Member order is preserved rather than normalized for two reasons. Protocol §19 makes new
 response fields additive, so a client that drops members it does not recognize corrupts
@@ -83,16 +83,16 @@ def decode_document(raw: bytes | str) -> Any:
 def canonical_bytes(obj: Any) -> bytes:
     """Serialize to RFC 8785 (JCS) — the input to every digest in the protocol.
 
-    Non-integer numbers are rejected rather than serialized. JCS specifies a number format
-    that ``repr(float)`` does not reproduce, so a float here yields a digest that is stable
-    in this implementation and wrong across two. The protocol's canonicalized objects carry
-    no non-integer numbers; failing loudly keeps it that way.
+    Floats are rejected rather than serialized. JCS specifies a number format that
+    ``repr(float)`` does not reproduce, so a float here yields a digest that is stable in this
+    implementation and wrong across two. §1.4 requires every digest-covered number to be
+    written as an integer literal, and in Python that rule needs no separate check: ``json``
+    parses ``2`` to an ``int`` and ``2.0`` to a ``float``, so the type still carries the
+    distinction the text made. Refusing the float is refusing the literal.
     """
-    value = _unwrap(obj)
-    _reject_floats(value, "")
-    # sort_keys sorts recursively by code point, which matches JCS for the ASCII member
-    # names this protocol uses. signing.md's own reference verifier canonicalizes the same way.
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return json.dumps(
+        _canonicalize(_unwrap(obj), ""), separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
 
 
 def digest(obj: Any) -> str:
@@ -102,18 +102,41 @@ def digest(obj: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(obj)).hexdigest()
 
 
-def _reject_floats(value: Any, path: str) -> None:
+def _utf16_units(name: str) -> bytes:
+    """A member name as its UTF-16 code units, big-endian, for ordering only.
+
+    Comparing these bytes is comparing the code-unit sequence: every unit is two bytes and the
+    high byte leads, so a byte-lexicographic comparison is a unit-lexicographic one.
+    """
+    return name.encode("utf-16-be")
+
+
+def _canonicalize(value: Any, path: str) -> Any:
+    """Reject what JCS cannot carry, and impose JCS member order.
+
+    Member order is **UTF-16 code units**, not code points. The two agree for every name below
+    U+D800 and diverge above it, because a non-BMP character encodes as a surrogate pair
+    starting at 0xD800 and therefore sorts *below* every BMP character above U+D7FF while its
+    code point sorts above them. ``json.dumps(sort_keys=True)`` orders by code point and was
+    used here on the assumption that member names are ASCII. They are not: a ``document`` field
+    accepts any JSON value (§5.3), so caller-chosen object keys reach ``decision.values`` and
+    from there the receipt core. One such key put the Python SDK's canonicalization at odds with
+    the reference server's and the TypeScript SDK's over the same receipt, which is the one
+    disagreement a chain anybody can verify cannot survive.
+    """
     if isinstance(value, float):
         raise ValueError(
             f"cannot canonicalize a non-integer number at {path or '<root>'}: RFC 8785 "
             "specifies a number serialization that this would not reproduce"
         )
     if isinstance(value, dict):
-        for key, item in value.items():
-            _reject_floats(item, f"{path}.{key}" if path else key)
-    elif isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            _reject_floats(item, f"{path}[{index}]")
+        return {
+            key: _canonicalize(value[key], f"{path}.{key}" if path else key)
+            for key in sorted(value, key=_utf16_units)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    return value
 
 
 def _unwrap(obj: Any) -> Any:

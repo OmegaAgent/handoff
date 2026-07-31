@@ -258,6 +258,28 @@ def test_canonicalization_refuses_non_integer_numbers():
         canonical_bytes({"amount": 2400.5})
 
 
+def test_members_are_ordered_by_utf16_code_units_not_code_points():
+    """RFC 8785 §3.2.3 orders members by the UTF-16 code units of their names.
+
+    A ``document`` field carries any JSON value, so an answer puts caller-chosen object keys into
+    ``decision.values`` and from there into the receipt core. U+1F600 is non-BMP: it encodes as
+    the surrogate pair 0xD83D 0xDE00, so it sorts *below* U+FF01 by code unit and *above* it by
+    code point. Ordering by code point made this SDK compute a different receipt core hash than
+    the reference server and the TypeScript SDK for the same receipt — one answer would then have
+    read as forged to every holder of this SDK, and to no one else.
+    """
+    from handoff import canonical_bytes
+
+    document = {"！": 1, "\U0001f600": 2, "a": 0}
+    expected = '{"a":0,"\U0001f600":2,"！":1}'.encode("utf-8")
+
+    assert canonical_bytes(document) == expected
+    assert (
+        json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        != expected
+    ), "code-point order must be a different byte sequence, or this test is not measuring anything"
+
+
 # -- the deprecated module -------------------------------------------------------------------
 
 
