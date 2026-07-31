@@ -124,10 +124,11 @@ new error code are additive.
   `CalendarDuration`.
 - **Canonical JSON did not pin number serialization**, leaving three implementations free to diverge
   at exactly the boundary where RFC 8785 inherits ECMAScript's switch to exponential notation. §1.4
-  now requires every digest-covered number to be written as an integer literal within ±(2^53 − 1),
-  and rejects the rest with `422 answer_validation_failed` in an answer and `400 invalid_request` at
-  raise. The emitted output is a strict subset of legal JCS, so a full canonicalizer and one that
-  refuses to emit outside that subset produce identical bytes and neither can silently diverge.
+  now requires every digest-covered number to be integral in value and within ±(2^53 − 1), and to be
+  stored and served in the form its canonicalizer emits; it rejects the rest with
+  `422 answer_validation_failed` in an answer and `400 invalid_request` at raise. The emitted output
+  is a strict subset of legal JCS, so a full canonicalizer and one that refuses to emit outside that
+  subset produce identical bytes and neither can silently diverge.
   Added **C-24**, which also pins the two signing fixtures' byte lengths and digests as the
   cross-implementation check. The first attempt at this rule admitted any number in
   `1e-6 ≤ |x| < 1e21` instead — right about the notation, wrong about the values. What that cost,
@@ -214,23 +215,29 @@ A second defect sat underneath it and only an out-of-process hasher could have e
 re-rendered the receipt field by field with a different null policy, spelling `rendered.ref` as
 `reference`, so the bytes an auditor hashes were not the bytes that were sealed.
 
-**Digest-covered numbers must now be written as integer literals.** Fixing the construction still
-left 17 of 18, because §1.4 admitted non-integers inside `1e-6 ≤ |x| < 1e21` while both SDKs refuse
-to canonicalize a non-integer at all. A person answering a `number` field with `1.5` produced a
-receipt no published client could verify. The band was right about notation and wrong about values:
-RFC 8785 inherits ECMAScript number formatting, which is exactly what independent implementations do
-not reproduce. Integers are exact to 2^53 − 1 and render identically everywhere. A Client with an
-exact decimal quantity sends `text`.
+**Digest-covered numbers are now integers only.** Fixing the construction still left 17 of 18,
+because §1.4 admitted non-integers inside `1e-6 ≤ |x| < 1e21` while both SDKs refuse to canonicalize
+a non-integer at all. A person answering a `number` field with `1.5` produced a receipt no published
+client could verify. The band was right about notation and wrong about values: RFC 8785 inherits
+ECMAScript number formatting, which is exactly what independent implementations do not reproduce.
+Integers are exact to 2^53 − 1 and render identically everywhere. A Client with an exact decimal
+quantity sends `text`.
 
-One value still got past the integers-only wording, and it is why the rule is now stated over the
-written form rather than the value. `-0.0` has no fractional part, so a Server testing the parsed
-number was told it was an integer, and a JSON float landed in a digest-covered position — a receipt
-one published SDK verified and the other refused, which is the original failure in a smaller
-spelling. §1.4 now requires an **integer literal**: no decimal point, no exponent, so `2.0` and
-`-0.0` are refused at the boundary instead of normalized after it. `-0` remains legal, because
-ECMAScript, Python and Rust all render it `0`. The rule cannot be checked against a parsed value in
-every language — `JSON.parse` collapses `2.0` and `2` — so §1.4 says out loud that a Server reads
-the source text.
+**And they must be stored in the form the canonicalizer emits**, which is the half the value rule
+did not cover. `-0.0` is integral, so it passed validation; the server then stored the number as it
+arrived and let the canonicalizer render `0` at digest time. Both steps were defensible and the
+receipt was not, because the canonical form and the form at rest were different bytes — one
+published SDK verified it and the other refused. §1.4 now states normalization as a property of the
+record: `-0.0`, `1.0` and `1e2` are accepted and normalized to `0`, `1` and `100`.
+
+Stating it that way rather than as a rule about how the number was *written* is deliberate.
+`JSON.parse` discards the lexeme irrecoverably — `1.0`, `1`, `-0.0` and `1e2` parse to `1`, `1`, `0`
+and `100` with nothing downstream able to tell them apart — so a lexical requirement would be
+enforceable in Rust and Python and impossible in TypeScript without scanning raw bytes ahead of the
+parser. A rule a third of the ecosystem cannot enforce produces two conforming Servers that disagree
+about what is legal, which is the interop failure this section exists to prevent. Normalization also
+covers the routes a check on ingest does not: a migration, an operator path, or a field added later
+reaches storage without passing the answer endpoint.
 
 The result is now **18 of 18 real receipts verified by an independent implementation**.
 
@@ -267,8 +274,8 @@ reference implementation while following the specification exactly.
   for. `ChainHead.height` keeps `minimum: 0`; it is a count, and a chain with no receipts has none.
 - **`signing.md` §3 still stated the superseded band as normative**, so the two documents in this
   release disagreed about what a Server must reject — and the one that was wrong is the document an
-  independent verifier reads. It now states the integer-literal rule, and keeps the band above it as
-  the reason the narrowing is necessary rather than as the rule.
+  independent verifier reads. It now states the integers-only rule and the normalization property,
+  and keeps the band above it as the reason the narrowing is necessary rather than as the rule.
 - **`schemas/request.schema.json` admitted a document the reference server rejects.** A `number`
   field's `min` and `max` were typed `number` while `requires` is digest-covered through
   `request_digest`, so a client generated from the published schema could produce `min: 0.5` and

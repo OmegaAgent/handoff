@@ -2278,9 +2278,10 @@ components:
           maximum: 9007199254740991
           description: |
             For `number`, inclusive lower bound. `requires` is digest-covered through
-            `request_digest`, so §1.4 applies: an integer literal within ±(2^53 − 1). A non-integer
-            bound is refused at raise with `400 invalid_request` rather than surfacing later as a
-            receipt nobody can verify.
+            `request_digest`, so §1.4 applies: integral in value and within ±(2^53 − 1). A
+            non-integer bound is refused at raise with `400 invalid_request` rather than surfacing
+            later as a receipt nobody can verify. `integer` matches on value, so `2.0` validates
+            here and a Server normalizes it to `2` before storing or digesting it.
         max:
           type: integer
           minimum: -9007199254740991

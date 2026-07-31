@@ -193,7 +193,7 @@
         },
         "multi": { "type": "boolean", "default": false },
         "max_len": { "type": "integer", "minimum": 1 },
-        "min": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "description": "For `number`, inclusive lower bound. `requires` is digest-covered through `request_digest`, so §1.4 applies: an integer literal within ±(2^53 − 1). A non-integer bound is rejected at raise with 400 invalid_request." },
+        "min": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "description": "For `number`, inclusive lower bound. `requires` is digest-covered through `request_digest`, so §1.4 applies: integral in value and within ±(2^53 − 1). A non-integer bound is rejected at raise with 400 invalid_request. JSON Schema's `integer` matches on value, so 2.0 validates here and a Server normalizes it to 2." },
         "max": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "description": "For `number`, inclusive upper bound. Digest-covered on the same terms as `min`." },
         "initial": { "description": "Seed value for `document` and `text` fields. Never used for `secret`." },
         "schema_ref": { "type": "string", "format": "uri" },

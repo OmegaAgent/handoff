@@ -441,15 +441,20 @@ across two:
 
 `handoff-protocol-v0.1.md` §1.4 constrains this away rather than relying on three languages agreeing
 about floating point. The band above is why the narrowing is **necessary**; it is not the rule. The
-rule is that every number in a digest-covered object MUST be written as an **integer literal** — no
-decimal point, no exponent — and MUST be within ±(2^53 − 1). A Server rejects anything else with
-`422 answer_validation_failed` naming the field, or with `400 invalid_request` at raise, where
-`metadata` and `requires` are digest-covered through `request_digest`.
+rule is that every number in a digest-covered object MUST be integral in value and within
+±(2^53 − 1), and MUST be stored and served in the exact form the canonicalizer emits for it. A
+Server rejects a non-integral or out-of-range number with `422 answer_validation_failed` naming the
+field, or with `400 invalid_request` at raise, where `metadata` and `requires` are digest-covered
+through `request_digest`. `-0.0`, `1.0` and `1e2` are integral in value, so they are accepted and
+normalized to `0`, `1` and `100`.
 
-Nothing this protocol digests therefore reaches `Number::toString`'s notation switch at all. §1.4
-states the rule over the written form rather than the value because `-0.0` has no fractional part:
-once parsed it is the same double as `0`, so an implementation testing the value admits it, which is
-how a float reached a digest-covered position in a shipped receipt.
+Nothing this protocol digests therefore reaches `Number::toString`'s notation switch at all. The
+normalization half is the half a signing implementation has to care about, and it is the one that
+failed: `-0.0` passed a check on the value, was stored as it arrived, and was rendered `0` by the
+canonicalizer at digest time. The canonical form and the form at rest were different bytes, so an
+auditor hashing the served receipt did not reproduce the sealed digest. **Verify the bytes as
+served.** A verifier that normalizes or re-renders a number before hashing is checking its own
+arithmetic rather than the record, and will report agreement it does not have.
 
 The consequence for an implementer is worth stating plainly, because it is what makes the constraint
 worth having: **a complete JCS canonicalizer and one that refuses to emit anything outside this
