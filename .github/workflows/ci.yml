@@ -723,6 +723,11 @@ jobs:
     # convenience. (No case identifier is named above on purpose: gate-count holds every one
     # mentioned in the tree to a file on disk, and a check that trips over its own prose gets
     # loosened.)
+    #
+    # Stated plainly because it should not be discovered later: when this job was written the
+    # script did not exist, and the wiring below was demonstrated against a stand-in that returns
+    # each of the answers a real one can return. The script has never run against real minted
+    # receipts anywhere. The first run of this job is the first time that happens.
     services:
       postgres:
         image: postgres:16-alpine
@@ -768,14 +773,21 @@ jobs:
           fi
           echo "found"
 
-      # The red direction first, and it is the whole reason to trust the green one. Sorting member
-      # names by code point is the exact defect the seam exists to catch, and it only shows up if
-      # the payload carries a name that sorts differently under the two orderings — a non-BMP
-      # character. So this mutation tests the script AND its fixture at once: a script whose
-      # payload is a plain `{"decision":"approve"}` passes here and fails this step, correctly.
+      # The red direction first, and it is the whole reason to trust the green one. Do not delete
+      # this step as paranoia — it is load-bearing in a way that is easy to miss on a first read.
       #
-      # If the substitution stops applying the step fails rather than passing quietly, because a
-      # mutation that no longer mutates anything proves the same nothing as no mutation at all.
+      # Sorting member names by code point instead of by UTF-16 code unit is the exact defect the
+      # seam exists to catch, and the two orderings only disagree when a name contains a character
+      # outside the Basic Multilingual Plane. So breaking the canonicalizer on purpose and
+      # requiring the script to notice tests the SCRIPT and its FIXTURE at once: a script whose
+      # payload is a plain `{"decision":"approve"}` still passes under a broken canonicalizer, so
+      # it fails here, correctly, and the message says why. That closes the hole where a check
+      # that has started failing gets "fixed" by quietly weakening what it is fed — the payload
+      # can no longer be softened without this step going red.
+      #
+      # If the substitution stops applying, the step fails rather than passing quietly. A sabotage
+      # that silently stops sabotaging is worse than none, because it reports the strongest
+      # evidence available while doing nothing at all.
       - name: The script goes red against a canonicalizer that sorts by code point
         run: |
           python3 - <<'MUTATE'
@@ -824,6 +836,96 @@ jobs:
             exit 1
           fi
           echo "handoffd's receipts verify under both published SDKs."
+
+  published-artifacts:
+    name: the published vectors reproduce, and the spec's own verifier accepts them
+    runs-on: ubuntu-latest
+    # `spec/signing.md` prints worked vectors and a reference verifier and tells an implementer to
+    # reproduce every value exactly. Until this job existed, nothing executed either: the prose was
+    # checked by the SDK tests, which is the same closed loop as the conformance harness sharing a
+    # crate with the server — our code agreeing with our code. This script extracts the verifier
+    # from the specification text itself and runs it against the published fixtures, so what is
+    # tested is the document a third party reads rather than the implementation we happen to have.
+    #
+    # Required, not conditional, for the same reason as the receipts job: a gate that steps aside
+    # when its subject is missing reports green and measures nothing, and the absence looks exactly
+    # like the pass.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The script exists
+        run: |
+          if [ ! -f scripts/verify-published-artifacts.py ]; then
+            echo "::error::scripts/verify-published-artifacts.py is missing. It is the only thing"
+            echo "::error::that executes spec/signing.md's own verifier against the published"
+            echo "::error::fixtures, so its absence is a red build, not a skip."
+            exit 1
+          fi
+          echo "found"
+
+      # The red direction first. A verifier that reports success on a receipt whose content has
+      # been altered is the failure this whole document exists to make impossible, so the sabotage
+      # is a single changed character inside the digest-covered core: the published signature was
+      # computed over the original bytes and nothing that actually reads the fixture can still
+      # accept it. The mutation deliberately does not depend on how the script is written — only on
+      # its stated job — so it keeps working when the script is rewritten.
+      #
+      # If the script stays green here, that is a finding and not a flake: it is not reading the
+      # artifact it claims to verify, or it is regenerating the expected value from the same input
+      # it is checking, which is the closed loop again with a smaller radius.
+      - name: The script goes red when a published artifact is altered
+        run: |
+          python3 - <<'SABOTAGE'
+          import pathlib, sys
+          p = pathlib.Path("spec/fixtures/signing/receipt-core.json")
+          text = p.read_text()
+          if "Dana Okafor" not in text:
+              sys.exit("the sabotage no longer applies: receipt-core.json does not carry the name "
+                       "it was written against. Point this step at a different byte of the "
+                       "digest-covered core and say so here.")
+          p.write_text(text.replace("Dana Okafor", "Dana Okafur", 1))
+          SABOTAGE
+          if git diff --quiet -- spec/fixtures/signing/receipt-core.json; then
+            echo "::error::The sabotage changed nothing, so this meta-test is measuring nothing."
+            exit 1
+          fi
+          # No pipe: `cmd | tee` reports tee's status, which is how a green build gets reported
+          # for a red run.
+          set +e
+          python3 scripts/verify-published-artifacts.py > /tmp/sabotaged.out 2>&1
+          rc=$?
+          set -e
+          git checkout -- spec/fixtures/signing/receipt-core.json
+          tail -40 /tmp/sabotaged.out
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::An altered receipt core still verified. Either the script does not read"
+            echo "::error::spec/fixtures/signing/receipt-core.json, or it recomputes the value it"
+            echo "::error::is checking from the same bytes it is checking."
+            exit 1
+          fi
+          echo "The script reports red when a published artifact stops matching its signature."
+
+      - name: The published artifacts verify under the specification's own verifier
+        run: |
+          set +e
+          python3 scripts/verify-published-artifacts.py > /tmp/published.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/published.out
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::A value spec/signing.md publishes does not reproduce, or a published"
+            echo "::error::fixture does not verify under the verifier the document prints."
+            exit 1
+          fi
+          if [ ! -s /tmp/published.out ]; then
+            echo "::error::The script exited 0 and said nothing. It must report what it checked."
+            exit 1
+          fi
+          echo "Every published vector reproduces and every published fixture verifies."
 
   gate-count:
     name: conformance — the case count agrees everywhere it is written
