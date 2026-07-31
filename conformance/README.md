@@ -137,7 +137,7 @@ run** for that version: the case list, the result per case, the suite version, a
 somewhere a skeptic can find them and rerun them against your endpoint. See
 [`TRADEMARKS.md`](../TRADEMARKS.md).
 
-## Three ways a check passes without measuring anything
+## Four ways a check passes without measuring anything
 
 Every one of these was found in this repository, in a check written by someone trying to prevent
 exactly the thing it failed to catch. They are written in the past tense on purpose: each is a
@@ -158,6 +158,26 @@ now does both — `core/crates/handoff-conformance/src/chain.rs` implements RFC 
 SDKs, because a Rust verifier written by the same people from the same reading can still share a
 misreading with the server.
 
+**A passing probe deserves the same attack as a failing one.** A green result is a claim that the
+defect is absent, and it is the claim easiest to accept without asking what it would have taken to
+see the defect. Someone here ran a verification pass over six freshly minted receipts, with content
+described as chosen to stress canonicalization, watched all six verify, and recorded that as
+evidence. Two canonicalization defects were reachable at that exact commit through the ordinary
+answer path, and the pass found neither. The payload stressed **values** — unicode inside strings,
+integers at the safe-integer bounds — while JCS member ordering is a property of **keys**, and the
+safe-integer bound is not the predicate the float slipped through. Every character in that unicode
+string was BMP, so even promoted to a key it could not have exposed the UTF-16-versus-code-point
+split. The probe was outside the defect's dimensions along two independent axes and came back
+clean.
+
+The asymmetry is the point. There is already a habit of attacking a result you hoped was a
+*finding* — the same day, someone correctly talked themselves out of a cross-tenant leak that turned
+out to be a malformed identifier. Nothing attacks a result you hoped was a *reassurance*, because it
+is what you wanted. So: before recording a pass, **name the shapes the probe could not have
+detected**. C-26 carries the answer to that question in its rationale, and this file's own gates
+publish theirs — what the lying-hooks profile survives is written down rather than left for the next
+review to find.
+
 **An anti-vacuity guard must be scoped to the same unit as the assertion it protects.** The
 row-level-security test asserted, per table, that a query without a tenant predicate returns only
 the caller's rows — a comparison that can only fail when *another* tenant owns a row in that table.
@@ -176,7 +196,7 @@ was about the protocol. What closed it: the runner checks its own process is ali
 an HTTP answer, and every resource a run owns — database, ports, scratch directory — derives from a
 per-run token. A run against a stranger is not a measurement, whichever way it lands.
 
-The habit that catches all three: **break the thing on purpose and watch the check fail.** If you
+The habit that catches all four: **break the thing on purpose and watch the check fail.** If you
 have never seen a check go red, you have not tested the check — you have tested the code, using an
 instrument of unknown sensitivity. Every guard in this suite has been shown failing at least once,
 and the demonstration belongs in the pull request that adds it.

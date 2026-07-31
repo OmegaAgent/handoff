@@ -59,6 +59,27 @@ rationale: >
   A C-26 that answered `{"decision": "approve"}` and verified the result would prove only what the
   receipts of every other case already prove.
 
+  ## What a green C-26 does not tell you
+
+  Stated because a passing probe is the claim easiest to accept without asking what it would have
+  taken to see the defect — and because the two canonicalization defects this case exists for were
+  both missed once by a verification pass that looked like this one and stressed the wrong axis.
+
+  - **A misreading this suite shares with the Server.** If the harness and the reference
+    implementation are wrong the same way, C-26 is green and both are wrong. Nothing inside this
+    repository can close that; `scripts/verify-minted-receipts.sh` does, by handing the same
+    receipts to the two published SDKs, which share no line of code with either.
+  - **Regions of the canonicalizer this payload does not visit.** Control characters inside a
+    **key** rather than a value, deeply nested arrays of objects, and numbers outside ±(2^53 − 1),
+    which never reach a receipt because they are refused at the door. A defect confined to one of
+    those is invisible here.
+  - **Receipt kinds this case does not mint.** A `policy` receipt from an expiry, a `correction`,
+    and receipts carrying `rendered`, `steps`, `capabilities_exercised` or `clearance`. In a full
+    suite run the walk covers every receipt the whole run produced, including those; run alone with
+    `--case C-26`, it covers this one.
+  - **The detached signature of `signing.md` §2.3.** This case verifies the chain, not the Ed25519
+    signature over it. Nothing here would notice a broken `kid` or a signature over the wrong input.
+
 requires:
   principals: [machine_a, human_editor]
 
