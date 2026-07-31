@@ -237,4 +237,41 @@ mod tests {
         audit_coverage(&cases, &map).expect("cases cover §18");
         assert_eq!(map.spec_version, PROTOCOL_VERSION);
     }
+
+    /// The published example profile must define every hook the case set requires.
+    ///
+    /// `conformance/README.md` sends every independent implementer to `profile.example.yaml`, and
+    /// a case whose hook is missing **fails** rather than being skipped — correctly. Put together,
+    /// a hook missing from that file means an implementer's first run reports a failure caused by
+    /// us and not by them. That is exactly what happened: the file shipped without `canonicalize`,
+    /// so everyone starting from it failed C-24 for a missing hook rather than for anything about
+    /// their canonicalization. Adding a case with a new hook and forgetting the example is a
+    /// mistake nobody makes on purpose and nobody catches by reading, so it is checked here.
+    #[test]
+    fn profile_example_defines_every_hook_the_cases_require() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let Some(root) = find_repo_root(&manifest) else {
+            return;
+        };
+        let cases = load_cases(&root.join("conformance").join("cases")).expect("cases load");
+        let profile =
+            profile::Profile::load(&manifest.join("profile.example.yaml")).expect("example loads");
+
+        let mut missing: Vec<String> = Vec::new();
+        for case in &cases {
+            for hook in &case.requires.hooks {
+                if !profile.hooks.contains_key(hook) {
+                    missing.push(format!("{} requires `{hook}`", case.id));
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "profile.example.yaml is missing hooks the case set requires, so an implementer \
+             starting from it fails those cases for a missing hook rather than for a defect in \
+             their implementation: {missing:?}"
+        );
+    }
 }

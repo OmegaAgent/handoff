@@ -126,10 +126,25 @@ pub trait Store: Send + Sync {
         -> BoxFuture<'_, Result<Vec<DeliveryView>>>;
 
     /// Unacked signals for one waiter. **Reading does not consume** (§8.3).
-    fn signals(&self, tenant: String, waiter_ref: String) -> BoxFuture<'_, Result<Vec<Signal>>>;
+    ///
+    /// `None` means the Server has never issued this reference in this tenant, which is a
+    /// different fact from an empty queue and must not be reported the same way.
+    fn signals(
+        &self,
+        tenant: String,
+        waiter_ref: String,
+    ) -> BoxFuture<'_, Result<Option<Vec<Signal>>>>;
 
     /// W7. Return every unacked signal and re-arm the lease (§8.5).
-    fn reattach(&self, tenant: String, waiter_ref: String) -> BoxFuture<'_, Result<ReattachView>>;
+    ///
+    /// Re-attaches to a waiter that already exists; it never mints one. `None` means the Server
+    /// has never issued this reference — creating it on demand would fabricate the very thing
+    /// whose absence the caller needed to be told about.
+    fn reattach(
+        &self,
+        tenant: String,
+        waiter_ref: String,
+    ) -> BoxFuture<'_, Result<Option<ReattachView>>>;
 
     /// W4. Consume a signal, idempotently (§3.5).
     fn ack(&self, tenant: String, command: AckCommand) -> BoxFuture<'_, Result<Option<AckResult>>>;

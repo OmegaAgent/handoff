@@ -837,10 +837,23 @@ async fn poll_signals(
     loop {
         // §8.3. Reading a signal MUST NOT consume it. Consumption is the ack, and this handler
         // performs no write at all.
-        let signals = state
+        //
+        // A reference this tenant was never issued is `404`, checked before the long poll rather
+        // than after it: a fabricated reference must not be able to hold a connection open for
+        // thirty seconds and then answer exactly as a real, quiet waiter does. Absence of evidence
+        // and evidence of absence are different things, and this endpoint is where a caller asks
+        // for the second.
+        let Some(signals) = state
             .store
             .signals(principal.tenant_ref.clone(), waiter_ref.clone())
-            .await?;
+            .await?
+        else {
+            return Err(ProtocolError::new(
+                ErrorCode::WaiterNotFound,
+                "no such waiter reference in this tenant",
+            )
+            .into());
+        };
         if !signals.is_empty() {
             return Ok(Api::ok(json!({
                 "data": signals.iter().map(wire::signal).collect::<Vec<_>>(),
@@ -868,7 +881,13 @@ async fn reattach(
     let view = state
         .store
         .reattach(principal.tenant_ref.clone(), waiter_ref)
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::WaiterNotFound,
+                "no such waiter reference in this tenant",
+            )
+        })?;
     Ok(Api::ok(json!({
         "waiter_ref": view.waiter_ref,
         "state": serde_json::to_value(view.state).unwrap_or(Value::Null),

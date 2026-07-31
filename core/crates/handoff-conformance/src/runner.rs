@@ -509,9 +509,30 @@ impl<'a> Runner<'a> {
                     let body = self.fetch(&path, &s.r#as)?;
                     corpus.push((format!("GET {path}"), body));
                 }
+                // The one source that can fail to produce anything and still leave the scan
+                // looking healthy, because seven other sources contribute. C-7's rationale is
+                // explicit that a deployment which cannot show its logs has not demonstrated the
+                // property, so both a failing hook and a silent one are failures of the case —
+                // not a source that quietly contributes nothing.
                 ScanSource::Logs => {
                     let command = self.profile.hook("logs")?;
-                    let (_, output) = run_command(&command, &BTreeMap::new())?;
+                    let (code, output) = run_command(&command, &BTreeMap::new())?;
+                    if code != 0 {
+                        return Err(format!(
+                            "the `logs` hook exited {code}, so the deployment did not show its \
+                             logs; §12.3 makes \"no secret in a log line\" normative and an \
+                             unreadable log is a failure, not an exemption\n      output: {}",
+                            head_lines(&output)
+                        ));
+                    }
+                    if output.trim().is_empty() {
+                        return Err(
+                            "the `logs` hook produced no output, so scanning the logs found \
+                             nothing because there was nothing to search; a deployment that \
+                             cannot show its logs has not demonstrated §12.3"
+                                .to_string(),
+                        );
+                    }
                     corpus.push(("the deployment's logs".to_string(), output));
                 }
             }
@@ -620,7 +641,7 @@ impl<'a> Runner<'a> {
                 return Err(format!(
                     "hook `{}` exited {code}, expected {want}\n      output: {}{because}",
                     h.hook,
-                    first_line(&output)
+                    head_lines(&output)
                 ));
             }
         }
@@ -629,29 +650,32 @@ impl<'a> Runner<'a> {
                 return Err(format!(
                     "hook `{}` exited {code}, and it must not\n      output: {}{because}",
                     h.hook,
-                    first_line(&output)
+                    head_lines(&output)
                 ));
             }
         }
         for pattern in &h.expect.output_matches {
-            let re = regex::Regex::new(pattern)
+            let filled = vars::interpolate_regex(pattern, &scope.vars)?;
+            let re = regex::Regex::new(&filled)
                 .map_err(|e| format!("case defect: `{pattern}` is not a valid regex ({e})"))?;
             if !re.is_match(&output) {
                 return Err(format!(
-                    "hook `{}` output does not match /{pattern}/\n      output: {}{because}",
+                    "hook `{}` output does not match /{filled}/, so it did not show it did the \
+                     thing — an exit code alone is a claim, not evidence\n      output: {}{because}",
                     h.hook,
-                    first_line(&output)
+                    head_lines(&output)
                 ));
             }
         }
         for pattern in &h.expect.output_not_matches {
-            let re = regex::Regex::new(pattern)
+            let filled = vars::interpolate_regex(pattern, &scope.vars)?;
+            let re = regex::Regex::new(&filled)
                 .map_err(|e| format!("case defect: `{pattern}` is not a valid regex ({e})"))?;
             if re.is_match(&output) {
                 return Err(format!(
-                    "hook `{}` output matches /{pattern}/ and must not\n      output: {}{because}",
+                    "hook `{}` output matches /{filled}/ and must not\n      output: {}{because}",
                     h.hook,
-                    first_line(&output)
+                    head_lines(&output)
                 ));
             }
         }
@@ -814,6 +838,24 @@ fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or("").trim();
     let head: String = line.chars().take(200).collect();
     head
+}
+
+/// The first few non-empty lines of a hook's output.
+///
+/// `first_line` is enough when the complaint is an exit code. When the complaint is that the
+/// evidence a case asked for is missing, one truncated line is not enough to see that it is — the
+/// person reading the failure needs to see what the hook printed instead.
+fn head_lines(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(6)
+        .map(|l| l.trim().chars().take(200).collect::<String>())
+        .collect();
+    if lines.is_empty() {
+        return "(the hook printed nothing at all)".to_string();
+    }
+    lines.join("\n              ")
 }
 
 fn percent(text: &str) -> String {

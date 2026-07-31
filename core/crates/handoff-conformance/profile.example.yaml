@@ -70,38 +70,72 @@ deployment:
 # ---------------------------------------------------------------------------- hooks
 #
 # Commands run with `sh -c`. Arguments arrive as environment variables named
-# `HANDOFF_ARG_<UPPERCASE_KEY>`. Exit status is what the case asserts.
+# `HANDOFF_ARG_<UPPERCASE_KEY>`.
 #
-# These exist because three requirements are below the HTTP API by construction. Putting a database
+# These exist because ten requirements are below the HTTP API by construction. Putting a database
 # driver in the runner instead would make the suite an assertion about our storage choice rather
 # than about the protocol, and would stop it testing implementations written in other languages.
+#
+# Every hook below is REQUIRED: the ten commands here are exactly the ten the case set names, and a
+# case whose hook is missing FAILS rather than being skipped. `advance_clock` is the only optional
+# one, and it is commented out. That correspondence is checked by a test in this crate
+# (`profile_example_defines_every_hook_the_cases_require`) rather than maintained by hand, because
+# a review found this file missing `canonicalize` — which meant every implementer who started from
+# it failed C-24 for a missing hook rather than for anything about their implementation.
+#
+# ## Exit status is not what the case asserts
+#
+# It cannot be. Every hook below has a one-word shell command that exits the way its case wants —
+# `false` for the mutations that must be refused, `true` for everything else — and a suite that
+# checked only the status would hand a conformance claim to a deployment that implemented none of
+# this. A hostile review demonstrated exactly that: eight of the suite's hardest assertions, the
+# ones covering the properties an implementer cannot verify from the HTTP surface, satisfied by
+# four stubs.
+#
+# So each case also requires **evidence in the hook's output that it did the thing**, and where the
+# evidence can be tied to something the suite read over HTTP — a receipt id, a chain head — it is.
+# The required line is documented against each hook here, and the case file says why. Print more if
+# it helps you debug; the case matches, it does not compare whole outputs.
 hooks:
   # C-7, C-17 — the scans must search logs. §12.3 makes "no secret in a log line" normative, and a
-  # deployment that cannot show its logs has not demonstrated it.
+  # deployment that cannot show its logs has not demonstrated it. A `logs` hook that fails, or that
+  # prints nothing, fails the case: there is no version of "we could not show you" that is a pass.
   logs: "docker compose logs --no-color --since 10m"
 
   # C-15 — §9.4 requires immutability at the storage layer, "because the threat includes the
   # application". These run as the application's own database role and must be REFUSED.
+  #
+  # Must print: the receipt id it attempted, and the engine's own refusal. `false` exits non-zero
+  # exactly as a refused mutation does, so the exit code alone separates nothing.
   storage_update_receipt: >
+    echo "attempted=update receipt=$HANDOFF_ARG_RECEIPT_ID" &&
     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
     "update receipts set decision = '{\"values\":{\"decision\":\"reject\"}}'::jsonb
      where id = '$HANDOFF_ARG_RECEIPT_ID'"
   storage_delete_receipt: >
+    echo "attempted=delete receipt=$HANDOFF_ARG_RECEIPT_ID" &&
     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
     "delete from receipts where id = '$HANDOFF_ARG_RECEIPT_ID'"
 
   # Re-walk the chain and exit 0 only if every link agrees with the stored head.
+  # Must print: `chain_verified head=<digest> height=<n>`, and it must be the head
+  # `GET /receipts/chain-head` returned — a walk of a different store gives a different digest.
   receipt_chain_verify: "./scripts/verify-receipt-chain.sh"
 
   # Alter one historical receipt in a DISPOSABLE COPY, re-verify against the copy, and exit 0 only
   # when the head no longer verifies. This must never touch the live store.
+  # Must print: `tamper_detected altered=<id> head_before=<digest> head_after=did-not-verify`,
+  # with `head_before` again the head the suite read over HTTP.
   chain_tamper_is_detected: "./scripts/chain-tamper-check.sh"
 
   # C-21 — the protocol defines the outbound delivery model but no inbound channel-adapter surface,
   # so the deployment injects the message. Receives REQUEST_ID, CHANNEL, TEXT.
+  # Must print: `channel_message=<id> request=<id> channel=<name> request_state=<state>`, read back
+  # from storage. Everything C-21 asserts afterwards is about a message that has to exist.
   channel_inbound: "./scripts/inject-channel-message.sh"
 
   # C-22 — simulate the runtime observing the target page change, with no person asserting anything.
+  # Must print: `observation=<id> request=<id> request_state=<state> receipts=<n>`.
   observe_page_state_change: "./scripts/observe-page-change.sh"
 
   # C-23 — §6.2 requires every transition to emit its event in the same transaction as the state
@@ -109,9 +143,27 @@ hooks:
   # One event per line, each naming its type. Receives REQUEST_ID.
   events: "./scripts/dump-events.sh"
 
+  # C-24 — canonicalize a document per RFC 8785 and print three lines: the canonical bytes, then
+  # `bytes=<n>`, then `sha256=<lowercase hex>`. Receives either PATH (repository-relative) or JSON
+  # (an inline document).
+  #
+  # Not reachable over HTTP, which is why it is a hook: two implementations that disagree about
+  # member ordering or number formatting compute different digests for the same receipt, and
+  # nothing errors — the chain simply stops verifying for somebody, later, with no way to establish
+  # which side was right. Running this against the published signing fixtures is how a deployment
+  # shows its canonicalization agrees with everyone else's. §1.4 restricts digest-covered content
+  # to integers within the safe-integer bound, so a conforming canonicalizer either emits the same
+  # bytes as a complete JCS implementation or refuses a value outside the band; it never rounds one.
+  canonicalize: "./scripts/canonicalize.sh"
+
   # C-23 — induce a settling write, kill the Server between the state write and the event write,
   # restart, and exit 0 only if both are present or neither is. This is the only assertion that
   # distinguishes a real transaction from an emit-after-commit that has not crashed yet.
+  #
+  # Must print: `crash_point_reached=<name> instance_exit=<non-zero> … agree=yes`. "Both present"
+  # is what a normal commit looks like too, so this hook has to show that the process was actually
+  # interrupted at the seam and left by a fault. If your build cannot induce the crash, this must
+  # FAIL — reporting agreement you never tested is the failure the case exists to catch.
   crash_between_state_and_event: "./scripts/crash-between-writes.sh"
 
   # C-9, C-10, C-18 — optional. Where a deployment can move its own clock, the TTL cases run in
@@ -127,9 +179,11 @@ callback:
   # tunnel or a container network rather than at the bind address directly.
   # advertise: "host.docker.internal:9099"
   #
-  # The signing secret for this endpoint, and the previous one during a rotation overlap. The checks
-  # that use these need `spec/signing.md`, which is not yet published; until it is, C-18's signature
-  # assertions fail with that reason rather than passing vacuously.
+  # The signing secret for this endpoint, and the previous one during a rotation overlap. The
+  # signature scheme is `spec/signing.md`, which §15 cites as normative. Supply at least `secret`,
+  # or C-18's signature assertions fail with that reason rather than passing vacuously. Two active
+  # secrets are what let C-18 observe a rotation overlap at all: with one, there is nothing to
+  # rotate from.
   # secret: "REPLACE_ME"
   # secret_previous: "REPLACE_ME"
 

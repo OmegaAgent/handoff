@@ -4153,6 +4153,7 @@ components:
         - auth_strength_not_permitted
         - request_not_found
         - capability_not_found
+        - waiter_not_found
         - signal_not_found
         - authorization_not_found
         - already_answered

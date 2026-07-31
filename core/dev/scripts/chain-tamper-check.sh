@@ -25,10 +25,32 @@ COLUMNS="id,tenant_ref,request_id,kind,height,prev_digest,digest,decided_at,deci
 psql "$HANDOFF_DATABASE_URL" -q -c "\\copy (select $COLUMNS from handoff_receipts order by tenant_ref, height) to stdout" \
   | psql "$CLEAN_URL" -q -c "\\copy handoff_receipts($COLUMNS) from stdin" >/dev/null
 
+# Which chain to rewrite: the one that owns the receipt the case named.
+#
+# Earlier this picked "the tenant with the most receipts", which worked but left the hook's report
+# unattached to anything the case had independently observed. Taking the tenant from
+# HANDOFF_ARG_RECEIPT_ID means `head_before` below is the same head the case read from
+# `GET /receipts/chain-head`, so C-15 can require the two to agree rather than take this script's
+# word that it tampered with something.
+TENANT=$(psql "$CLEAN_URL" -qtA -c \
+  "select tenant_ref from handoff_receipts where id = '${HANDOFF_ARG_RECEIPT_ID:?}'")
+if [ -z "$TENANT" ]; then
+  echo "no receipt named ${HANDOFF_ARG_RECEIPT_ID} is in the copy; there is nothing to tamper with" >&2
+  exit 1
+fi
+
 # The verifier must agree with the live store before anything is altered. A copy that was already
-# broken would make the rest of this script prove nothing.
-if ! HANDOFF_DATABASE_URL="$CLEAN_URL" "$HANDOFFD" verify-chain >/dev/null 2>&1; then
+# broken would make the rest of this script prove nothing. Its report is also where `head_before`
+# comes from: the head this chain had while it was still intact.
+if ! BEFORE=$(HANDOFF_DATABASE_URL="$CLEAN_URL" "$HANDOFFD" verify-chain --tenant "$TENANT" 2>&1); then
   echo "the untouched copy does not verify; the tamper check would prove nothing" >&2
+  printf '%s\n' "$BEFORE" >&2
+  exit 1
+fi
+HEAD_BEFORE=$(printf '%s\n' "$BEFORE" | awk 'match($0, /head [^ ]+ at height/) {
+  split(substr($0, RSTART, RLENGTH), p, " "); print p[2] }')
+if [ -z "$HEAD_BEFORE" ]; then
+  echo "the untouched copy reported no head, so an invalidated head would mean nothing" >&2
   exit 1
 fi
 
@@ -36,7 +58,7 @@ fi
 # in the copy, precisely because the point is to see what a successful rewrite would do to the head.
 psql "$CLEAN_URL" -q -c "drop trigger handoff_receipts_no_update on handoff_receipts" >/dev/null
 
-# Alter the FIRST receipt of ONE tenant, and alter a member every receipt is required to carry.
+# Alter the FIRST receipt of that ONE tenant, and alter a member every receipt is required to carry.
 #
 # Two things went wrong in earlier versions of this probe and both produced a false pass.
 # `min(height)` without a tenant matches the first receipt of *every* tenant, because heights are
@@ -45,13 +67,7 @@ psql "$CLEAN_URL" -q -c "drop trigger handoff_receipts_no_update on handoff_rece
 # values — so the "tampered" copy was byte-identical to the original and of course still verified.
 # `decided_at` is required on every receipt by the schema, so setting it always changes the core
 # hash, and therefore always changes the digest and every digest after it.
-TENANT=$(psql "$CLEAN_URL" -qtA -c \
-  "select tenant_ref from handoff_receipts group by tenant_ref order by count(*) desc limit 1")
-if [ -z "$TENANT" ]; then
-  echo "there are no receipts, so there is no history to tamper with" >&2
-  exit 1
-fi
-
+#
 # `-q` matters: without it psql prints the `UPDATE 1` command tag to stdout alongside the returned
 # id, and the row-count guard below then sees two lines and rejects a perfectly correct update.
 ALTERED=$(psql "$CLEAN_URL" -qtA -c \
@@ -73,10 +89,14 @@ if [ "$(psql "$CLEAN_URL" -qtA -c \
   exit 1
 fi
 
-if HANDOFF_DATABASE_URL="$CLEAN_URL" "$HANDOFFD" verify-chain >/dev/null 2>&1; then
+if HANDOFF_DATABASE_URL="$CLEAN_URL" "$HANDOFFD" verify-chain --tenant "$TENANT" >/dev/null 2>&1; then
   echo "the chain still verifies after $ALTERED was rewritten: tamper-evidence in name only" >&2
   exit 1
 fi
 
+# The evidence line C-15 matches against. `head_before` is the head this chain had while it was
+# intact, and the case requires it to be the head the HTTP surface reported — so the hook has to
+# have walked the same history the case just read, not merely exited 0.
 echo "altering $ALTERED invalidated the chain head, as §9.4 requires"
+echo "tamper_detected altered=$ALTERED head_before=$HEAD_BEFORE head_after=did-not-verify"
 exit 0

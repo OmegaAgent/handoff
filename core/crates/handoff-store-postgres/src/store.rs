@@ -179,6 +179,28 @@ impl PgStore {
         Ok(tx)
     }
 
+    /// Whether this tenant has ever been issued this waiter reference.
+    ///
+    /// §3.4 makes `waiter_ref` an opaque grouping key the Server never parses, so the only way to
+    /// know a reference is real is that a row exists for it. Tenant-scoped, so a reference held by
+    /// another tenant reads as absent rather than forbidden — a `403` here would confirm that
+    /// somebody else's waiter exists, which §3.2 rule 3 forbids.
+    async fn waiter_exists(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &str,
+        waiter_ref: &str,
+    ) -> Result<bool> {
+        let found: Option<String> = sqlx::query_scalar(
+            "select waiter_ref from handoff_waiters where tenant_ref = $1 and waiter_ref = $2",
+        )
+        .bind(tenant)
+        .bind(waiter_ref)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db)?;
+        Ok(found.is_some())
+    }
+
     /// Serialize a tenant's chain writes, so two receipts cannot claim one height.
     async fn lock_chain(tx: &mut Transaction<'_, Postgres>, tenant: &str) -> Result<()> {
         sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
@@ -2135,9 +2157,20 @@ impl Store for PgStore {
         })
     }
 
-    fn signals(&self, tenant: String, waiter_ref: String) -> BoxFuture<'_, Result<Vec<Signal>>> {
+    fn signals(
+        &self,
+        tenant: String,
+        waiter_ref: String,
+    ) -> BoxFuture<'_, Result<Option<Vec<Signal>>>> {
         Box::pin(async move {
             let mut tx = self.tenant_tx(&tenant).await?;
+            // A reference this tenant never had is not an empty queue. Checked first, and in the
+            // same tenant-scoped transaction, so another tenant's waiter is indistinguishable from
+            // one that does not exist.
+            if !Self::waiter_exists(&mut tx, &tenant, &waiter_ref).await? {
+                tx.commit().await.map_err(db)?;
+                return Ok(None);
+            }
             // §8.3. Reading does not consume: this is a plain select, and nothing here writes
             // `acked_at`.
             let rows = sqlx::query(
@@ -2150,39 +2183,44 @@ impl Store for PgStore {
             .await
             .map_err(db)?;
             tx.commit().await.map_err(db)?;
-            rows.iter().map(row_to_signal).collect()
+            rows.iter()
+                .map(row_to_signal)
+                .collect::<Result<Vec<_>>>()
+                .map(Some)
         })
     }
 
-    fn reattach(&self, tenant: String, waiter_ref: String) -> BoxFuture<'_, Result<ReattachView>> {
+    fn reattach(
+        &self,
+        tenant: String,
+        waiter_ref: String,
+    ) -> BoxFuture<'_, Result<Option<ReattachView>>> {
         Box::pin(async move {
             let now = from_chrono(Utc::now());
             let mut tx = self.tenant_tx(&tenant).await?;
             // W7. Re-arm the lease and return everything that was waiting. A Server MUST NOT
             // discard a signal because the client that raised the request has gone away.
-            sqlx::query(
-                "insert into handoff_waiters (tenant_ref, waiter_ref, state, liveness, created_at, updated_at) \
-                 values ($1,$2,'armed','durable',$3,$3) \
-                 on conflict (tenant_ref, waiter_ref) do update set \
-                   state = case when handoff_waiters.state = 'orphaned' then 'armed' \
-                                else handoff_waiters.state end, \
-                   lease_expires_at = null, updated_at = excluded.updated_at",
+            //
+            // An **update**, never an upsert. Reattaching is returning to a wait that already
+            // exists; minting one for a reference the Server never issued would fabricate exactly
+            // the thing the caller needed to be told was missing, and it would report `armed` with
+            // an empty queue — indistinguishable from a real waiter that has nothing pending.
+            let state: Option<String> = sqlx::query_scalar(
+                "update handoff_waiters set \
+                   state = case when state = 'orphaned' then 'armed' else state end, \
+                   lease_expires_at = null, updated_at = $3 \
+                 where tenant_ref = $1 and waiter_ref = $2 returning state",
             )
             .bind(&tenant)
             .bind(&waiter_ref)
             .bind(to_chrono(now))
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(db)?;
-
-            let state: String = sqlx::query_scalar(
-                "select state from handoff_waiters where tenant_ref = $1 and waiter_ref = $2",
-            )
-            .bind(&tenant)
-            .bind(&waiter_ref)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db)?;
+            let Some(state) = state else {
+                tx.commit().await.map_err(db)?;
+                return Ok(None);
+            };
 
             let signal_rows = sqlx::query(
                 "select * from handoff_signals where tenant_ref = $1 and waiter_ref = $2 \
@@ -2205,7 +2243,7 @@ impl Store for PgStore {
             .map_err(db)?;
             tx.commit().await.map_err(db)?;
 
-            Ok(ReattachView {
+            Ok(Some(ReattachView {
                 waiter_ref,
                 state: parse_waiter_state(&state),
                 open_requests: open
@@ -2216,7 +2254,7 @@ impl Store for PgStore {
                     .iter()
                     .map(row_to_signal)
                     .collect::<Result<Vec<_>>>()?,
-            })
+            }))
         })
     }
 

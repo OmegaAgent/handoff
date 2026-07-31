@@ -934,6 +934,25 @@ Conformance: C-11.
 
 ---
 
+A Server MUST distinguish a waiter it has issued from one it has not.
+`GET /v1/waiters/{waiter_ref}/signals` and `POST /v1/waiters/{waiter_ref}/reattach` MUST respond
+`404 waiter_not_found` for a `waiter_ref` the Server has never issued in the caller's tenant, and
+MUST NOT create one.
+
+An empty signal queue and an unknown reference are different answers to different questions. A
+Server that returns the same response to both makes "the waiter was told nothing" **unverifiable** —
+the assertion passes against a reference that was never real, which is how a conformance case can be
+satisfied by a deployment that lost the waiter entirely.
+
+Re-attachment returns to a wait that already exists; it MUST NOT create one. Minting a waiter for an
+unknown reference fabricates the very thing the caller needed to be told was missing, and then
+reports it as `armed` with nothing pending.
+
+A `waiter_ref` held by another tenant MUST be indistinguishable from one that does not exist (§3.2
+rule 3), **including in the response body**: knowing another tenant's opaque grouping key must
+reveal nothing, and a message that differed between the two would confirm the first one exists.
+
+
 ## 9. RECEIPT
 
 ### 9.1 What a receipt is

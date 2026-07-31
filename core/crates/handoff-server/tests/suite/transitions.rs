@@ -536,3 +536,127 @@ async fn continuation_state_is_refused_rather_than_stored_unprotected() {
     .await;
     assert_eq!(status, 201, "{accepted}");
 }
+
+/// A waiter reference the Server never issued is **not found**, not "nothing pending".
+///
+/// This is the project's own principle turned on one of its endpoints: absence of evidence and
+/// evidence of absence are different things. While an unknown reference returned an empty list,
+/// every assertion of the form "the waiter was told nothing" was unfalsifiable — repointing such a
+/// check at `run:NEVER-EXISTED` passed, because the response was byte-identical to the correct one.
+#[tokio::test]
+async fn an_unknown_waiter_reference_is_not_found_rather_than_quiet() {
+    let deployment = Deployment::start("waiter404").await;
+
+    // A real waiter, with nothing pending. This is the case that must stay distinguishable.
+    let (status, raised) = post(
+        &deployment.base,
+        "/requests",
+        MACHINE_A,
+        "waiter404-raise",
+        raise_body("run:waiter404-real", "Approve the thing?"),
+    )
+    .await;
+    assert_eq!(status, 201, "{raised}");
+
+    let (status, quiet) = get(
+        &deployment.base,
+        "/waiters/run%3Awaiter404-real/signals",
+        MACHINE_A,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "a real waiter with an empty queue is not an error"
+    );
+    assert_eq!(quiet["data"].as_array().map(Vec::len), Some(0));
+
+    // A reference nobody has ever been issued.
+    let (status, unknown) = get(
+        &deployment.base,
+        "/waiters/run%3ANEVER-EXISTED/signals",
+        MACHINE_A,
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "a fabricated reference must not answer as a quiet waiter: {unknown}"
+    );
+    assert_eq!(unknown["error"]["code"], "waiter_not_found");
+
+    // Reattach has the same shape, and used to be worse: it created the waiter on demand and
+    // reported `armed` with an empty queue, manufacturing the thing whose absence was the answer.
+    let (status, reattached) = post(
+        &deployment.base,
+        "/waiters/run%3ANEVER-EXISTED/reattach",
+        MACHINE_A,
+        "waiter404-reattach",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, 404, "{reattached}");
+    assert_eq!(reattached["error"]["code"], "waiter_not_found");
+
+    // And it did not create it on the way past.
+    let pool = deployment.pool().await;
+    let created: i64 =
+        sqlx::query_scalar("select count(*) from handoff_waiters where waiter_ref = $1")
+            .bind("run:NEVER-EXISTED")
+            .fetch_one(&pool)
+            .await
+            .expect("count waiters");
+    assert_eq!(created, 0, "reattach must never mint a waiter");
+
+    // Reattaching to the real one still works.
+    let (status, real) = post(
+        &deployment.base,
+        "/waiters/run%3Awaiter404-real/reattach",
+        MACHINE_A,
+        "waiter404-reattach-real",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, 200, "{real}");
+    assert_eq!(real["waiter_ref"], "run:waiter404-real");
+}
+
+/// Another tenant's waiter is indistinguishable from one that does not exist.
+///
+/// §3.2 rule 3: where existence is itself sensitive the answer is `404`, never a `403` that
+/// confirms somebody else's waiter is real. A `waiter_ref` is an opaque grouping key (§3.4), so
+/// knowing another tenant's key must reveal nothing.
+#[tokio::test]
+async fn another_tenants_waiter_reads_as_absent_not_forbidden() {
+    let deployment = Deployment::start("waiterxt").await;
+
+    let (status, raised) = post(
+        &deployment.base,
+        "/requests",
+        MACHINE_A,
+        "waiterxt-raise",
+        raise_body("run:waiterxt-a", "Tenant A's ask"),
+    )
+    .await;
+    assert_eq!(status, 201, "{raised}");
+
+    // Tenant B knows the exact reference and still cannot tell it from a fabricated one.
+    let (existing, existing_body) = get(
+        &deployment.base,
+        "/waiters/run%3Awaiterxt-a/signals",
+        MACHINE_B,
+    )
+    .await;
+    let (fabricated, fabricated_body) = get(
+        &deployment.base,
+        "/waiters/run%3Awaiterxt-nonexistent/signals",
+        MACHINE_B,
+    )
+    .await;
+
+    assert_eq!(existing, 404);
+    assert_eq!(fabricated, 404);
+    assert_eq!(
+        existing_body, fabricated_body,
+        "the two responses must be byte-identical, or the status quietly confirms that another \
+         tenant's waiter exists"
+    );
+}

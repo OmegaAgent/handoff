@@ -9,6 +9,24 @@ use std::collections::BTreeMap;
 
 /// Substitute every `${name}` in `text`. An unbound name is an error.
 pub fn interpolate(text: &str, vars: &BTreeMap<String, String>) -> Result<String, String> {
+    substitute(text, vars, |value, out| out.push_str(value))
+}
+
+/// Substitute every `${name}` in a **regular expression**, escaping what is substituted.
+///
+/// This is what lets a hook expectation say `output_matches: ["head_before=${head}"]` and mean it.
+/// The pattern is a regex and the case author wrote it as one, but a captured value is data: a
+/// digest reads `sha256:…`, an id reads `req_01K…`, and a `.` inside either must match itself
+/// rather than any character. Escaping the substitution and not the pattern keeps both true.
+pub fn interpolate_regex(text: &str, vars: &BTreeMap<String, String>) -> Result<String, String> {
+    substitute(text, vars, |value, out| out.push_str(&regex::escape(value)))
+}
+
+fn substitute(
+    text: &str,
+    vars: &BTreeMap<String, String>,
+    write: impl Fn(&str, &mut String),
+) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("${") {
@@ -19,7 +37,7 @@ pub fn interpolate(text: &str, vars: &BTreeMap<String, String>) -> Result<String
         };
         let name = &after[..end];
         match vars.get(name) {
-            Some(value) => out.push_str(value),
+            Some(value) => write(value, &mut out),
             None => {
                 return Err(format!(
                     "`${{{name}}}` is not bound. An earlier step must capture it, or the profile \
@@ -152,6 +170,15 @@ mod tests {
     #[test]
     fn an_unbound_name_is_an_error_not_an_empty_string() {
         assert!(interpolate("/requests/${nope}", &vars()).is_err());
+    }
+
+    #[test]
+    fn a_substituted_value_is_data_not_regex_syntax() {
+        let vars = BTreeMap::from([("head".to_string(), "sha256:a.b+c".to_string())]);
+        let pattern = interpolate_regex("head_before=${head}", &vars).unwrap();
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(re.is_match("head_before=sha256:a.b+c"));
+        assert!(!re.is_match("head_before=sha256:axbbbc"));
     }
 
     #[test]

@@ -262,7 +262,13 @@ pub fn check(
             }
         }
         Op::NoneEqual(want) => {
-            if let Some(bad) = hits.iter().find(|h| h.value == *want) {
+            if hits.is_empty() {
+                Err(format!(
+                    "`{path}` matched nothing, so `none_equal` proves nothing — a collection that \
+                     is empty contains no forbidden value and contains no correct one either. An \
+                     earlier assertion in the same step must establish that the path resolves."
+                ))
+            } else if let Some(bad) = hits.iter().find(|h| h.value == *want) {
                 Err(format!(
                     "`{}` is {}, which must not appear here",
                     bad.at,
@@ -429,6 +435,33 @@ mod tests {
             because: None,
         };
         assert!(check(&doc(), &absent, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn none_equal_refuses_an_empty_match_set_the_way_all_equal_does() {
+        // The two operators are the same shape and must fail the same way on nothing, because a
+        // collection that contains no forbidden value and a collection that contains nothing at
+        // all are indistinguishable from the assertion's side. A hostile review found two live
+        // uses resolving to zero hits, one of them still passing when repointed at a `waiter_ref`
+        // that had never existed.
+        let none = Matcher {
+            path: "data[].type".into(),
+            op: Op::NoneEqual(serde_json::json!("answered")),
+            because: None,
+        };
+        let all = Matcher {
+            path: "data[].type".into(),
+            op: Op::AllEqual(serde_json::json!("answered")),
+            because: None,
+        };
+        let empty = serde_json::json!({"data": []});
+        assert!(check(&empty, &all, &BTreeMap::new()).is_err());
+        let err = check(&empty, &none, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("matched nothing"), "{err}");
+
+        // And it still passes where the path resolves and the forbidden value is absent.
+        let populated = serde_json::json!({"data": [{"type": "cancelled"}]});
+        assert!(check(&populated, &none, &BTreeMap::new()).is_ok());
     }
 
     #[test]

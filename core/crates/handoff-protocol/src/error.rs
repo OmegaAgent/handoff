@@ -55,6 +55,13 @@ pub enum ErrorCode {
     RequestNotFound,
     /// No such capability grant in the caller's tenant.
     CapabilityNotFound,
+    /// No such waiter reference in the caller's tenant.
+    ///
+    /// Distinct from an empty signal list, and the distinction is the point: a reference the Server
+    /// never issued is **not** "nothing pending". Without this code, every assertion of the form
+    /// "the waiter was told nothing" is unfalsifiable, because a fabricated reference returns the
+    /// same bytes as a real waiter with an empty queue.
+    WaiterNotFound,
     /// No such waiter signal in the caller's tenant.
     SignalNotFound,
     /// No such authorization in the caller's tenant.
@@ -126,6 +133,7 @@ impl ErrorCode {
             Self::AuthStrengthNotPermitted => "auth_strength_not_permitted",
             Self::RequestNotFound => "request_not_found",
             Self::CapabilityNotFound => "capability_not_found",
+            Self::WaiterNotFound => "waiter_not_found",
             Self::SignalNotFound => "signal_not_found",
             Self::AuthorizationNotFound => "authorization_not_found",
             Self::AlreadyAnswered => "already_answered",
@@ -166,6 +174,7 @@ impl ErrorCode {
             | Self::AuthStrengthNotPermitted => 403,
             Self::RequestNotFound
             | Self::CapabilityNotFound
+            | Self::WaiterNotFound
             | Self::SignalNotFound
             | Self::AuthorizationNotFound => 404,
             Self::AlreadyAnswered
@@ -205,6 +214,7 @@ impl ErrorCode {
         Self::AuthStrengthNotPermitted,
         Self::RequestNotFound,
         Self::CapabilityNotFound,
+        Self::WaiterNotFound,
         Self::SignalNotFound,
         Self::AuthorizationNotFound,
         Self::AlreadyAnswered,
@@ -442,8 +452,8 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), total, "duplicate error code in ErrorCode::ALL");
-        // openapi.yaml `ErrorCode` enumerates exactly 32 members.
-        assert_eq!(total, 32);
+        // openapi.yaml `ErrorCode` enumerates exactly 33 members.
+        assert_eq!(total, 33);
     }
 
     #[test]
