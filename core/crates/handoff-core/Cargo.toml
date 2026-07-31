@@ -1,0 +1,24 @@
+[package]
+name = "handoff-core"
+description = "The Handoff engine and the port traits a deployment implements: store, clock, delivery, directory, signer, tenancy, metering."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+handoff-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# The callback signature scheme of `signing.md` lives in this crate so the server's pusher and any
+# webhook adapter sign identically; a receiver cannot verify two different implementations.
+hmac.workspace = true
+chrono.workspace = true
+getrandom.workspace = true

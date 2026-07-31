@@ -1,0 +1,116 @@
+{
+  "v": 1,
+  "org_id": "org_01K0A2QW8ZC4YRXB2N6VD9FTHE",
+  "defaults": {
+    "ttl": null,
+    "attempt_ttl": "PT15M",
+    "ttl_policy": {
+      "on_expiry": "expire_and_deny"
+    },
+    "liveness": "durable",
+    "on_waiter_terminal": "keep",
+    "mode": "advisory"
+  },
+  "authority_floors": {
+    "min_role": "viewer",
+    "min_auth_strength": "session",
+    "allow_link_only": false,
+    "secret_field_min_role": "admin"
+  },
+  "routing": {
+    "default_targets": [
+      {
+        "kind": "role",
+        "value": "editor"
+      }
+    ],
+    "ladders": {
+      "high": {
+        "targets": [
+          {
+            "kind": "role",
+            "value": "editor"
+          }
+        ],
+        "ladder": [
+          {
+            "after": "PT0S",
+            "channels": [
+              "inapp",
+              "push"
+            ]
+          },
+          {
+            "after": "PT5M",
+            "channels": [
+              "chat",
+              "email"
+            ]
+          },
+          {
+            "after": "PT15M",
+            "channels": [
+              "voice"
+            ],
+            "to": {
+              "kind": "rotation",
+              "value": "oncall"
+            }
+          }
+        ]
+      }
+    },
+    "allow_request_override": false,
+    "quiet_hours": [
+      {
+        "channels": [
+          "voice",
+          "push"
+        ],
+        "from": "22:00",
+        "to": "07:00",
+        "timezone": "Europe/Berlin",
+        "override_urgency": "critical"
+      }
+    ]
+  },
+  "channels": [
+    {
+      "channel": "inapp",
+      "max_grade": "acted",
+      "can_authenticate_person": true
+    },
+    {
+      "channel": "voice",
+      "max_grade": "delivered",
+      "can_authenticate_person": false,
+      "requires_binding": true
+    }
+  ],
+  "callbacks": {
+    "endpoints": [
+      {
+        "url": "https://api.acme.com/handoff/signals",
+        "secret_refs": [
+          "whsec_ref_a",
+          "whsec_ref_b"
+        ],
+        "state": "active",
+        "max_attempts": 12,
+        "timeout_seconds": 10
+      }
+    ],
+    "replay_window_seconds": 300
+  },
+  "capabilities": {
+    "grant_ttl": "PT15M",
+    "session_lease": "PT2M",
+    "max_shared_with": "space",
+    "record_navigations": "origin"
+  },
+  "retention": {
+    "receipts": "P365D",
+    "rendered_copies": "P90D",
+    "delivery_attempts": "P30D"
+  }
+}

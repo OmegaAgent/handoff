@@ -1,0 +1,89 @@
+{
+  "waiter_ref": "run:0198f2a1",
+  "liveness": "durable",
+  "urgency": "high",
+  "prompt": {
+    "title": "Refund $2,400 to Acme Corp?",
+    "body": "Invoice **INV-8821** was double-charged on 2026-07-28. Acme has asked for a full refund of the second charge.",
+    "evidence": [
+      {
+        "kind": "link",
+        "label": "Invoice INV-8821",
+        "url": "https://billing.internal/inv/8821"
+      },
+      {
+        "kind": "table",
+        "label": "Both charges",
+        "value": {
+          "columns": [
+            "date",
+            "amount",
+            "id"
+          ],
+          "rows": [
+            [
+              "2026-07-28",
+              "$2,400",
+              "ch_1A"
+            ],
+            [
+              "2026-07-28",
+              "$2,400",
+              "ch_1B"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "requires": {
+    "v": 1,
+    "answer": {
+      "fields": [
+        {
+          "name": "decision",
+          "label": "Decision",
+          "type": "choice",
+          "required": true,
+          "options": [
+            {
+              "id": "approve",
+              "label": "Refund it"
+            },
+            {
+              "id": "reject",
+              "label": "Don't refund"
+            }
+          ]
+        },
+        {
+          "name": "note",
+          "label": "Add a note",
+          "type": "text",
+          "required": false,
+          "max_len": 500
+        }
+      ]
+    },
+    "capabilities": [],
+    "authority": {
+      "min_role": "editor",
+      "auth_strength": "session",
+      "quorum": 1,
+      "forbid_requester": true
+    }
+  },
+  "ttl": "PT4H",
+  "ttl_policy": {
+    "on_expiry": "expire_and_deny"
+  },
+  "attempt_ttl": "PT15M",
+  "on_waiter_terminal": "keep",
+  "mode": "advisory",
+  "presentation_binding": "advisory",
+  "metadata": {
+    "hint": "approval",
+    "run_id": "0198f2a1",
+    "customer": "acme"
+  }
+}

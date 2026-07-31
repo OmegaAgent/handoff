@@ -1,0 +1,154 @@
+id: C-13
+title: One answer mints one authorization, redeemable once per effect and never twice
+level: 1
+invariants: [I10]
+spec:
+  - "§10 — the receipt records what was decided; the authorization is what the runtime spends"
+  - "§10.2 — redemption is idempotent per effect_key"
+  - "§10.3 — a single-use authorization redeemed with a different effect_key is 409"
+  - "§10.5 — effect_digest binds the authorization to the shape of the effect"
+  - "§18 C-13"
+rationale: >
+  This is the whole point of separating the receipt from the authorization: a replayed agent turn
+  must not send the customer a second refund. `first_redemption` is the entire answer a caller
+  needs — true means act, false means this effect already happened. And an approval of
+  "refund $2,400" must not be spendable on "refund $24,000", which is what the effect digest is for.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise a gated request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c13-${run_id}"
+      body:
+        waiter_ref: "run:c13-${run_id}"
+        mode: gated
+        prompt:
+          title: "Refund $2,400 to Acme Corp?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Refund it"}
+                  - {id: reject, label: "Don't refund"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+        body:
+          - path: mode
+            equals: gated
+      capture:
+        req: id
+
+  - name: the person approves
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c13-answer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: authorization.id
+            matches: "^auth_"
+            because: "I10 — one answer mints exactly one authorization"
+          - path: authorization.single_use
+            equals: true
+      capture:
+        auth: authorization.id
+
+  - name: the authorization carries the decided values
+    http:
+      method: GET
+      path: /authorizations/${auth}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: grants.decision
+            equals: approve
+          - path: state
+            equals: open
+          - path: request_id
+            same_as: req
+
+  - name: redeem it against one effect
+    http:
+      method: POST
+      path: /authorizations/${auth}/redeem
+      as: machine_a
+      headers:
+        Idempotency-Key: "c13-redeem-1-${run_id}"
+      body:
+        effect_key: "refund:inv-8821"
+      expect:
+        status: 200
+        body:
+          - path: first_redemption
+            equals: true
+            because: "true means act"
+
+  - name: the agent's turn is retried and redeems the same effect key
+    http:
+      method: POST
+      path: /authorizations/${auth}/redeem
+      as: machine_a
+      headers:
+        Idempotency-Key: "c13-redeem-2-${run_id}"
+      body:
+        effect_key: "refund:inv-8821"
+      expect:
+        status: 200
+        body:
+          - path: first_redemption
+            equals: false
+            because: >
+              §10.2 — a repeat with the same effect_key is 200 with first_redemption false. False
+              means this effect already happened and must not happen again.
+
+  - name: a different effect cannot be spent on the same single-use authorization
+    http:
+      method: POST
+      path: /authorizations/${auth}/redeem
+      as: machine_a
+      headers:
+        Idempotency-Key: "c13-redeem-3-${run_id}"
+      body:
+        effect_key: "refund:inv-9999"
+      expect:
+        status: 409
+        body:
+          - path: error.code
+            equals: authorization_spent
+            because: >
+              §10.3 — one decision authorizes exactly one effect. A second effect is a second
+              decision and needs a second person.
+
+  - name: the authorization is now spent and says so
+    http:
+      method: GET
+      path: /authorizations/${auth}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: spent
+          - path: redemptions
+            length: 1
+            because: "one effect_key, one redemption record, however many times it was retried"
+          - path: redemptions[0].effect_key
+            equals: "refund:inv-8821"

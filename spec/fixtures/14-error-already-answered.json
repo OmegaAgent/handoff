@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "already_answered",
+    "message": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE was answered at 2026-07-30T14:07:44Z",
+    "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+    "receipt_id": "rcpt_01K3MB2R4Y8ZC4YRXB2N6VD9FT",
+    "docs": "https://handoff.example.com/errors/already_answered"
+  }
+}

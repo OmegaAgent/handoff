@@ -1,0 +1,1422 @@
+name: CI
+
+# No job in this file uses a secret. A change that needs one is a design problem with the
+# change, not with CI: a fork must be able to run this pipeline green on the first try.
+
+on:
+  push:
+    # `main` and the protocol release lines. Restricting this to `main` meant the branch where the
+    # protocol is actually built ran nothing until it was merged, which is how fourteen jobs came to
+    # be predictions no run had ever contradicted — including one, `conformance`, that would have
+    # failed on a missing `psql` the first time anybody executed it. A pipeline that only runs after
+    # the work is finished is a pipeline that reports on work nobody can still cheaply change.
+    branches: [main, 'v1/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: core — fmt, clippy, build, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    # The store and server suites talk to a real Postgres on purpose: tenant isolation, storage-level
+    # receipt immutability and the SIGKILL durability case are properties a fake cannot demonstrate.
+    # Without this service block `cargo test --workspace` could not have passed here — a review
+    # caught it by reading, since the job had never been run.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: omega
+      PGPASSWORD: omega
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version && cargo --version
+
+      - name: psql, which the store suite shells out to
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      - name: Docs build without warnings
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: handoffd is the server binary name
+        run: test -x target/debug/handoffd
+
+  managed:
+    name: managed — fmt, clippy, build, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: managed
+    # `managed/` is a second Cargo workspace and the job above is pinned to `working-directory:
+    # core`, so its 76 tests ran in no job at all — including the ones that stand between the
+    # closed adapter and the open core. The tier is closed source and stays closed; that is a
+    # licence, not a reason to leave it unbuilt, and the boundary assertions in `handoff-omegas`
+    # (`no_patch_section_exists` among them) only mean something if something runs them.
+    #
+    # Five of the tests create and drop disposable `handoff_managed_*` databases through
+    # `HANDOFF_TEST_ADMIN_URL` (managed/README.md), which is why the service block is repeated.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: omega
+      PGPASSWORD: omega
+      HANDOFF_TEST_ADMIN_URL: postgres://omega:omega@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: psql, which the store suite shells out to
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      # The boundary that makes the split safe is mechanical, so assert it mechanically rather
+      # than trusting that nobody edited the manifest: nothing in this workspace is publishable
+      # and nothing in it is open-licensed.
+      - name: The closed tier is still closed
+        run: |
+          python3 - <<'PY'
+          import tomllib, sys
+          with open("Cargo.toml", "rb") as fh:
+              package = tomllib.load(fh)["workspace"]["package"]
+          if package.get("license") != "UNLICENSED" or package.get("publish") is not False:
+              sys.exit(f"managed/ must stay UNLICENSED and publish = false; found {package}")
+          print("managed/ is UNLICENSED and publish = false")
+          PY
+
+  no-fork-markers:
+    name: core — no [patch], no path dependency on a published crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A `[patch]` entry or a path dependency onto a handoff-* crate from outside this workspace
+      # is the moment a fork begins. CONTRIBUTING.md states the rule; this makes it a build
+      # failure. Path dependencies *within* core/ are how the workspace links itself and are fine.
+      - name: No [patch] sections
+        run: |
+          if grep -rn --include=Cargo.toml -E '^\s*\[patch' . ; then
+            echo "::error::[patch] is not permitted. Land the change upstream and bump the pin."
+            exit 1
+          fi
+          echo "clean"
+
+      # The job carried both halves of the rule in its name and enforced only the first. The
+      # second is the one CONTRIBUTING.md:89 spells out — "no path dependency ... in any consumer
+      # of this repository, including our own managed service" — and it was the half under which
+      # `managed/Cargo.toml` sat unexamined. Every tracked manifest is parsed, so a new consumer
+      # cannot arrive without passing through here.
+      - name: No path dependency onto a handoff-* crate outside core/
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess, sys, tomllib
+
+          # managed/ is a consumer of the open core that has not been extracted yet. Its four path
+          # dependencies are declared here, by name, with the reason: `managed/Cargo.toml:24-32`
+          # says they become tag pins the day the workspace moves to `handoff-cloud`, and until
+          # that day a compiler cannot see the adapter and the core together without them. This is
+          # an allowance and not an exception to the rule — the rule is that a fork must be
+          # visible, and four named lines in one manifest are visible. A fifth is not allowed, a
+          # path that reaches anywhere but ../core/crates is not allowed, and the day managed/
+          # stops needing these the check below fails and tells you to delete this list.
+          ALLOWED = {
+              "managed/Cargo.toml": {
+                  "handoff-protocol": "../core/crates/handoff-protocol",
+                  "handoff-core": "../core/crates/handoff-core",
+                  "handoff-store-postgres": "../core/crates/handoff-store-postgres",
+                  "handoff-server": "../core/crates/handoff-server",
+              }
+          }
+
+          TABLES = {"dependencies", "dev-dependencies", "build-dependencies"}
+
+          def entries(node, table=None):
+              """Every dependency entry in a manifest, wherever the table is nested — plain,
+              dev, build, [workspace.dependencies], and [target.'cfg(…)'.dependencies] alike."""
+              if not isinstance(node, dict):
+                  return
+              for key, value in node.items():
+                  if key in TABLES and isinstance(value, dict):
+                      for name, spec in value.items():
+                          if isinstance(spec, dict):
+                              yield name, spec
+                  elif isinstance(value, dict):
+                      yield from entries(value, key)
+
+          manifests = [p for p in subprocess.run(["git", "ls-files"], capture_output=True,
+                                                 text=True, check=True).stdout.split()
+                       if p.endswith("Cargo.toml")]
+          if not manifests:
+              sys.exit("No Cargo.toml is tracked. This check just stopped looking at anything.")
+
+          failed, allowed_seen = [], set()
+          for rel in manifests:
+              try:
+                  with open(rel, "rb") as fh:
+                      document = tomllib.load(fh)
+              except tomllib.TOMLDecodeError as error:
+                  # A manifest this cannot read is a manifest this cannot vouch for.
+                  failed.append(f"{rel} does not parse as TOML: {error}")
+                  continue
+              for name, spec in entries(document):
+                  path = spec.get("path")
+                  if path is None or not name.startswith("handoff-"):
+                      continue
+                  if rel.startswith("core/"):
+                      # Inside the workspace this is how the crates link. It is only publishable
+                      # if it also carries a version, and an unpublishable core is its own fork.
+                      if "version" not in spec:
+                          failed.append(f"{rel}: {name} is a bare path dependency inside core/; "
+                                        "add a version so the crate can be published.")
+                      continue
+                  expected = ALLOWED.get(rel, {}).get(name)
+                  if expected is not None and path == expected:
+                      allowed_seen.add((rel, name))
+                      continue
+                  failed.append(f"{rel}: {name} = {{ path = \"{path}\" }} — a path dependency onto "
+                                "a handoff-* crate from outside core/. CONTRIBUTING.md: land the "
+                                "change here first and pin the consumer to a tag.")
+
+          for rel, allowed in ALLOWED.items():
+              for name in allowed:
+                  if (rel, name) not in allowed_seen:
+                      failed.append(f"the allowance for {name} in {rel} is no longer used. If that "
+                                    "workspace has been extracted, delete the entry — an unused "
+                                    "exemption is a hole nobody is watching.")
+
+          if failed:
+              print("\n".join(f"  {f}" for f in failed))
+              sys.exit(f"{len(failed)} fork marker(s).")
+          print(f"{len(manifests)} manifest(s): no [patch], no unallowed path dependency, "
+                f"{len(allowed_seen)} declared allowance(s) all still in use.")
+          PY
+
+  python-sdk:
+    name: sdk/python — lint, import, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Byte-compile
+        run: python -m compileall -q handoff human
+
+      # Both halves matter. An unpinned ruff means the rule set is whatever shipped that morning —
+      # this unchanged tree reported 7 findings on one version and 188 on another — and a pinned
+      # ruff with no `[tool.ruff]` still leaves the selection to the tool's defaults, which move
+      # between releases. The rules live in `sdk/python/pyproject.toml`.
+      - name: Lint
+        run: |
+          python -m pip install --quiet 'ruff==0.6.1'
+          python -m ruff check --no-cache .
+
+      - name: Import surface
+        run: |
+          python - <<'PY'
+          import warnings
+          import handoff
+          assert handoff.__version__ == "0.2.0", handoff.__version__
+          with warnings.catch_warnings(record=True) as caught:
+              warnings.simplefilter("always")
+              import human
+              assert any(w.category is DeprecationWarning for w in caught), \
+                  "the `human` alias must warn"
+          assert human.ask is handoff.ask, "the alias must forward, not reimplement"
+          print("handoff", handoff.__version__, "+ deprecated `human` alias: ok")
+          PY
+
+      # `sdk/python/README.md:140` documents this command and no job ran it. The directory holds
+      # the receipt-chain assertions and the SIGKILL-mid-poll durability case — the SDK half of
+      # the seam that produced the worst finding of the third review — and it was verified by
+      # nobody. A test suite outside CI is a test suite that is green when someone last looked.
+      - name: Test
+        run: |
+          # `cryptography` is a TEST dependency only -- the SDK itself is standard library and the
+          # `python-sdk-stdlib-only` job enforces that. Two tests execute the reference verifier
+          # published in spec/signing.md, which imports it, and without it here they error rather
+          # than run: the first CI execution reported ModuleNotFoundError, not a failure, which is
+          # the difference between a test that ran and a test that was never asked.
+          python -m pip install --quiet 'pytest==8.3.2' 'cryptography==43.0.1'
+          python -m pytest tests/ -q
+
+      - name: Build the distribution
+        run: |
+          python -m pip install --quiet build
+          python -m build
+
+  python-sdk-stdlib-only:
+    name: sdk/python — standard library only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: No third-party dependencies
+        run: |
+          python - <<'PY'
+          import tomllib, sys
+          with open("sdk/python/pyproject.toml", "rb") as fh:
+              deps = tomllib.load(fh)["project"]["dependencies"]
+          if deps:
+              sys.exit(f"handoff-human must stay standard-library only, found: {deps}")
+          print("stdlib only")
+          PY
+
+  ts-sdk:
+    name: sdk/ts — lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether the TypeScript SDK exists yet
+        id: probe
+        run: |
+          if [ -f sdk/ts/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::sdk/ts does not exist yet (lands in H3). Nothing to lint."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.probe.outputs.present == 'true'
+        with:
+          node-version: "22"
+
+      # `npm ci` is deliberately not used: it requires a lockfile, and the SDK has no runtime
+      # dependencies to lock. `npm install` here fetches only the TypeScript compiler, which is a
+      # devDependency — the zero-runtime-dependency property is `dependencies: {}` and is asserted
+      # separately below.
+      - name: Test
+        if: steps.probe.outputs.present == 'true'
+        working-directory: sdk/ts
+        run: npm test
+
+      - name: Typecheck
+        if: steps.probe.outputs.present == 'true'
+        working-directory: sdk/ts
+        run: |
+          npm install --no-audit --no-fund
+          npm run typecheck
+
+      - name: No runtime dependencies
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          deps = json.load(open("sdk/ts/package.json")).get("dependencies") or {}
+          if deps:
+              sys.exit(f"@handoffproto/sdk must have no runtime dependencies, found: {deps}")
+          print("zero runtime dependencies")
+          PY
+
+      # `sdk/types/README.md` tells the reader to treat this check, and not good intentions, as the
+      # mechanism keeping the hand-written declarations honest against the spec. It ran in no job
+      # until a review pointed that out, which made the sentence the thing it warned against.
+      - name: Declared types still cover the spec
+        run: node sdk/types/scripts/check-drift.mjs
+
+  fixtures-validate:
+    name: spec — fixtures validate against the schemas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # `spec/fixtures/README.md` says the fixtures are asserted mechanically against
+      # `spec/schemas/`. The SDKs' byte-identity tests are real, but nothing was reading the
+      # schemas, so that sentence described an intention rather than the repository.
+      #
+      # The schemas cross-reference each other by absolute `$id`, so they are loaded into a local
+      # registry first. Without it a validator reaches for the network, and a CI job that silently
+      # depends on a domain resolving is not a check.
+      - name: Validate
+        run: |
+          python -m pip install --quiet jsonschema referencing
+          python - <<'PY'
+          import json, pathlib, sys
+          from jsonschema import Draft202012Validator
+          from referencing import Registry, Resource
+
+          root = pathlib.Path("spec")
+          files = {p.name.split(".")[0]: json.loads(p.read_text())
+                   for p in (root / "schemas").glob("*.json")}
+          resources = []
+          for name, doc in files.items():
+              resource = Resource.from_contents(doc)
+              resources.append((doc.get("$id", f"{name}.schema.json"), resource))
+              resources.append((f"{name}.schema.json", resource))
+          registry = Registry().with_resources(resources)
+
+          bound = [
+              ("02-request-created", "request.schema.json"),
+              ("08-receipt-decision", "receipt.schema.json"),
+              ("09-receipt-policy", "receipt.schema.json"),
+              ("11-delivery", "delivery-attempt.schema.json#/$defs/Delivery"),
+              ("19-tenant-policy", "policy.schema.json"),
+          ]
+          failed = 0
+          for stem, ref in bound:
+              path = root / "fixtures" / f"{stem}.json"
+              if not path.exists():
+                  print(f"MISSING fixture {path}")
+                  failed += 1
+                  continue
+              validator = Draft202012Validator({"$ref": ref}, registry=registry)
+              errors = sorted(validator.iter_errors(json.loads(path.read_text())),
+                              key=lambda e: list(e.path))
+              if errors:
+                  failed += 1
+                  for e in errors:
+                      where = "/".join(map(str, e.path)) or "<root>"
+                      print(f"{stem} -> {ref}: {where}: {e.message}")
+              else:
+                  print(f"ok  {stem} -> {ref}")
+          sys.exit(1 if failed else 0)
+          PY
+
+      # Claims 4 and 5 of spec/fixtures/README.md. Both said "asserted mechanically" while being
+      # asserted by hand, which is the same defect as a stale status document: a reader is told a
+      # check exists and reasonably stops looking.
+      - name: Use-case fixtures validate, and no fixture leaks
+        run: |
+          python -m pip install --quiet jsonschema referencing
+          python - <<'PY'
+          import json, pathlib, re, sys
+          from jsonschema import Draft202012Validator
+          from referencing import Registry, Resource
+
+          root = pathlib.Path("spec")
+          files = {p.name.split(".")[0]: json.loads(p.read_text())
+                   for p in (root / "schemas").glob("*.json")}
+          resources = []
+          for name, doc in files.items():
+              resource = Resource.from_contents(doc)
+              resources.append((doc.get("$id", f"{name}.schema.json"), resource))
+              resources.append((f"{name}.schema.json", resource))
+          registry = Registry().with_resources(resources)
+
+          failed = 0
+
+          # Claim 4: every use-case raise validates member by member.
+          for path in sorted((root / "fixtures" / "use-cases").glob("*.json")):
+              raised = json.loads(path.read_text()).get("raise")
+              if raised is None:
+                  continue
+              for member, definition in (("prompt", "Prompt"), ("requires", "Requires"),
+                                         ("ttl_policy", "TtlPolicy")):
+                  if member not in raised:
+                      continue
+                  validator = Draft202012Validator(
+                      {"$ref": f"request.schema.json#/$defs/{definition}"}, registry=registry)
+                  for error in validator.iter_errors(raised[member]):
+                      failed += 1
+                      print(f"{path.name} raise.{member}: {error.message}")
+
+          # Claim 5: no fixture carries a secret value, a resolvable capability address, or a
+          # request `kind`. A resolvable address is the one that would undo I8 by example.
+          #
+          # Both matchers below were wrong in opposite directions, and the workflow had never run
+          # so neither said so. The secret matcher flagged any `secret|password|token|value`
+          # member over twelve characters, which is red on the pristine tree: `03-login-assistance`
+          # carries the anti-secret placeholder "<never leaves TLS>" and `07-reassign-escalate`
+          # carries a principal id. The address matcher put its only capture group inside a
+          # negative lookahead, so `re.findall` returned "" for every match and the `token=` test
+          # could not be true — a planted `…/live?token=LEAKED` passed.
+          #
+          # A stand-in for a value: the fixture says a credential goes here without carrying one.
+          # It has to be delimited, so a bare high-entropy string cannot claim to be one.
+          PLACEHOLDER = re.compile(r"<[^<>]*>|\{\{[^{}]*\}\}|\$\{[^{}]*\}|…|\.\.\.|REDACTED|redacted")
+          # A typed identifier: a short lowercase type prefix and a Crockford base32 body, the
+          # shape the spec prints throughout (`usr_01J9M7QW…`). Deliberately narrow — every
+          # credential prefix in CREDENTIAL below is either longer than four letters or uses an
+          # alphabet this excludes, so no credential can be waved through as an identifier.
+          IDENTIFIER = re.compile(r"[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{20,32}\Z")
+          # Shapes that are a credential wherever they appear, whatever the member is called.
+          CREDENTIAL = re.compile(
+              r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}"
+              r"|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|\bwhsec_[A-Za-z0-9+/=_-]{16,}"
+              r"|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bxox[abprs]-[A-Za-z0-9-]{10,}"
+              r"|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\."
+              r"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+          # A query parameter that carries capability material, with a literal after the `=`.
+          CAPABILITY_PARAM = re.compile(
+              r"[?&][a-z_]*(?:token|key|secret|sig|signature|password|auth)="
+              r"(?![<{$])[A-Za-z0-9._~+/=-]{8,}")
+          # Reserved for documentation: an address under one of these resolves for nobody.
+          RESERVED_HOST = re.compile(
+              r"\A(?:localhost|127\.0\.0\.1|\[::1\]|(?:[a-z0-9-]+\.)*example\.(?:com|org|net)"
+              r"|[a-z0-9.-]+\.(?:invalid|test|local|internal))\Z")
+          LIVE_PATH = re.compile(r"/(?:live|stream|relay|session|sessions|attach|ws)(?:/|\?|\Z)")
+          URL = re.compile(r"(?:https?|wss?)://[^\s\"']+")
+
+          def leaks(text):
+              """Every reason this text must not be published, as a list of sentences."""
+              found = [f"a credential literal: {m.group(0)[:24]}…" for m in CREDENTIAL.finditer(text)]
+              for m in URL.finditer(text):
+                  url = m.group(0)
+                  host = re.sub(r"\A(?:https?|wss?)://(?:[^@/]*@)?", "", url).split("/")[0]
+                  if CAPABILITY_PARAM.search(url):
+                      found.append(f"a capability token in a query string: {url[:60]}")
+                  elif LIVE_PATH.search(url.split("?")[0]) and not RESERVED_HOST.match(host):
+                      found.append(f"a resolvable live-session address: {url[:60]}")
+              return found
+
+          # A matcher nobody has watched fire is the defect this step is here to have fixed, so it
+          # fires on demand before it is trusted with the tree. The strings are assembled rather
+          # than written out, so that `secret-hygiene` does not find a credential in this file.
+          MUST_FIRE = [
+              "AKIA" + "IOSFODNN7EXAMPLE",
+              "whsec_" + "b" * 32,
+              "sk-" + "K" * 32,
+              "https://relay.attacker.example.net/live?token=" + "e" * 40,
+              "https://relay.omegas.dev/v1/live/hs_01K3MB2R4S8ZC4YRXB2N6VD9FT",
+          ]
+          MUST_NOT_FIRE = [
+              "<never leaves TLS>", "usr_01J9M7QW8ZC4YRXB2N6VD9FTHE", "whsec_ref_a",
+              "https://handoff.example.com/requests/req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+              "wss://relay.example.com/v1/sessions/hs_01K3MB2R4S8ZC4YRXB2N6VD9FT/stream",
+              "https://api.acme.com/handoff/signals", "https://billing.internal/inv/8821",
+          ]
+          for probe in MUST_FIRE:
+              if not leaks(probe):
+                  sys.exit(f"the leak matcher does not fire on {probe[:40]!r}. It is measuring "
+                           "nothing, which is exactly how it shipped the first time.")
+          for probe in MUST_NOT_FIRE:
+              if leaks(probe):
+                  sys.exit(f"the leak matcher fires on {probe[:40]!r}, which is published on "
+                           f"purpose: {leaks(probe)}")
+          print(f"leak matcher: fires on {len(MUST_FIRE)} known-bad, silent on "
+                f"{len(MUST_NOT_FIRE)} known-good")
+
+          for path in sorted(root.rglob("fixtures/**/*.json")):
+              text = path.read_text()
+              document = json.loads(text)
+
+              def walk(node, where=""):
+                  global failed
+                  if isinstance(node, dict):
+                      for key, value in node.items():
+                          if key == "kind" and isinstance(value, str) and where.endswith("raise"):
+                              failed += 1
+                              print(f"{path.name}: a request `kind` at {where} — the point of use-cases is that there is none")
+                          if key in {"secret", "password", "token", "value"} and isinstance(value, str):
+                              if CREDENTIAL.search(value):
+                                  failed += 1
+                                  print(f"{path.name}: a credential literal at {where}.{key}")
+                              elif (len(value) > 12 and not PLACEHOLDER.search(value)
+                                    and not IDENTIFIER.match(value)):
+                                  failed += 1
+                                  print(f"{path.name}: an opaque literal at {where}.{key} that is "
+                                        "neither a placeholder nor a typed identifier: "
+                                        f"{value[:32]!r}")
+                          walk(value, f"{where}.{key}" if where else key)
+                  elif isinstance(node, list):
+                      for i, item in enumerate(node):
+                          walk(item, f"{where}[{i}]")
+
+              walk(document)
+              for reason in leaks(text):
+                  failed += 1
+                  print(f"{path.name}: {reason}")
+
+          if failed:
+              sys.exit(f"{failed} fixture consistency failure(s)")
+          print("use-case fixtures validate; no fixture carries a secret, an address, or a kind")
+          PY
+
+  conformance:
+    name: conformance suite
+    runs-on: ubuntu-latest
+    # Required. `continue-on-error` was removed when the first cases landed in H1 — a pipeline must
+    # never report conformance it has not measured, and a suite that cannot fail a build is
+    # decorative.
+    #
+    # Two directions are checked, and both are needed. The suite must go RED against a server that
+    # implements nothing, or it is measuring nothing. And it must go GREEN against `handoffd`, or
+    # the README's claim — that a service which cannot pass the open suite has a red build — is a
+    # sentence rather than a check. For a while only the first half was wired, which is how a
+    # governance instrument quietly becomes decorative.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: psql, which run-conformance.sh creates and drops its database through
+        # The rust, managed and cross-implementation jobs each install this; this job did not, and
+        # it is the only one whose whole purpose is to run a script that shells out to psql. Caught
+        # by a reviewer reading the workflow rather than by a run, because no run has happened yet.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Build the runner
+        working-directory: core
+        run: cargo build -p handoff-conformance
+
+      # Half one: the suite must be able to report red. A suite written before its implementation
+      # only means something if it can be shown to fail against a server that does nothing —
+      # otherwise it would report the same green against a server that does the wrong thing.
+      - name: The suite fails loudly against a server that implements nothing
+        working-directory: core
+        run: |
+          python3 crates/handoff-conformance/dev/stub_501.py --port 8080 &
+          stub=$!
+          # Readiness is "the socket answers", not "the socket answers 2xx" — the stub replies 501
+          # to everything by design, so `curl -f` would never succeed and the loop would exhaust.
+          ready=""
+          for _ in $(seq 1 50); do
+            if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080/v1/requests" | grep -q 501; then
+              ready=yes; break
+            fi
+            sleep 0.2
+          done
+          if [ -z "$ready" ]; then
+            echo "::error::The stub never answered 501. A red result from here would prove nothing."
+            exit 1
+          fi
+          set +e
+          ./target/debug/handoff-conformance \
+            --base-url http://127.0.0.1:8080/v1 \
+            --profile crates/handoff-conformance/profile.example.yaml > /tmp/stub.out 2>&1
+          rc=$?
+          set -e
+          kill "$stub" 2>/dev/null || true
+          cat /tmp/stub.out
+          # A non-zero exit is NOT sufficient: a runner that crashes, cannot find its profile, or is
+          # pointed at a dead port exits non-zero identically. Require the report itself — the suite
+          # ran, every case ran, and every case failed.
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::The suite passed against a stub that implements nothing. It is measuring nothing."
+            exit 1
+          fi
+          total=$(sed -n 's#^\([0-9]\{1,\}\)/\([0-9]\{1,\}\) passing$#\2#p' /tmp/stub.out | tail -1)
+          passed=$(sed -n 's#^\([0-9]\{1,\}\)/\([0-9]\{1,\}\) passing$#\1#p' /tmp/stub.out | tail -1)
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            echo "::error::No 'N/M passing' report. The runner did not complete, so this is a crash and not a measurement."
+            exit 1
+          fi
+          if [ "$passed" -ne 0 ]; then
+            echo "::error::${passed} case(s) passed against a server implementing nothing."
+            exit 1
+          fi
+          echo "The suite ran ${total} case(s) against a server that implements nothing and passed 0."
+
+      # Half two, and the one the README actually promises: the reference server must PASS. Without
+      # this the pipeline proves only that the suite can fail, and "a service that cannot pass the
+      # open suite has a red build" is a sentence nobody has wired to anything.
+      - name: The reference server passes the suite
+        run: |
+          # No pipe: `cmd | tee` reports tee's exit status, which is how a green build gets
+          # reported for a red run.
+          set +e
+          sh core/dev/run-conformance.sh > /tmp/conformance.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/conformance.out
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::handoffd does not pass the conformance suite."
+            exit 1
+          fi
+          # Derive the count instead of hardcoding it. A literal here went stale the moment a case
+          # was added, turning the one job that backs the README's central promise red forever on a
+          # perfectly conforming server — and because this workflow had never run anywhere, nothing
+          # said so. Assert the shape of a full pass: a report exists, and nothing failed.
+          report=$(grep -E '^[0-9]+/[0-9]+ passing$' /tmp/conformance.out | tail -1)
+          if [ -z "$report" ]; then
+            echo "::error::No 'N/M passing' report. The suite did not complete."
+            exit 1
+          fi
+          passed=${report%%/*}
+          total=${report#*/}; total=${total%% *}
+          if [ "$passed" -ne "$total" ] || [ "$total" -lt 1 ]; then
+            echo "::error::handoffd passed ${passed} of ${total}. Read the output above."
+            exit 1
+          fi
+          echo "handoffd passed ${passed}/${total}."
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: omega
+          PGPASSWORD: omega
+
+  cross-implementation-receipts:
+    name: receipts minted by handoffd verify under both published SDKs
+    runs-on: ubuntu-latest
+    # The conformance harness shares the handoff-protocol crate with the server it tests, so it is
+    # structurally incapable of noticing the two disagreeing: both sides canonicalize with the same
+    # code. That is how a Python SDK sorting object members by code point instead of UTF-16 code
+    # unit survived to a third review, and it is why the suite's own cross-implementation case does
+    # not settle the question on its own — a Rust verifier written from the same reading of
+    # signing.md §2.2 by the same people can share a misreading. `verify-minted-receipts.sh` is the
+    # only thing in this repository that spans that seam, so it is a release gate rather than a
+    # convenience. (No case identifier is named above on purpose: gate-count holds every one
+    # mentioned in the tree to a file on disk, and a check that trips over its own prose gets
+    # loosened.)
+    #
+    # Stated plainly because it should not be discovered later: when this job was written the
+    # script did not exist, and the wiring below was demonstrated against a stand-in that returns
+    # each of the answers a real one can return. The script has never run against real minted
+    # receipts anywhere. The first run of this job is the first time that happens.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: omega
+      PGPASSWORD: omega
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: psql, which the disposable database is created through
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      # Not `if: exists`. A gate that steps aside when its subject is missing is the shape of every
+      # finding in the third review: the job stays green and the sentence in the documentation goes
+      # on describing a check nobody runs.
+      - name: The script exists
+        run: |
+          if [ ! -f scripts/verify-minted-receipts.sh ]; then
+            echo "::error::scripts/verify-minted-receipts.sh is missing. It is the only check that"
+            echo "::error::spans the server/SDK seam, so its absence is a red build, not a skip."
+            exit 1
+          fi
+          echo "found"
+
+      # The red direction first, and it is the whole reason to trust the green one. Do not delete
+      # this step as paranoia — it is load-bearing in a way that is easy to miss on a first read.
+      #
+      # Sorting member names by code point instead of by UTF-16 code unit is the exact defect the
+      # seam exists to catch, and the two orderings only disagree when a name contains a character
+      # outside the Basic Multilingual Plane. So breaking the canonicalizer on purpose and
+      # requiring the script to notice tests the SCRIPT and its FIXTURE at once: a script whose
+      # payload is a plain `{"decision":"approve"}` still passes under a broken canonicalizer, so
+      # it fails here, correctly, and the message says why. That closes the hole where a check
+      # that has started failing gets "fixed" by quietly weakening what it is fed — the payload
+      # can no longer be softened without this step going red.
+      #
+      # If the substitution stops applying, the step fails rather than passing quietly. A sabotage
+      # that silently stops sabotaging is worse than none, because it reports the strongest
+      # evidence available while doing nothing at all.
+      - name: The script goes red against a canonicalizer that sorts by code point
+        run: |
+          python3 - <<'MUTATE'
+          import pathlib
+          p = pathlib.Path("sdk/python/handoff/_document.py")
+          p.write_text(p.read_text().replace("sorted(value, key=_utf16_units)", "sorted(value)"))
+          MUTATE
+          if git diff --quiet -- sdk/python/handoff/_document.py; then
+            echo "::error::The mutation changed nothing. sdk/python/handoff/_document.py no longer"
+            echo "::error::sorts with _utf16_units, so this meta-test is measuring nothing and must"
+            echo "::error::be rewritten against whatever the canonicalizer does now."
+            exit 1
+          fi
+          # No pipe: `cmd | tee` reports tee's status, which is how a green build gets reported for
+          # a red run.
+          set +e
+          bash scripts/verify-minted-receipts.sh > /tmp/mutated.out 2>&1
+          rc=$?
+          set -e
+          git checkout -- sdk/python/handoff/_document.py
+          tail -40 /tmp/mutated.out
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::A receipt with a mis-sorted canonicalizer verified anyway. Either the"
+            echo "::error::script does not verify with the Python SDK, or its payload carries no"
+            echo "::error::name that sorts differently by code point than by UTF-16 code unit."
+            exit 1
+          fi
+          echo "The script reports red when the two implementations disagree."
+
+      - name: Receipts minted through the ordinary answer path verify under both SDKs
+        run: |
+          set +e
+          bash scripts/verify-minted-receipts.sh > /tmp/cross.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/cross.out
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::A receipt handoffd minted does not verify under one of the published"
+            echo "::error::SDKs. Read the output above: the disagreement is the finding."
+            exit 1
+          fi
+          # A script that exits 0 having printed nothing has not been shown to do anything, and
+          # this job is the only place the seam is measured.
+          if [ ! -s /tmp/cross.out ]; then
+            echo "::error::The script exited 0 and said nothing. It must report what it verified."
+            exit 1
+          fi
+          echo "handoffd's receipts verify under both published SDKs."
+
+  published-artifacts:
+    name: the published vectors reproduce, and the spec's own verifier accepts them
+    runs-on: ubuntu-latest
+    # `spec/signing.md` prints worked vectors and a reference verifier and tells an implementer to
+    # reproduce every value exactly. Until this job existed, nothing executed either. The SDK tests
+    # cover the same ground, but they are our code agreeing with our code — the closed loop the
+    # conformance harness is already in by sharing a crate with the server it tests.
+    #
+    # `verify-published-artifacts.py` breaks that loop in the one way that matters: it EXTRACTS the
+    # reference verifier from the fenced block in `spec/signing.md` at run time and executes it, so
+    # the code under test is the code a reader is invited to copy, and it cannot drift from the
+    # document the way a duplicate would. It derives the signing seed from the published sentence
+    # rather than trusting the published hex, verifies both receipt fixtures AS PUBLISHED without
+    # recomputing the digest first — recomputing before asserting is how a broken fixture survived
+    # a whole review round — and checks that UTF-16 and code-point member ordering really do
+    # disagree on a non-BMP key.
+    #
+    # That last one is the part with teeth. Every published fixture is ASCII and canonicalizes
+    # identically under both orderings, so the fixtures are structurally blind to the ordering
+    # defect; a "fix" that changed nothing would pass every other check here.
+    #
+    # Required, not conditional, for the same reason as the receipts job: a gate that steps aside
+    # when its subject is missing reports green and measures nothing, and the absence looks exactly
+    # like the pass.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Without this the script prints `skip  signature checks` and exits 0 having checked five
+      # things fewer — a quiet loss of coverage that reads as a pass, which is the exact shape of
+      # what this pipeline is being fixed for. Installed rather than tolerated, and the honest run
+      # below refuses any `skip` line so a future dependency cannot go missing silently either.
+      - name: The signature checks have what they need
+        run: python -m pip install --quiet 'cryptography==43.0.1'
+
+      - name: The script exists
+        run: |
+          if [ ! -f scripts/verify-published-artifacts.py ]; then
+            echo "::error::scripts/verify-published-artifacts.py is missing. It is the only thing"
+            echo "::error::that executes spec/signing.md's own verifier against the published"
+            echo "::error::fixtures, so its absence is a red build, not a skip."
+            exit 1
+          fi
+          echo "found"
+
+      # Two sabotages, because they fail the script in two different places and a green here means
+      # nothing unless both can turn it red. The author ran both by hand before trusting the green
+      # one; running them on every build is the difference between a demonstration and a check.
+      #
+      # The first alters one character inside the digest-covered core. The published signature was
+      # computed over the original bytes, so nothing that actually reads the fixture can still
+      # accept it. It deliberately does not depend on how the script is written — only on its
+      # stated job — so it keeps working when the script is rewritten. If the script stays green
+      # here that is a finding rather than a flake: it is not reading the artifact it claims to
+      # verify, or it is recomputing the expected value from the same bytes it is checking, which
+      # is the closed loop again with a smaller radius.
+      - name: The script goes red when a published artifact is altered
+        run: |
+          # Checked explicitly rather than left to `set -e`: whether this step aborts on a failed
+          # sabotage is the whole question, and it must not depend on which shell option is in
+          # force when somebody moves the block.
+          set +e
+          python3 - <<'SABOTAGE'
+          import pathlib, sys
+          p = pathlib.Path("spec/fixtures/signing/receipt-core.json")
+          text = p.read_text()
+          if "Dana Okafor" not in text:
+              sys.exit("the sabotage no longer applies: receipt-core.json does not carry the name "
+                       "it was written against. Point this step at a different byte of the "
+                       "digest-covered core and say so here.")
+          p.write_text(text.replace("Dana Okafor", "Dana Okafur", 1))
+          SABOTAGE
+          applied=$?
+          set -e
+          if [ "$applied" -ne 0 ]; then
+            echo "::error::The sabotage could not be applied, so this meta-test would prove"
+            echo "::error::nothing. Read the reason above and repoint it."
+            exit 1
+          fi
+          if git diff --quiet -- spec/fixtures/signing/receipt-core.json; then
+            echo "::error::The sabotage changed nothing, so this meta-test is measuring nothing."
+            exit 1
+          fi
+          # No pipe: `cmd | tee` reports tee's status, which is how a green build gets reported
+          # for a red run.
+          set +e
+          python3 scripts/verify-published-artifacts.py > /tmp/sabotaged.out 2>&1
+          rc=$?
+          set -e
+          git checkout -- spec/fixtures/signing/receipt-core.json
+          tail -40 /tmp/sabotaged.out
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::An altered receipt core still verified. Either the script does not read"
+            echo "::error::spec/fixtures/signing/receipt-core.json, or it recomputes the value it"
+            echo "::error::is checking from the same bytes it is checking."
+            exit 1
+          fi
+          echo "The script reports red when a published artifact stops matching its signature."
+
+      # The second reverts the member ordering inside the published verifier itself, from UTF-16
+      # code units to code points. That is the defect the correction was written to fix, and it is
+      # invisible to every fixture in the tree, so this is the only thing standing between the
+      # document and a silent regression of it. It is not hypothetical: the correction was absent
+      # from the document for a window while this job was being written, and running the script
+      # against that state produced exactly the two failures below.
+      - name: The script goes red when the published verifier's member ordering regresses
+        run: |
+          set +e
+          python3 - <<'SABOTAGE'
+          import pathlib, sys
+          p = pathlib.Path("spec/signing.md")
+          text = p.read_text()
+          correct = 'sorted(v.items(), key=lambda kv: kv[0].encode("utf-16-be"))'
+          if correct not in text:
+              sys.exit("the sabotage no longer applies: the published verifier in signing.md no "
+                       "longer sorts members by UTF-16 code unit in the form this step reverts. "
+                       "Point it at whatever the snippet does now and say so here.")
+          p.write_text(text.replace(correct, "sorted(v.items())", 1))
+          SABOTAGE
+          applied=$?
+          set -e
+          if [ "$applied" -ne 0 ]; then
+            echo "::error::The sabotage could not be applied, so this meta-test would prove"
+            echo "::error::nothing. Read the reason above and repoint it."
+            exit 1
+          fi
+          if git diff --quiet -- spec/signing.md; then
+            echo "::error::The sabotage changed nothing, so this meta-test is measuring nothing."
+            exit 1
+          fi
+          set +e
+          python3 scripts/verify-published-artifacts.py > /tmp/reordered.out 2>&1
+          rc=$?
+          set -e
+          git checkout -- spec/signing.md
+          tail -40 /tmp/reordered.out
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::The published verifier sorted members by code point and every check"
+            echo "::error::still passed. The ordering section is not measuring the ordering, and"
+            echo "::error::no fixture in this tree can tell the two apart."
+            exit 1
+          fi
+          echo "The script reports red when the published verifier's ordering regresses."
+
+      - name: The published artifacts verify under the specification's own verifier
+        run: |
+          set +e
+          python3 scripts/verify-published-artifacts.py > /tmp/published.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/published.out
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::A value spec/signing.md publishes does not reproduce, or a published"
+            echo "::error::fixture does not verify under the verifier the document prints."
+            exit 1
+          fi
+          # Exit 0 is not the whole answer. The script degrades rather than failing when something
+          # it needs is absent: a missing dependency prints `skip` and drops five checks, and a
+          # verifier it cannot extract from the document takes the fixture and ordering sections
+          # with it, silently and with no marker at all. So the count is asserted too. Eighteen is
+          # a FLOOR and not a total: it may only rise, and raising it is the right response to
+          # adding a check. If it falls, something stopped running and said nothing.
+          skipped=$(grep -c '^  skip' /tmp/published.out || true)
+          checks=$(grep -cE '^  (ok|FAIL|skip)' /tmp/published.out || true)
+          if [ "$skipped" -ne 0 ]; then
+            grep '^  skip' /tmp/published.out
+            echo "::error::${skipped} check(s) were skipped. A check that steps aside is not a"
+            echo "::error::check that passed; install what it needs or remove the claim."
+            exit 1
+          fi
+          if [ "$checks" -lt 18 ]; then
+            echo "::error::Only ${checks} check(s) ran, and this job has seen 18. A section stopped"
+            echo "::error::running without failing — most likely the reference verifier could not"
+            echo "::error::be extracted from spec/signing.md, which takes the fixture and ordering"
+            echo "::error::checks with it and says nothing."
+            exit 1
+          fi
+          echo "Every published vector reproduces and every published fixture verifies: ${checks} checks."
+
+  gate-count:
+    name: conformance — the case count agrees everywhere it is written
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The Level 1 case count has gone stale four times, and the last fix is the reason this job
+      # is written the way it is. That fix held GATE.md to the tree, which worked, and the number
+      # then went stale in the specification, in the changelog and in the readme instead. Naming
+      # the places the number lives fixes the places the number lives; it has now gone stale in a
+      # file nobody had listed three separate times, so this DISCOVERS rather than enumerates. It
+      # greps every tracked file for the shapes the claim takes and holds each one to a count
+      # DERIVED from `conformance/cases/*.yaml` -- never to another document, because a quorum of
+      # prose agreeing with itself is exactly the failure. A file written next week is covered on
+      # the day it is written, with no maintenance.
+      #
+      # It also reads the enumeration and not only the digit. A sentence with the right count and a
+      # last case one short is the shape that sent an implementer past the case which exists
+      # because the reference server had that exact defect.
+      - name: Every mention of the count agrees with the case files
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess, sys
+
+          # Ground truth, and the only thing anything is compared against.
+          cases = {}
+          for path in sorted(pathlib.Path("conformance/cases").glob("*.yaml")):
+              text = path.read_text()
+              ident = re.search(r"^id:\s*(\S+)\s*$", text, re.M)
+              level = re.search(r"^level:\s*(\d+)\s*$", text, re.M)
+              if not ident or not level:
+                  sys.exit(f"{path} states no id or no level; a case file must state both.")
+              cases[ident.group(1)] = int(level.group(1))
+          level1 = {c for c, lvl in cases.items() if lvl == 1}
+          if not level1:
+              sys.exit("conformance/cases holds no Level 1 case. Nothing below would mean anything.")
+          count = len(level1)
+
+          def order(i):
+              m = re.fullmatch(r"C-(\d+)([a-z]*)", i)
+              return (int(m.group(1)), m.group(2)) if m else (10**6, i)
+
+          terminal = max(level1, key=order)
+
+          # The four shapes the claim takes in this repository. The lookbehind on COUNT is what
+          # stops a version number -- "v0.1 Level 1 compliant" -- being read as a count of one.
+          COUNT = re.compile(r"(?<![.\d])(\d+)(?:/\d+)?\s+Level 1\b")
+          REPORT = re.compile(r"(?<![.\d/])\d+/(\d+) passing")
+          MANIFEST = re.compile(r"cases:\s+(\d+) from")
+          NAMED = re.compile(r"\bC-(\d+)[a-z]*\b")
+
+          IDENT = re.compile(r"C-\d+[a-z]*")
+          RANGE = re.compile(r"\s*(?:through|to|–|—|-|…|\.\.\.)\s*")
+          MEMBER = re.compile(r"\s*(?:,|and|plus|,\s*and|,\s*plus)\s*")
+          LEAD = re.compile(r"[^.]{0,40}")
+
+          def enumerated(rest):
+              """The identifiers a phrase names, reading forward from a stated count until the
+              text stops being an enumeration. Stopping at the first gap that is not a connector
+              is what keeps a trailing Level 2 aside out of the Level 1 set; a fixed window would
+              swallow it."""
+              found = [(m.group(0), m.start(), m.end()) for m in IDENT.finditer(rest)]
+              if not found or not LEAD.fullmatch(rest[: found[0][1]]):
+                  return set()
+              named = {found[0][0]}
+              for i in range(1, len(found)):
+                  gap = rest[found[i - 1][2]: found[i][1]]
+                  if RANGE.fullmatch(gap):
+                      named |= {f"C-{n}" for n in
+                                range(order(found[i - 1][0])[0], order(found[i][0])[0] + 1)}
+                  elif not MEMBER.fullmatch(gap):
+                      break
+                  named.add(found[i][0])
+              return named
+
+          def inspect(raw):
+              """Every disagreement in one document, as (shape, stated, line, quote)."""
+              flat = raw.replace("**", "")
+              at = lambda i: flat[:i].count("\n") + 1
+              out = []
+              for m in COUNT.finditer(flat):
+                  stated = int(m.group(1))
+                  if stated != count:
+                      out.append(("count", stated, at(m.start()), m.group(0)))
+                      continue
+                  named = enumerated(flat[m.end():])
+                  if len(named) >= 3 and named != level1:
+                      missing = sorted(level1 - named, key=order)
+                      extra = sorted(named - level1, key=order)
+                      out.append(("enumeration", stated, at(m.start()),
+                                  f"enumerates {len(named)}"
+                                  + (f", missing {' '.join(missing)}" if missing else "")
+                                  + (f", names {' '.join(extra)}" if extra else "")))
+              for m in REPORT.finditer(flat):
+                  if int(m.group(1)) != count:
+                      out.append(("report", int(m.group(1)), at(m.start()), m.group(0)))
+              for m in MANIFEST.finditer(flat):
+                  if int(m.group(1)) != count:
+                      out.append(("manifest", int(m.group(1)), at(m.start()), m.group(0)))
+              for m in NAMED.finditer(flat):
+                  if f"C-{m.group(1)}" not in cases:
+                      out.append(("named", int(m.group(1)), at(m.start()), m.group(0)))
+              return out
+
+          # Mentions that are historical on purpose: a review dated last month quoting what a
+          # document said that day, and a dev stub whose docstring shows sample output. Each is
+          # keyed to one file and the one number it is allowed to state -- keyed to the number
+          # rather than to a line, because a line moves the moment a paragraph is added above it
+          # and a key that goes stale for the wrong reason teaches people to widen it. Every
+          # allowance is listed in the job output, because silence about a skipped file is how
+          # this became a fourth recurrence, and an allowance that stops matching fails the build
+          # so the list cannot outlive its reasons. Adding one is a visible diff with a reason.
+          ALLOWED = {
+              # `stub_501.py` prints a sample report in its module docstring.
+              ("core/crates/handoff-conformance/dev/stub_501.py", "report", 22),
+              # docs/ holds dated reviews. They quote counts that were true when they were written
+              # and must stay quoted verbatim, or the record of what was found stops being one.
+              ("docs/hostile-review.md", "count", 24),
+              ("docs/hostile-review.md", "count", 23),
+              ("docs/hostile-review.md", "report", 23),
+              ("docs/review-2.md", "count", 25),
+              ("docs/review-2.md", "count", 24),
+              ("docs/review-2.md", "report", 25),
+              ("docs/review-2.md", "report", 24),
+              ("docs/review-2.md", "report", 1),
+              ("docs/review-2.md", "manifest", 24),
+              ("docs/review-3.md", "count", 25),
+              ("docs/review-3.md", "count", 24),
+              ("docs/review-3.md", "report", 25),
+          }
+
+          # Prove the matchers fire before trusting them with the tree. The probes are built from
+          # ground truth rather than written out, so that this file states no count of its own for
+          # the scan below to find -- a checker that trips over its own examples gets loosened.
+          ordered = sorted(level1, key=order)
+          correct = (f"passes all {count} Level 1 conformance cases of §18: "
+                     + ", ".join(ordered[:-1]) + f" and {ordered[-1]}.")
+          probes = [
+              ("count", f"passes all {count - 1} Level 1 cases."),
+              ("enumeration", f"passes all {count} Level 1 cases: "
+                              + ", ".join(ordered[:-2]) + f" and {ordered[-2]}."),
+              ("report", f"0/{count - 1} passing"),
+              ("manifest", f"cases:  {count - 1} from conformance/cases"),
+              ("named", f"see C-{order(terminal)[0] + 1} for the rest"),
+          ]
+          if inspect(correct):
+              sys.exit(f"the matchers complain about a correct document: {inspect(correct)}")
+          for shape, probe in probes:
+              if shape not in {s for s, *_ in inspect(probe)}:
+                  sys.exit(f"the {shape!r} matcher does not fire on its own canary. It is "
+                           "measuring nothing, which is how six checks here shipped.")
+          print(f"matchers: {len(probes)} shapes, each watched firing, none firing on a correct "
+                "document")
+
+          failed, skipped, used = [], [], set()
+          for rel in subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                                    check=True).stdout.split():
+              try:
+                  raw = pathlib.Path(rel).read_text()
+              except (OSError, UnicodeDecodeError):
+                  continue
+              for shape, stated, line, quote in inspect(raw):
+                  if (rel, shape, stated) in ALLOWED:
+                      used.add((rel, shape, stated))
+                      skipped.append(f"{rel}:{line}  {shape} {stated}  {quote[:44]}")
+                      continue
+                  failed.append(f"{rel}:{line}  states {stated} where the tree holds {count}: "
+                                f"{quote[:60]}")
+
+          if skipped:
+              print(f"allowed as historical, {len(skipped)} mention(s), none of them silent:")
+              print("\n".join(f"    {s}" for s in sorted(skipped)))
+          for key in sorted(ALLOWED - used):
+              failed.append(f"the allowance {key} matches nothing now. Delete it — an exemption "
+                            "nobody needs is one nobody is watching.")
+
+          if failed:
+              print("\n".join(f"  {f}" for f in sorted(set(failed))))
+              sys.exit(f"\n{len(set(failed))} disagreement(s) with conformance/cases, which holds "
+                       f"{count} Level 1 case(s), the last of them {terminal}. Update the "
+                       "documents, not this check.")
+          print(f"{count} Level 1 case(s) on disk, last {terminal}: every mention agrees.")
+          PY
+
+  spec-needs-conformance:
+    name: a spec change must carry a conformance case
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # GOVERNANCE.md, "The spec-change process": a normative change without an executable case is
+      # how a specification stops being one. Enforced here rather than left to review.
+      #
+      # Counting changed paths was not enough. A spec edit plus the deletion of
+      # `c01_idempotent_raise.yaml` satisfied the old check and went green: the PR touched
+      # `conformance/`, so the rule was met, while the tree ended with less coverage than it
+      # started. What the rule means is that a case must arrive, so an ADDED or MODIFIED case file
+      # is what counts — and since §18 requires that a withdrawn case keep its identifier and be
+      # marked withdrawn, deleting a case file is refused outright and separately.
+      - name: A case must arrive, and none may quietly leave
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --quiet origin "${{ github.base_ref }}"
+          changed=$(git diff --name-status -M "$base"...HEAD)
+          echo "$changed"
+          echo "---"
+
+          spec=$(echo "$changed" | grep -cE '^[A-Z][0-9]*[[:space:]]+spec/' || true)
+          carried=$(echo "$changed" | grep -cE '^[AM][[:space:]]+conformance/cases/.*\.yaml$' || true)
+          removed=$(echo "$changed" | grep -E '^D[[:space:]]+conformance/cases/.*\.yaml$' || true)
+
+          rc=0
+          if [ -n "$removed" ]; then
+            echo "$removed"
+            echo "::error::A conformance case was deleted. Specification §18: a withdrawn case keeps"
+            echo "::error::its identifier and is marked withdrawn. Deleting the file removes the"
+            echo "::error::coverage and frees the number for reuse."
+            rc=1
+          fi
+          if [ "$spec" -gt 0 ] && [ "$carried" -eq 0 ]; then
+            echo "::error::This PR changes spec/ and adds or modifies no conformance case."
+            echo "::error::See GOVERNANCE.md, 'The spec-change process'."
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "ok (spec files: $spec, cases added or modified: $carried, cases deleted: 0)"
+
+  secret-hygiene:
+    name: no credentials or capability tokens in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SECURITY.md: in this protocol a request identifier can itself be a capability, so this is
+      # not routine housekeeping. Every pattern below matches a literal VALUE. Naming an
+      # environment variable, or interpolating one into a URL, must not trip the check — a token
+      # in a query string only counts when a literal follows the `=`.
+      #
+      # The five patterns this began with covered six of the credential shapes a repository of
+      # this kind actually leaks, and among the twenty they missed was `whsec_…`, the callback
+      # secret format `spec/signing.md` §1.2 defines. Missing the one format the specification
+      # itself mints is the whole defect in miniature: the check was written from a general idea
+      # of what a secret looks like rather than from this protocol's own documents.
+      #
+      # `git ls-files` rather than a recursive grep, because the question is what is published.
+      - name: Scan the tree
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess, sys
+
+          PATTERNS = {
+              "AWS access key id": r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+              "OpenAI or Anthropic key": r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}",
+              "Stripe secret or restricted key": r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}",
+              "webhook signing secret": r"\bwhsec_[A-Za-z0-9+/=_-]{16,}",
+              "GitHub token": r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}",
+              "GitHub fine-grained token": r"\bgithub_pat_[A-Za-z0-9_]{40,}",
+              "GitLab token": r"\bglpat-[A-Za-z0-9_-]{16,}",
+              "Slack token": r"\bxox[abprs]-[A-Za-z0-9-]{10,}",
+              "Slack app-level token": r"\bxapp-[0-9]-[A-Za-z0-9-]{10,}",
+              "Slack incoming webhook": r"https://hooks\.slack\.com/services/T[A-Za-z0-9/+_-]{20,}",
+              "Discord webhook": r"https://discord(?:app)?\.com/api/webhooks/[0-9]{10,}/[A-Za-z0-9_-]{20,}",
+              "SendGrid key": r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+              "Google API key": r"\bAIza[0-9A-Za-z_-]{35}\b",
+              "Google OAuth access token": r"\bya29\.[0-9A-Za-z_-]{20,}",
+              "Twilio SID-shaped credential": r"\b(?:AC|SK)[0-9a-f]{32}\b",
+              "npm token": r"\bnpm_[A-Za-z0-9]{36}\b",
+              "PyPI token": r"\bpypi-[A-Za-z0-9_-]{32,}",
+              "DigitalOcean token": r"\bdop_v1_[a-f0-9]{64}\b",
+              "Shopify token": r"\bshp(?:at|ss|ca|pa)_[a-f0-9]{32}\b",
+              "Hugging Face token": r"\bhf_[A-Za-z0-9]{30,}\b",
+              "Figma token": r"\bfigd_[A-Za-z0-9_-]{20,}",
+              "JSON Web Token": r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+              "private key block": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+              "Authorization: Bearer literal": r"\bBearer [A-Za-z0-9._-]{24,}",
+              "capability token in a URL": r"[?&][a-z_]*(?:token|key|secret|sig|password)=[A-Za-z0-9._~-]{16,}",
+              "password in a connection string": r"\b[a-z][a-z0-9+.-]*://[^\s:@/\"']+:[^\s:@/\"']{6,}@",
+              "Authorization: Basic literal": r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/]{20,}={0,2}",
+          }
+
+          # Published on purpose, with the document that publishes them. `spec/signing.md` §1.6
+          # tells every implementer to reproduce these exact bytes, so they are the opposite of a
+          # leaked secret — but they are a real `whsec_` and the scan must be able to see one. The
+          # allowance is therefore tied to the file that publishes it: rotate the vector and this
+          # entry stops matching, the check fails, and it is deleted rather than left as a hole.
+          PUBLISHED = {
+              "whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05": "spec/signing.md",
+              "whsec_9d41c07be5a2f36819b4d0e7c5a81f62": "spec/signing.md",
+          }
+          # A body of nothing but zeros is a stand-in for a retired secret, not a secret.
+          ALL_ZERO = re.compile(r"\A[a-z_]+_0+\Z")
+
+          # A pattern nobody has watched fire has not been tested. Assembled rather than written
+          # out so this file does not become a finding of its own.
+          CANARIES = {
+              "AWS access key id": "AKIA" + "IOSFODNN7EXAMPLE",
+              "OpenAI or Anthropic key": "sk-ant-" + "A" * 40,
+              "Stripe secret or restricted key": "sk_live_" + "9" * 24,
+              "webhook signing secret": "whsec_" + "b" * 32,
+              "GitHub token": "ghp_" + "C" * 36,
+              "GitHub fine-grained token": "github_pat_" + "D" * 48,
+              "GitLab token": "glpat-" + "E" * 20,
+              "Slack token": "xoxb-" + "1234567890-1234567890-abcdefghij",
+              "Slack app-level token": "xapp-" + "1-A01B2C3D4E5-1234567890",
+              "Slack incoming webhook": "https://hooks.slack.com/services/T" + "0" * 10 + "/B" + "1" * 10 + "/" + "z" * 24,
+              "Discord webhook": "https://discord.com/api/webhooks/" + "1" * 18 + "/" + "y" * 30,
+              "SendGrid key": "SG." + "F" * 22 + "." + "G" * 43,
+              "Google API key": "AIza" + "H" * 35,
+              "Google OAuth access token": "ya29." + "I" * 40,
+              "Twilio SID-shaped credential": "AC" + "0123456789abcdef" * 2,
+              "npm token": "npm_" + "J" * 36,
+              "PyPI token": "pypi-" + "K" * 40,
+              "DigitalOcean token": "dop_v1_" + "a1b2c3d4" * 8,
+              "Shopify token": "shpat_" + "fedcba9876543210" * 2,
+              "Hugging Face token": "hf_" + "L" * 34,
+              "Figma token": "figd_" + "M" * 30,
+              "JSON Web Token": "eyJ" + "N" * 20 + ".eyJ" + "O" * 30 + "." + "P" * 43,
+              "private key block": "-----BEGIN " + "EC PRIVATE KEY-----",
+              "Authorization: Bearer literal": "Bearer " + "Q" * 40,
+              "capability token in a URL": "https://relay.example.com/live?token=" + "R" * 40,
+              "password in a connection string": "postgres://omega:" + "s3cr3tvalue" + "@db:5432/x",
+              "Authorization: Basic literal": "Authorization: Basic " + "T" * 32,
+          }
+          compiled = {name: re.compile(pattern) for name, pattern in PATTERNS.items()}
+          missing = [name for name in compiled if name not in CANARIES]
+          if missing:
+              sys.exit(f"no canary for {missing}; every pattern must be watched firing.")
+          for name, probe in CANARIES.items():
+              if not compiled[name].search(probe):
+                  sys.exit(f"the {name!r} pattern does not fire on its own canary. It is measuring "
+                           "nothing, which is how six checks in this repository shipped.")
+
+          # Naming a variable, or interpolating one, is not a value.
+          BENIGN = ["PGPASSWORD", "export HANDOFF_API_KEY=$HANDOFF_API_KEY",
+                    "https://relay.example.com/live?token=${CAPABILITY}",
+                    "Authorization: Bearer <token>", "postgres://omega@localhost:5432/postgres"]
+          for probe in BENIGN:
+              fired = [name for name, rx in compiled.items() if rx.search(probe)]
+              if fired:
+                  sys.exit(f"{fired} fires on {probe!r}, which names a secret without carrying one.")
+          print(f"{len(compiled)} credential shapes, each watched firing on a canary and silent "
+                f"on {len(BENIGN)} benign strings")
+
+          hits = []
+          for rel in subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                                    check=True).stdout.split():
+              try:
+                  text = pathlib.Path(rel).read_text()
+              except (OSError, UnicodeDecodeError):
+                  continue
+              for name, rx in compiled.items():
+                  for m in rx.finditer(text):
+                      value = m.group(0)
+                      if PUBLISHED.get(value) == rel or ALL_ZERO.match(value):
+                          continue
+                      if value in PUBLISHED:
+                          continue
+                      hits.append(f"{rel}:{text[:m.start()].count(chr(10)) + 1}: "
+                                  f"{name}: {value[:32]}…")
+
+          for value, home in PUBLISHED.items():
+              if value not in pathlib.Path(home).read_text():
+                  hits.append(f"{home} no longer publishes {value[:16]}…; the allowance for it in "
+                              "this check is stale and must be deleted.")
+
+          if hits:
+              print("\n".join(f"  {h}" for h in hits))
+              sys.exit("Possible credential or capability token committed. Rotate it first, "
+                       "then remove it.")
+          print("clean")
+          PY
+
+      - name: No ignored-by-policy files were committed
+        run: |
+          set +e
+          bad=$(git ls-files | grep -E '(^|/)\.env($|\.)|\.local\.md$|_accessKeys\.csv$|\.pem$')
+          set -e
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            echo "::error::These files must never be tracked. See .gitignore and SECURITY.md."
+            exit 1
+          fi
+          echo "clean"

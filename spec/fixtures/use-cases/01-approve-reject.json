@@ -1,0 +1,67 @@
+{
+  "pattern": "approve-reject",
+  "note": "One choice field. No capabilities. Nothing here names an interaction type; the shape of the answer is the whole declaration.",
+  "raise": {
+    "waiter_ref": "run:0198f2a1",
+    "urgency": "high",
+    "prompt": {
+      "title": "Refund $2,400 to Acme Corp?",
+      "body": "Invoice **INV-8821** was double-charged on 2026-07-28."
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "decision",
+            "label": "Decision",
+            "type": "choice",
+            "required": true,
+            "options": [
+              {
+                "id": "approve",
+                "label": "Refund it"
+              },
+              {
+                "id": "reject",
+                "label": "Don't refund"
+              }
+            ]
+          },
+          {
+            "name": "note",
+            "label": "Add a note",
+            "type": "text",
+            "required": false,
+            "max_len": 500
+          }
+        ]
+      },
+      "capabilities": [],
+      "authority": {
+        "min_role": "editor",
+        "auth_strength": "session",
+        "quorum": 1,
+        "forbid_requester": true
+      }
+    },
+    "ttl": "PT4H",
+    "ttl_policy": {
+      "on_expiry": "expire_and_deny"
+    },
+    "metadata": {
+      "hint": "approval"
+    }
+  },
+  "answer": {
+    "values": {
+      "decision": "approve",
+      "note": "Confirmed with Acme on the phone."
+    }
+  },
+  "expect": {
+    "state": "answered",
+    "receipt_actor_type": "user",
+    "authorization_minted": true
+  }
+}

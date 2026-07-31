@@ -1,0 +1,434 @@
+{
+ "spec_version": "0.1",
+ "generated_from": "handoff-protocol-v0.1.md sections 17 and 18",
+ "note": "Normative mapping between invariants and conformance cases. Case ids and invariant ids are STABLE and are never renumbered; a withdrawn case keeps its id. Every Level 1 case maps to at least one invariant; Level 2 cases need not.",
+ "levels": {
+  "1": [
+   "C-1",
+   "C-2",
+   "C-3",
+   "C-4",
+   "C-5",
+   "C-6",
+   "C-6b",
+   "C-7",
+   "C-8",
+   "C-9",
+   "C-10",
+   "C-11",
+   "C-12",
+   "C-13",
+   "C-14",
+   "C-15",
+   "C-16",
+   "C-18",
+   "C-19",
+   "C-20",
+   "C-21",
+   "C-22",
+   "C-23",
+   "C-24",
+   "C-25",
+   "C-26"
+  ],
+  "2": [
+   "C-17"
+  ]
+ },
+ "cases": [
+  {
+   "id": "C-1",
+   "level": 1,
+   "title": "Raise twice with one `Idempotency-Key` \u2192 one request, `201` then `200`, identical body",
+   "invariants": [
+    "I20"
+   ]
+  },
+  {
+   "id": "C-2",
+   "level": 1,
+   "title": "Raise twice with the same `dedupe_key` while pending \u2192 one request",
+   "invariants": [
+    "I1",
+    "I20"
+   ]
+  },
+  {
+   "id": "C-3",
+   "level": 1,
+   "title": "Two concurrent answers \u2192 one `200` with a receipt, one `409 already_answered`; the request is answered exactly once",
+   "invariants": [
+    "I5"
+   ]
+  },
+  {
+   "id": "C-4",
+   "level": 1,
+   "title": "Answer, then cancel \u2192 `409 already_answered`; the receipt is intact",
+   "invariants": [
+    "I5"
+   ]
+  },
+  {
+   "id": "C-5",
+   "level": 1,
+   "title": "A machine key calls `/answer` \u2192 `403 requester_may_not_answer`, for the machine that raised the request and for a second machine in the same tenant that did not; a person answering the same request succeeds",
+   "invariants": [
+    "I15"
+   ]
+  },
+  {
+   "id": "C-6",
+   "level": 1,
+   "title": "Answer as a principal below `min_role` \u2192 `403 insufficient_authority`",
+   "invariants": [
+    "I6"
+   ]
+  },
+  {
+   "id": "C-6b",
+   "level": 1,
+   "title": "A deployment that forbids `link_only` rejects an answer at that grade; a deployment that has opted in accepts it and the receipt records `actor.type = \"anonymous_link\"` and names no principal",
+   "invariants": [
+    "I6",
+    "I2"
+   ]
+  },
+  {
+   "id": "C-7",
+   "level": 1,
+   "title": "Answer carrying a raw value for a `secret` field \u2192 `422`. Then scan the request, receipt, event record, signal, logs, and every URL for the value \u2192 zero hits",
+   "invariants": [
+    "I7",
+    "I18"
+   ]
+  },
+  {
+   "id": "C-8",
+   "level": 1,
+   "title": "No request, receipt, delivery, signal, or outbound message contains a resolvable grant. Resolve without a session \u2192 `401`. Two resolves return different URLs. A handle replayed after use, after expiry, after revocation, or by another subject \u2192 rejected. Resolving with a stale `accepted_blast_radius_digest` \u2192 `409 blast_radius_mismatch`, and the grant's declared blast radius is readable before the resolve control",
+   "invariants": [
+    "I8",
+    "I19"
+   ]
+  },
+  {
+   "id": "C-9",
+   "level": 1,
+   "title": "Attempt TTL lapses \u2192 exactly one `attempt_lapsed` signal, ever; the request is still `pending` and still listed (R3)",
+   "invariants": [
+    "I4"
+   ]
+  },
+  {
+   "id": "C-10",
+   "level": 1,
+   "title": "Request TTL lapses under `expire_and_deny` \u2192 `expired` plus a policy receipt with `actor.type = \"policy\"`; the waiter receives a typed terminal signal",
+   "invariants": [
+    "I11"
+   ]
+  },
+  {
+   "id": "C-11",
+   "level": 1,
+   "title": "Kill the client mid-poll, restart, reattach (W7) \u2192 the signal is still there and still unacked",
+   "invariants": [
+    "I9",
+    "I11"
+   ]
+  },
+  {
+   "id": "C-12",
+   "level": 1,
+   "title": "Ack twice \u2192 both `200`, redelivery stops once, no duplicate application",
+   "invariants": [
+    "I9"
+   ]
+  },
+  {
+   "id": "C-13",
+   "level": 1,
+   "title": "Redeem twice with the same `effect_key` \u2192 `200` both, `first_redemption` true then false. A different `effect_key` on a single-use authorization \u2192 `409`",
+   "invariants": [
+    "I10"
+   ]
+  },
+  {
+   "id": "C-14",
+   "level": 1,
+   "title": "Escalate through three rungs \u2192 three or more deliveries, still exactly one request and one receipt",
+   "invariants": [
+    "I3",
+    "I1"
+   ]
+  },
+  {
+   "id": "C-15",
+   "level": 1,
+   "title": "Attempt to update or delete a receipt at the storage layer \u2192 rejected by storage. The chain verifies over the full history, and altering any historical entry invalidates the head",
+   "invariants": [
+    "I2"
+   ]
+  },
+  {
+   "id": "C-16",
+   "level": 1,
+   "title": "Post `requires: {\"v\": 2, \u2026}` to a v1 Server \u2192 `400 unsupported_requires_version`, and no request is created. Post an unknown field `type` \u2192 `400 unsupported_field_type`",
+   "invariants": [
+    "I21"
+   ]
+  },
+  {
+   "id": "C-17",
+   "level": 2,
+   "title": "`resume_ref` and `resume_payload` are returned byte-identical in the signal and appear nowhere else, including in logs",
+   "invariants": []
+  },
+  {
+   "id": "C-18",
+   "level": 1,
+   "title": "A valid callback signature replayed onto a different delivery is rejected; a body altered by one byte is rejected; a timestamp outside the window is rejected; both secrets verify during a rotation overlap; sequence numbers are monotonic per waiter. A receiver resolving tenancy from the callback body rather than from stored state fails the case",
+   "invariants": [
+    "I13"
+   ]
+  },
+  {
+   "id": "C-19",
+   "level": 1,
+   "title": "The same idempotency key used by two different tenants succeeds for both and each sees only its own; the same key twice within one tenant collapses to one",
+   "invariants": [
+    "I17",
+    "I20"
+   ]
+  },
+  {
+   "id": "C-20",
+   "level": 1,
+   "title": "Every read returns exactly the caller's tenant's rows, asserted on length and identity (never `contains` \u2014 a query missing its tenant predicate returns a superset and `contains` passes). Every mutation by tenant A against tenant B's id fails, and B re-reads to prove its row is untouched. A body-supplied tenant identifier is ignored: tenancy comes from the credential",
+   "invariants": [
+    "I17",
+    "I13"
+   ]
+  },
+  {
+   "id": "C-21",
+   "level": 1,
+   "title": "Channel content matching a decision format does not settle a request; a channel declaring `can_authenticate_person: false` produces a provisional answer only",
+   "invariants": [
+    "I16",
+    "I6"
+   ]
+  },
+  {
+   "id": "C-22",
+   "level": 1,
+   "title": "All eight interaction patterns in `fixtures/use-cases/` are accepted and answerable with no request-kind field anywhere in the wire traffic. A page-state change alone produces no clearance receipt",
+   "invariants": [
+    "I14",
+    "I16"
+   ]
+  },
+  {
+   "id": "C-23",
+   "level": 1,
+   "title": "Drive every transition in \u00a76.2 and \u00a78.2. For each one, the state change and its event are observable together: no state exists whose event is missing, and no event exists whose state change was rolled back. Kill the Server between the state write and the event write \u2192 after restart, either both are present or neither is",
+   "invariants": [
+    "I12"
+   ]
+  },
+  {
+   "id": "C-24",
+   "level": 1,
+   "title": "Answer a `number` field with a non-integer, with `1e21`, and with `2^53` \u2192 each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1`, and `9007199254740991` (2^53 \u2212 1) \u2192 accepted. A canonicalizer MUST refuse a non-integer rather than render it. Canonicalize the two signing fixtures and reproduce their exact byte lengths and SHA-256 digests from `signing.md`",
+   "invariants": [
+    "I2",
+    "I21"
+   ]
+  },
+  {
+   "id": "C-25",
+   "level": 1,
+   "title": "One key reused on a different request settles both, and mints two receipts \u2014 the replay scope includes the object being acted on",
+   "invariants": [
+    "I20",
+    "I10",
+    "I1"
+   ]
+  },
+  {
+   "id": "C-26",
+   "level": 1,
+   "title": "Mint a receipt through the ordinary answer path whose answer carries non-ASCII object keys, a nested document, and 2^53 \u2212 1, then recompute its core hash and chain digest in an implementation that shares no code with the Server \u2192 the stored digest and the recomputed one agree, the receipt verifies standing alone from its own stored `prev_digest`, and the exported head is the head of the chain the deployment serves",
+   "invariants": [
+    "I2"
+   ]
+  }
+ ],
+ "invariants": [
+  {
+   "id": "I1",
+   "statement": "One request has many deliveries and at most one decision receipt.",
+   "cases": [
+    "C-2",
+    "C-14",
+    "C-25"
+   ]
+  },
+  {
+   "id": "I2",
+   "statement": "A receipt is immutable and records what the person saw, not what the request later became.",
+   "cases": [
+    "C-6b",
+    "C-15",
+    "C-24",
+    "C-26"
+   ]
+  },
+  {
+   "id": "I3",
+   "statement": "Escalation, reminders, and channel fallback mint deliveries, never requests.",
+   "cases": [
+    "C-14"
+   ]
+  },
+  {
+   "id": "I4",
+   "statement": "A pending request is always listable and always answerable at its canonical URL. A lapsed attempt changes urgency, never visibility.",
+   "cases": [
+    "C-9"
+   ]
+  },
+  {
+   "id": "I5",
+   "statement": "Answering is first-writer-wins. A conflicting second answer is a 409 and changes nothing. A landed answer beats a racing cancel or expiry.",
+   "cases": [
+    "C-3",
+    "C-4"
+   ]
+  },
+  {
+   "id": "I6",
+   "statement": "Required authority is declared on the request and evaluated at answer time against the answerer's authenticated identity. A delivery channel never confers authority.",
+   "cases": [
+    "C-6",
+    "C-6b",
+    "C-21"
+   ]
+  },
+  {
+   "id": "I7",
+   "statement": "secret values never enter the request, the receipt, the event record, a waiter signal, or any delivery. Only {\"provided\": true} travels.",
+   "cases": [
+    "C-7"
+   ]
+  },
+  {
+   "id": "I8",
+   "statement": "Capability grants are opaque handles resolved through an authenticated endpoint. The protocol never carries a resolvable address by value.",
+   "cases": [
+    "C-8"
+   ]
+  },
+  {
+   "id": "I9",
+   "statement": "The outcome is delivered to the waiter as typed data, retried until acked; the ack is idempotent.",
+   "cases": [
+    "C-11",
+    "C-12"
+   ]
+  },
+  {
+   "id": "I10",
+   "statement": "One answer mints one authorization. Redemption is idempotent per effect_key, and a single-use authorization cannot be spent twice.",
+   "cases": [
+    "C-13",
+    "C-25"
+   ]
+  },
+  {
+   "id": "I11",
+   "statement": "Every terminal transition produces a typed terminal signal. A request never goes quiet.",
+   "cases": [
+    "C-10",
+    "C-11"
+   ]
+  },
+  {
+   "id": "I12",
+   "statement": "Every state transition emits its event in the same transaction as the state change.",
+   "cases": [
+    "C-23"
+   ]
+  },
+  {
+   "id": "I13",
+   "statement": "Tenant binding is resolved from stored state, never from a request body.",
+   "cases": [
+    "C-18",
+    "C-20"
+   ]
+  },
+  {
+   "id": "I14",
+   "statement": "The core never switches on a request kind. New interaction types arrive as new field types or capability types, behind the declaration.",
+   "cases": [
+    "C-22"
+   ]
+  },
+  {
+   "id": "I15",
+   "statement": "A requester principal can never answer its own request.",
+   "cases": [
+    "C-5"
+   ]
+  },
+  {
+   "id": "I16",
+   "statement": "A decision originates from an authenticated principal. It is never derived from message content, and never inferred from observed state. Inference may be recorded as runtime_inference with no actor; it is never recorded as a person.",
+   "cases": [
+    "C-21",
+    "C-22"
+   ]
+  },
+  {
+   "id": "I17",
+   "statement": "Every identifier and every client-supplied key is tenant-scoped. Lookups are tenant-scoped; uniqueness is tenant-scoped; possession of an identifier is never authorization.",
+   "cases": [
+    "C-19",
+    "C-20"
+   ]
+  },
+  {
+   "id": "I18",
+   "statement": "Secret values never appear in a URL, query string, path, argv, environment variable, header, redirect, log line, metric label, trace attribute, or crash report.",
+   "cases": [
+    "C-7"
+   ]
+  },
+  {
+   "id": "I19",
+   "statement": "A capability grant declares its blast radius; the person is shown it before accepting; the accepted digest binds the resolve; the receipt records its digest.",
+   "cases": [
+    "C-8"
+   ]
+  },
+  {
+   "id": "I20",
+   "statement": "Every mutating operation is idempotent under a caller-supplied key, and every idempotency key is tenant-scoped.",
+   "cases": [
+    "C-1",
+    "C-2",
+    "C-19",
+    "C-25"
+   ]
+  },
+  {
+   "id": "I21",
+   "statement": "Unknown protocol versions, field types, and capability types fail closed. Nothing is created, and nothing degrades silently.",
+   "cases": [
+    "C-16",
+    "C-24"
+   ]
+  }
+ ]
+}

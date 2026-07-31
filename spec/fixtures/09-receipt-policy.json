@@ -1,0 +1,46 @@
+{
+  "id": "rcpt_01K3MB2R4V8ZC4YRXB2N6VD9FT",
+  "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHF",
+  "org_id": "org_01K0A2QW8ZC4YRXB2N6VD9FTHE",
+  "kind": "policy",
+  "decision": {
+    "values": {},
+    "disposition": "decide",
+    "effective": "deny",
+    "note": "No answer within the declared window."
+  },
+  "actor": {
+    "type": "policy",
+    "principal_id": null,
+    "display": "expiry policy",
+    "role_at_decision": null,
+    "on_behalf_of": null
+  },
+  "decided_at": "2026-07-30T18:02:11Z",
+  "request_version": 1,
+  "request_digest": "sha256:5c4b3a291807f6e5d4c3b2a190817e6d5c4b3a291807f6e5d4c3b2a190817e6d",
+  "rendered": {
+    "digest": "sha256:1807f6e5d4c3b2a190817e6d5c4b3a291807f6e5d4c3b2a190817e6d5c4b3a29",
+    "ref": null
+  },
+  "via": null,
+  "authority": {
+    "required": {
+      "min_role": "editor",
+      "auth_strength": "session"
+    },
+    "satisfied": "none"
+  },
+  "steps": [],
+  "capabilities_exercised": [],
+  "clearance": {
+    "source": "timeout",
+    "actor": null,
+    "at": "2026-07-30T18:02:11Z"
+  },
+  "chain": {
+    "height": 4212,
+    "prev_digest": "sha256:919f8870391849de4e7b1d5b249ccbaaa7d5a7d3f500f5571c5a92dd0c3909db",
+    "digest": "sha256:1c4738c06a55a1ecc2217b55ac20fa6ba65319e81fc3b7ac49a726536afeb669"
+  }
+}

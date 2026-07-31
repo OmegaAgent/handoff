@@ -1,0 +1,31 @@
+{
+  "session_ref": "hs_01K3MB2R4S8ZC4YRXB2N6VD9FT",
+  "scopes": [
+    "view",
+    "drive"
+  ],
+  "lease_until": "2026-07-30T14:04:11Z",
+  "renew_after_ms": 45000,
+  "blast_radius": {
+    "summary": "Everything this workspace's browser is signed into",
+    "shared_with": "space",
+    "principals": 4,
+    "identities": [
+      {
+        "origin": "mail.example.com",
+        "label": "dana@example.com"
+      },
+      {
+        "origin": "app.hubspot.com",
+        "label": "Acme Corp"
+      }
+    ],
+    "reversible": false,
+    "note": "Actions you take here are indistinguishable from actions by the signed-in accounts."
+  },
+  "transport": {
+    "kind": "websocket",
+    "url": "wss://relay.example.com/v1/sessions/hs_01K3MB2R4S8ZC4YRXB2N6VD9FT/stream"
+  },
+  "receipt_id": "rcpt_01K3MB2R4Y8ZC4YRXB2N6VD9FT"
+}

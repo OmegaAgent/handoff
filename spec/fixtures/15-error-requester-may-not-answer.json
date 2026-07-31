@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "requester_may_not_answer",
+    "message": "A service_account principal cannot answer a request it can raise.",
+    "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+    "docs": "https://handoff.example.com/errors/requester_may_not_answer"
+  }
+}

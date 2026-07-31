@@ -1,0 +1,119 @@
+id: C-11
+title: A client that dies mid-poll re-attaches and the signal is still there, still unacked
+level: 1
+invariants: [I9, I11]
+spec:
+  - "§8 — the wait is a durable server-side row, not a loop inside the client's process"
+  - "§8.2 W7 — reattach returns every unacked signal and re-arms the lease"
+  - "§8.5 — reattachment"
+  - "§18 C-11"
+rationale: >
+  This is the operation that makes a client's own process death survivable, and the reason the
+  protocol can claim a wait survives a worker redeploy. The poll below is opened and then dropped
+  without reading the response — the same thing a killed process does — and the answer lands while
+  nobody is listening. A Server MUST NOT discard a signal because the client that raised the
+  request has gone away.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise a request with a durable waiter
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c11-${run_id}"
+      body:
+        waiter_ref: "run:c11-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Approve the schema migration?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Run it"}
+                  - {id: reject, label: "Not yet"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a client opens a long poll and its process dies
+    abandon_poll:
+      path: /waiters/run%3Ac11-${run_id}/signals
+      as: machine_a
+      query:
+        wait: "30"
+      abandon_after: PT1S
+
+  - name: the person answers while nobody is listening
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c11-answer-${run_id}"
+      body:
+        values: {decision: approve}
+        note: "Ran it past the on-call DBA."
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+      capture:
+        receipt: receipt.id
+
+  - name: a restarted client re-attaches and finds the answer waiting
+    http:
+      method: POST
+      path: /waiters/run%3Ac11-${run_id}/reattach
+      as: machine_a
+      headers:
+        Idempotency-Key: "c11-reattach-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: waiter_ref
+            equals: "run:c11-${run_id}"
+          - path: state
+            one_of: [armed, signalled, delivering, orphaned]
+            because: "§8.2 W7 — reattach returns the waiter to armed without losing a signal"
+          - path: signals
+            length_at_least: 1
+            because: "§8.5 — reattach returns every unacked signal"
+          - path: signals[0].type
+            equals: answered
+          - path: signals[0].acked_at
+            is_null: true
+            because: "§8.3 — reading a signal MUST NOT consume it; consumption is the ack"
+          - path: signals[0].decision.values.decision
+            equals: approve
+            because: >
+              §8.2 — every signal carries a typed payload. A Server MUST NOT satisfy a wait with a
+              null or empty decision.
+          - path: signals[0].decision.receipt_id
+            same_as: receipt
+      capture:
+        signal: signals[0].id
+
+  - name: polling again still shows it, because reading is not consuming
+    http:
+      method: GET
+      path: /waiters/run%3Ac11-${run_id}/signals
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${signal}"]
+            because: "§8.3 — at-least-once delivery plus an idempotent ack, not read-to-consume"

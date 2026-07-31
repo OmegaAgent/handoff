@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "unsupported_requires_version",
+    "message": "requires.v = 2 is not implemented by this server; no request was created.",
+    "docs": "https://handoff.example.com/errors/unsupported_requires_version"
+  }
+}

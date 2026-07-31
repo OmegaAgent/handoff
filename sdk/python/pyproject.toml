@@ -1,0 +1,52 @@
+[project]
+name = "handoff-human"
+version = "0.2.0"
+description = "await human() for AI agents: one human answer, delivered exactly once as typed data, authorizing exactly one effect"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Noureddin Bakir" }]
+keywords = ["ai", "agents", "human-in-the-loop", "approvals", "audit", "protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = []  # the SDK is standard library only, on purpose
+
+[project.urls]
+Homepage = "https://github.com/OmegaAgent/handoff"
+Source = "https://github.com/OmegaAgent/handoff"
+Issues = "https://github.com/OmegaAgent/handoff/issues"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# `human` is the deprecated 0.1.x module name, kept as a re-export for one minor
+# version and removed in 0.3.0.
+packages = ["handoff", "human"]
+
+[tool.ruff]
+# There was no lint configuration at all, so `ruff check .` meant "whatever ruff shipped this
+# morning": the same unchanged tree reported 7 findings on one version and 188 on another. CI
+# pins the version and this pins the rules, and neither is any use without the other.
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+# Ruff's own default selection: the correctness rules (`F`) and the pycodestyle errors that are
+# not about whitespace or line length. No formatter runs over this tree, so a line-length rule
+# here would be a limit chosen to fit the code that already exists, which measures nothing.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# In `tests/`, a module-scope import is how the public surface is asserted. `test_surface.py`
+# opens "The public surface: declarations, the error taxonomy, and what must never be printed"
+# and imports `AuthorizationSpent` to state that the name is importable; nothing else in the file
+# refers to it, and that is the point. Deleting the import to satisfy F401 would delete the
+# assertion, so the rule is switched off exactly where it is wrong and nowhere else.
+"tests/*" = ["F401"]

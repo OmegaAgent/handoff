@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.handoff.dev/v0.1/policy.schema.json",
+  "title": "Handoff Tenant Policy",
+  "description": "The deployment-side configuration a server resolves at raise time and snapshots onto each request, so that a policy edit mid-flight cannot retroactively change what happened. Policy governs WHO is reached and HOW LONG we wait. It MUST NOT govern WHETHER a request may be raised, and it MUST NOT be able to force requests into `gated` mode — blocking is a property a request declares, never a policy imposed on a class of actions.",
+  "type": "object",
+  "required": ["v", "org_id"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "Envelope version. A server that does not implement the declared version MUST reject the policy and MUST NOT apply it partially (I21)."
+    },
+    "org_id": { "$ref": "request.schema.json#/$defs/OrgId" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "updated_by": { "$ref": "request.schema.json#/$defs/PrincipalId" },
+
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Applied when a request does not declare its own value. A request MAY raise an authority floor and MUST NOT lower one.",
+      "properties": {
+        "ttl": {
+          "oneOf": [{ "$ref": "request.schema.json#/$defs/Duration" }, { "type": "null" }],
+          "description": "Null means requests do not expire by default. The ask then stands until answered, cancelled, or superseded."
+        },
+        "ttl_policy": { "$ref": "request.schema.json#/$defs/TtlPolicy" },
+        "attempt_ttl": {
+          "$ref": "request.schema.json#/$defs/Duration",
+          "default": "PT15M",
+          "description": "One attempt window for every capability and every field set. A server MUST NOT vary it by interaction type."
+        },
+        "authority": { "$ref": "request.schema.json#/$defs/Authority" },
+        "liveness": { "enum": ["durable", "leased"] },
+        "on_waiter_terminal": { "enum": ["keep", "cancel"] },
+        "mode": {
+          "const": "advisory",
+          "description": "Fixed. A deployment MUST NOT default requests to `gated`; that setting would re-create an interception gate, which is outside this protocol."
+        }
+      }
+    },
+
+    "authority_floors": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Minimums a request cannot go below. The derived secret-field floor of the specification applies regardless of what is written here.",
+      "properties": {
+        "min_role": { "enum": ["viewer", "editor", "admin"] },
+        "min_auth_strength": { "enum": ["link_only", "session", "reauth", "mfa"], "default": "session" },
+        "allow_link_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "A server MUST NOT accept auth_strength `link_only` unless this is explicitly true. When it is, the receipt records actor.type = \"anonymous_link\" and names no principal."
+        },
+        "secret_field_min_role": {
+          "enum": ["admin"],
+          "default": "admin",
+          "description": "Derived, not configurable downward: any request declaring a `secret` field is raised to this role."
+        }
+      }
+    },
+
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The escalation ladder. The client declares urgency; the server decides the channel.",
+      "properties": {
+        "default_targets": { "type": "array", "items": { "$ref": "request.schema.json#/$defs/Target" } },
+        "ladders": {
+          "type": "object",
+          "description": "Keyed by urgency. A request's declared urgency selects a ladder; the resolved ladder is snapshotted onto the request.",
+          "additionalProperties": false,
+          "properties": {
+            "low": { "$ref": "request.schema.json#/$defs/Routing" },
+            "normal": { "$ref": "request.schema.json#/$defs/Routing" },
+            "high": { "$ref": "request.schema.json#/$defs/Routing" },
+            "critical": { "$ref": "request.schema.json#/$defs/Routing" }
+          }
+        },
+        "allow_request_override": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a request may supply its own ladder. Doing so requires a separate scope from raising a request: a key that can ask a question is a different blast radius from one that can page an on-call engineer at 3 a.m."
+        },
+        "quiet_hours": {
+          "type": "array",
+          "description": "Windows in which a channel is suppressed rather than attempted. A suppressed delivery is recorded, never silently dropped.",
+          "items": {
+            "type": "object",
+            "required": ["channels", "from", "to", "timezone"],
+            "additionalProperties": false,
+            "properties": {
+              "channels": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+              "from": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+              "to": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+              "timezone": { "type": "string", "description": "IANA time zone name." },
+              "override_urgency": {
+                "enum": ["critical"],
+                "description": "The one urgency permitted to break the window, if any."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "channels": {
+      "type": "array",
+      "description": "Every registered channel adapter declares what it can prove and whether it can identify a person. These declarations are what keep the core branch-free.",
+      "items": {
+        "type": "object",
+        "required": ["channel", "max_grade", "can_authenticate_person"],
+        "additionalProperties": false,
+        "properties": {
+          "channel": { "type": "string" },
+          "enabled": { "type": "boolean", "default": true },
+          "max_grade": {
+            "enum": ["dispatched", "delivered", "seen", "acted"],
+            "description": "The highest evidence this channel can produce. A server MUST NOT record a grade above it."
+          },
+          "can_authenticate_person": {
+            "type": "boolean",
+            "description": "False means answers from this channel are provisional and MUST be completed on an answer-capable surface (I6)."
+          },
+          "requires_binding": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether a channel identity must be verifiably bound to a principal before its answers count. Binding MUST be an act by an already-authenticated person, never an assertion by the channel."
+          },
+          "config_ref": { "type": "string", "description": "Opaque adapter configuration reference. Never a credential by value." }
+        }
+      }
+    },
+
+    "callbacks": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "See signing.md. A server MUST support at least two simultaneously active secrets per endpoint so rotation is an overlap, not a cutover.",
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["url"],
+            "additionalProperties": false,
+            "properties": {
+              "url": { "type": "string", "format": "uri" },
+              "secret_refs": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 2,
+                "description": "References only. A secret value MUST NOT appear in a policy document."
+              },
+              "state": { "enum": ["active", "disabled"], "description": "An endpoint failing every attempt for 24 hours MUST be disabled and the tenant notified." },
+              "max_attempts": { "type": "integer", "minimum": 1, "default": 12 },
+              "timeout_seconds": { "type": "integer", "minimum": 1, "default": 10 }
+            }
+          }
+        },
+        "replay_window_seconds": { "type": "integer", "const": 300 }
+      }
+    },
+
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "grant_ttl": { "$ref": "request.schema.json#/$defs/Duration", "description": "Tracks the request's attempt deadline and is renewed whenever the attempt is re-armed." },
+        "session_lease": { "$ref": "request.schema.json#/$defs/Duration", "default": "PT2M", "description": "Bounds revocation lag and produces the recorded held duration." },
+        "max_shared_with": {
+          "enum": ["isolated", "request", "space", "org"],
+          "description": "The widest blast radius this tenant will auto-page for. This is the one blast-radius field the core compares; everything else in the object is opaque provider text."
+        },
+        "record_navigations": {
+          "enum": ["none", "origin", "full_url"],
+          "default": "origin",
+          "description": "Granularity of the navigation record. Input content is never recordable at any setting."
+        }
+      }
+    },
+
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Receipts are append-only; retention governs how long they are served, never whether they may be altered.",
+      "properties": {
+        "receipts": { "$ref": "request.schema.json#/$defs/CalendarDuration" },
+        "rendered_copies": { "$ref": "request.schema.json#/$defs/CalendarDuration" },
+        "delivery_attempts": { "$ref": "request.schema.json#/$defs/CalendarDuration" }
+      }
+    },
+
+    "x-extensions": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Vendor extensions. Stored verbatim, returned verbatim, never interpreted."
+    }
+  }
+}

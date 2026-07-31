@@ -1,0 +1,52 @@
+# The managed deployment. CLOSED SOURCE.
+#
+# This workspace is the future contents of `OmegaAgent/handoff-cloud`, a private repository. It is
+# kept in this tree during development so that a change to the open core and the adapter that
+# consumes it can be compiled together; extracting it is a `git mv` and the dependency edit noted
+# below.
+#
+# Nothing here may be relicensed, published, or moved into `core/`. The boundary is made mechanical
+# rather than remembered: `license = "UNLICENSED"` and `publish = false` are workspace-wide, so
+# opening something would have to be a visible diff that overrides both.
+[workspace]
+resolver = "2"
+members = ["crates/handoff-omegas"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "UNLICENSED"
+publish = false
+authors = ["Omegas"]
+
+[workspace.dependencies]
+# EXTRACTION NOTE — the one line that changes when this workspace moves to `handoff-cloud`.
+#
+# These are path dependencies only because the open core and this adapter currently share a working
+# tree. In `handoff-cloud` they become TAG pins:
+#
+#     handoff-server = { git = "https://github.com/OmegaAgent/handoff", tag = "core/v0.1.0" }
+#
+# A tag, never a branch, never a path, and never a `[patch]` entry — a `[patch.crates-io]` line for a
+# `handoff-*` crate is the moment the fork begins. `no_patch_section_exists` in `lib.rs` asserts the
+# absence of one so that the rule is a build failure rather than a convention.
+handoff-protocol = { path = "../core/crates/handoff-protocol" }
+handoff-core = { path = "../core/crates/handoff-core" }
+handoff-store-postgres = { path = "../core/crates/handoff-store-postgres" }
+handoff-server = { path = "../core/crates/handoff-server" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["std", "serde", "clock"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "chrono"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8"] }
+base64 = "0.22"
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"

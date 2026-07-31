@@ -1,0 +1,277 @@
+id: C-8
+title: A capability is an opaque handle, and a resolved address exists in exactly one place
+level: 1
+invariants: [I8, I19]
+spec:
+  - "§11.1 — the protocol never carries a resolvable address by value, anywhere"
+  - "§11.2 — resolution is a separate, authenticated call"
+  - "§11.4 — a handle replayed after use, expiry, revocation, or by another subject is rejected"
+  - "§11.5 — blast radius is declared and binds the resolve"
+  - "§18 C-8 — this is a scan, not a unit test"
+rationale: >
+  A grant handle is a database pointer, not a credential. The single resolvable URL in a conforming
+  system is minted at resolve time, bound to one session, and never persisted — so the scan below
+  deliberately excludes the resolve response itself and asserts the URL appears in no other
+  artifact. The replay assertions matter because a bearer URL that keeps working after the session
+  ends is exactly the failure the handle design exists to prevent: it cannot be revoked
+  individually and it cannot be rotated without rotating everything.
+
+requires:
+  principals: [machine_a, human_admin, human_editor_2, anonymous]
+
+steps:
+  - name: raise a request that hands the person a live surface
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c08-${run_id}"
+      body:
+        waiter_ref: "run:c08-${run_id}"
+        prompt:
+          title: "Clear the sign-in challenge on app.example.com"
+          body: "The site is asking for a code we cannot read."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: cleared
+                type: attestation
+                required: true
+          capabilities:
+            - handle: "hg_01K3M7QW8ZC4YRXB2N6VD9FTHG"
+              type: interactive_surface
+              scope: drive
+              provider: "conformance/browser"
+              resource_ref: "opaque:bs_4KpQ"
+              label: "the browser the agent is driving"
+              purpose: "Finish the challenge yourself."
+              optional: false
+              ttl: PT15M
+          authority: {min_role: admin, auth_strength: session}
+        metadata:
+          hint: takeover
+      expect:
+        status: 201
+        body:
+          - path: requires.capabilities[0].handle
+            matches: "^hg_"
+          - path: requires.capabilities[0].url
+            exists: false
+            because: "§11.1 — not a URL, not an endpoint, not a token, anywhere in the declaration"
+          - path: requires.capabilities[0].transport
+            exists: false
+      capture:
+        req: id
+        grant: requires.capabilities[0].handle
+
+  - name: reading the grant shows the blast radius and still no address
+    http:
+      method: GET
+      path: /grants/${grant}
+      as: human_admin
+      expect:
+        status: 200
+        body:
+          - path: blast_radius.summary
+            exists: true
+            because: "§11.5.1 — the summary is rendered before the control that resolves the grant"
+          - path: blast_radius.shared_with
+            one_of: [isolated, request, space, org]
+            because: "§11.5 — the one field the core can compare, so it is a closed vocabulary"
+          - path: blast_radius_digest
+            matches: "^sha256:[0-9a-f]+$"
+          - path: transport
+            exists: false
+            because: "§11.2 — a transport URL exists only on a resolved session"
+      capture:
+        radius: blast_radius_digest
+
+  - name: resolving without a session is refused
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: anonymous
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "${radius}"
+      expect:
+        status: 401
+        body:
+          - path: error.code
+            one_of: [authentication_required, invalid_api_key]
+            because: >
+              §4.6 — possession of a handle is never authorization. Resolution is performed by the
+              person's own authenticated client.
+
+  - name: resolving with a blast radius the person never saw is refused
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: human_admin
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      expect:
+        status: 409
+        body:
+          - path: error.code
+            equals: blast_radius_mismatch
+            because: >
+              §11.5.2 — the person must not be handed something other than what they were shown.
+              "I accepted" has to mean "I accepted this".
+
+  - name: the person resolves the grant
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: human_admin
+      headers:
+        Idempotency-Key: "c08-resolve-1-${run_id}"
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "${radius}"
+      expect:
+        status: 200
+        body:
+          - path: transport.url
+            matches: "^(https|wss?)://"
+          - path: scopes
+            length_at_least: 1
+          - path: lease_until
+            exists: true
+      capture:
+        session1: session_ref
+        url1: transport.url
+
+  - name: a second resolve mints a different address
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: human_admin
+      headers:
+        Idempotency-Key: "c08-resolve-2-${run_id}"
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "${radius}"
+      expect:
+        status: 200
+        body:
+          - path: transport.url
+            differs_from: url1
+            because: >
+              §11.2 — the URL is minted at resolve time and bound to a single session. A stable URL
+              would be a bearer value under another name.
+      capture:
+        session2: session_ref
+        url2: transport.url
+
+  - name: another subject cannot take the same grant
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: human_editor_2
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "${radius}"
+      expect:
+        status_in: [403, 409]
+        body:
+          - path: error.code
+            one_of: [grant_already_held, insufficient_authority]
+            because: >
+              §11.2.5 — the grant binds to its first holder unless max_holders > 1. Two people
+              driving one surface is how a takeover becomes unattributable.
+
+  - name: the person revokes the grant
+    http:
+      method: DELETE
+      path: /grants/${grant}
+      as: human_admin
+      body:
+        reason: "finished with it"
+      expect:
+        status: 204
+
+  - name: a revoked handle resolves nothing
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: human_admin
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "${radius}"
+      expect:
+        status_in: [403, 404, 409, 410]
+        body:
+          - path: error.code
+            one_of: [capability_not_found, capability_expired, insufficient_authority]
+            because: >
+              §11.4 — revocation is a single operation on a single grant, and a replayed handle
+              after revocation is rejected
+
+  - name: the request settles, which revokes anything still open
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_admin
+      headers:
+        Idempotency-Key: "c08-answer-${run_id}"
+      body:
+        values: {cleared: true}
+        capability_uses:
+          - handle: "${grant}"
+            session_ref: "${session1}"
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+
+  - name: a terminal request resolves nothing
+    http:
+      method: POST
+      path: /grants/${grant}/sessions
+      as: human_admin
+      body:
+        scopes: [drive]
+        accepted_blast_radius_digest: "${radius}"
+      expect:
+        status_in: [403, 404, 409, 410]
+        body:
+          - path: error.code
+            exists: true
+            because: >
+              §11.2.1 and §11.4 — a terminal request resolves nothing, and a Server revokes all open
+              grants implicitly when the request settles
+
+  - name: the receipt records the capability by digest and without input content
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: capabilities_exercised[0].handle
+            same_as: grant
+          - path: capabilities_exercised[0].blast_radius_digest
+            same_as: radius
+            because: "§11.5.3 — the receipt records the digest only, never the full content"
+          - path: ""
+            not_contains_text: "${url1}"
+            because: "§11.1 — a receipt never carries a resolvable address"
+
+  - name: no protocol artifact anywhere holds either resolved address
+    scan:
+      for: ["${url1}", "${url2}"]
+      in: [urls, headers, request, receipt, deliveries, signals, logs]
+      request: "${req}"
+      waiter_ref: "run:c08-${run_id}"
+      as: machine_a
+      because: >
+        §11.1 — not in a request, not in a receipt, not in a delivery body, not in an event, not in
+        a waiter signal, and not in any message sent to a channel. The resolve response is
+        deliberately excluded from this scan: it is the one place a resolvable address is allowed
+        to exist, and asserting it is absent there would be asserting the wrong thing.

@@ -1,0 +1,431 @@
+id: C-23
+title: Every transition emits its event in the same transaction as the state change
+level: 1
+invariants: [I12]
+spec:
+  - "§6.2 — every transition MUST emit its event in the same transaction as the state change"
+  - "§8.2 — the waiter transitions"
+  - "§18 C-23"
+rationale: >
+  §18 calls this the case an implementation is most tempted to skip, and the reason is exact:
+  emitting the event just after the commit passes every happy-path test. It only fails under a
+  crash, and by then the record and the state disagree permanently — a request that is `answered`
+  with no `request.answered` event, or an event for a rollback that never happened. Neither is
+  recoverable, because there is no later moment at which the system can work out which of the two
+  was true.
+
+  The observable half of this is driven over HTTP: every transition in §6.2 that a black-box client
+  can trigger is triggered, and after each one the state and the event record are read together and
+  must agree. The crash half cannot be: killing a process between two writes is not an HTTP
+  operation, so the deployment supplies it.
+
+  ## What the deployment must supply
+
+  - `events` — print the event records for `HANDOFF_ARG_REQUEST_ID`, one per line, each naming its
+    event type. This is how the suite sees the event record at all: the protocol defines events in
+    §6.2 but publishes no endpoint that lists them, so there is nothing for a black-box client to
+    read.
+  - `crash_between_state_and_event` — for the request named by `HANDOFF_ARG_REQUEST_ID`, induce a
+    settling write and kill the Server between the state write and the event write, then restart it.
+    Exit 0 only if, after restart, **either both are present or neither is**. A deployment that
+    cannot induce this cannot demonstrate I12, and the case fails rather than passing quietly.
+
+requires:
+  principals: [machine_a, human_editor, human_editor_2]
+  hooks: [events, crash_between_state_and_event]
+
+steps:
+  - name: R1 — raise
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-raise-${run_id}"
+      body:
+        waiter_ref: "run:c23-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Approve the ledger adjustment?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+        attempt_ttl: PT2S
+        routing:
+          targets: [{kind: role, value: editor}]
+          ladder:
+            - {after: PT0S, channels: [inapp]}
+            - {after: PT5M, channels: [email]}
+      expect:
+        status: 201
+        body:
+          - path: state
+            equals: pending
+      capture:
+        req: id
+
+  - name: the raise emitted request.raised
+    hook:
+      hook: events
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.raised"]
+        because: "§6.2 R1 — insert the request and emit request.raised, in one transaction"
+
+  - name: R2 — amend
+    http:
+      method: POST
+      path: /requests/${req}/amend
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-amend-${run_id}"
+      body:
+        prompt:
+          title: "Approve the ledger adjustment?"
+          body: "Reconciled against the bank statement this morning."
+      expect:
+        status: 200
+        body:
+          - path: version
+            equals: 2
+
+  - name: the amendment emitted request.amended
+    hook:
+      hook: events
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.raised", "request\\.amended"]
+        because: "§6.2 R2 — merge forward, increment version, emit request.amended, atomically"
+
+  - name: R4 — escalate
+    http:
+      method: POST
+      path: /requests/${req}/escalate
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-escalate-${run_id}"
+      body: {}
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+
+  - name: the escalation emitted request.escalated
+    hook:
+      hook: events
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.escalated"]
+
+  - name: R3 — let the attempt lapse
+    http:
+      method: POST
+      path: /requests/${req}/attempt
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-arm-${run_id}"
+      body:
+        ttl: PT2S
+      expect:
+        status: 200
+
+  - name: wait for the lapse sweep
+    advance_clock:
+      by: PT5S
+
+  - name: the request is still pending and the lapse was recorded
+    poll:
+      timeout: PT30S
+      interval: PT2S
+      call:
+        method: GET
+        path: /requests/${req}
+        as: machine_a
+        expect:
+          status: 200
+          body:
+            - path: urgency_state
+              equals: waiting
+            - path: state
+              equals: pending
+
+  - name: the lapse emitted attempt.lapsed
+    hook:
+      hook: events
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches: ["attempt\\.lapsed"]
+        because: >
+          §6.2 R3 — stamp the lapse once, signal the waiter, re-list the request, emit
+          attempt.lapsed, in one transaction
+
+  - name: R5 — answer
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c23-answer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+
+  - name: the answer emitted request.answered alongside its receipt
+    hook:
+      hook: events
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.answered"]
+        because: >
+          §9.1 — the receipt is minted in the same transaction as the outcome, and §6.2 R5 emits the
+          event there too. A receipt with no event, or an event with no receipt, is I12 broken.
+
+  - name: R7 — cancel, on a second request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-raise-cancel-${run_id}"
+      body:
+        waiter_ref: "run:c23-cancel-${run_id}"
+        prompt:
+          title: "A request that will be withdrawn"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        cancelled: id
+
+  - name: cancel it
+    http:
+      method: POST
+      path: /requests/${cancelled}/cancel
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-cancel-${run_id}"
+      body:
+        reason: "no longer needed"
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: cancelled
+
+  - name: the cancellation emitted request.cancelled
+    hook:
+      hook: events
+      args:
+        request_id: "${cancelled}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.cancelled"]
+
+  - name: R8 — supersede, on a third and fourth request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-raise-old-${run_id}"
+      body:
+        waiter_ref: "run:c23-supersede-${run_id}"
+        prompt:
+          title: "Refund $2,400 to Acme Corp?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        old: id
+
+  - name: the successor, with the amount that actually changed
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-raise-new-${run_id}"
+      body:
+        waiter_ref: "run:c23-supersede-${run_id}"
+        dedupe_key: "c23-successor-${run_id}"
+        prompt:
+          title: "Refund $24,000 to Acme Corp?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        new: id
+
+  - name: supersede the old one
+    http:
+      method: POST
+      path: /requests/${old}/supersede
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-supersede-${run_id}"
+      body:
+        by: "${new}"
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: superseded
+          - path: superseded_by
+            same_as: new
+            because: "§6.2 R8 — superseded_by is linked both ways"
+
+  - name: the supersession emitted request.superseded
+    hook:
+      hook: events
+      args:
+        request_id: "${old}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.superseded"]
+
+  - name: R6 — expiry, on a fifth request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c23-raise-expire-${run_id}"
+      body:
+        waiter_ref: "run:c23-expire-${run_id}"
+        prompt:
+          title: "A request nobody will answer"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+        ttl: PT2S
+        ttl_policy:
+          on_expiry: expire_and_deny
+      expect:
+        status: 201
+      capture:
+        expiring: id
+
+  - name: wait for the TTL sweep
+    advance_clock:
+      by: PT5S
+
+  - name: the request expired
+    poll:
+      timeout: PT60S
+      interval: PT2S
+      call:
+        method: GET
+        path: /requests/${expiring}
+        as: machine_a
+        expect:
+          status: 200
+          body:
+            - path: state
+              equals: expired
+
+  - name: the sweep emitted request.expired
+    hook:
+      hook: events
+      args:
+        request_id: "${expiring}"
+      expect:
+        exit_code: 0
+        output_matches: ["request\\.expired"]
+        because: >
+          §6.2 R6 — a sweep is still a transition, and a background job that updates state and then
+          publishes is exactly the shape I12 forbids
+
+  - name: no event exists whose state change was rolled back
+    hook:
+      hook: events
+      args:
+        request_id: "${cancelled}"
+      expect:
+        exit_code: 0
+        output_not_matches: ["request\\.answered"]
+        because: >
+          this request was cancelled and never answered, so an answered event here would be an
+          event without its state change — the other direction of I12
+
+  - name: a crash between the state write and the event write leaves them agreeing
+    hook:
+      hook: crash_between_state_and_event
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches:
+          - "crash_point_reached=\\S+"
+          - "instance_exit=[1-9][0-9]*"
+          - "agree=yes"
+        because: >
+          §18 C-23 — kill the Server between the state write and the event write; after restart,
+          either both are present or neither is. This is the only assertion that distinguishes a
+          real transaction from an emit-after-commit that happens not to have crashed yet.
+
+          Which is exactly why an exit code cannot be the whole assertion here. "State and event
+          agree" is equally true of an answer that committed normally, so a deployment that never
+          implemented fault injection, answered the request and shut down tidily satisfies the
+          arithmetic without ever having crashed. The hook must therefore report that the crash
+          point was reached — that the process was interrupted at the seam this case is about —
+          and that it left by a fault rather than by exiting 0. A deployment that cannot induce
+          the crash has not demonstrated the property and must fail here rather than report
+          agreement it did not test.

@@ -1,0 +1,29 @@
+[package]
+name = "handoff-conformance"
+description = "The Handoff conformance suite. Runs the declarative cases against any base URL and reports pass/fail per case."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "handoff-conformance"
+path = "src/main.rs"
+
+# Deliberately no dependency on `handoff-protocol`, `handoff-core`, or any store crate. The runner is
+# a black-box HTTP client: it must be able to test an implementation written in any language, and a
+# shared type would let a bug in our own core cancel out against the same bug in the suite.
+[dependencies]
+hmac = "0.12"
+regex = "1"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ureq = "2"

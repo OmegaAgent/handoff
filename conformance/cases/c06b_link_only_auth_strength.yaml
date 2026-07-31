@@ -1,0 +1,115 @@
+id: C-6b
+title: link_only is refused where the deployment forbids it, and recorded honestly where it does not
+level: 1
+invariants: [I6, I2]
+spec:
+  - "§4.4 — link_only is defined but constrained"
+  - "§9.2 — actor.type is one of user, policy, runtime, anonymous_link"
+  - "§18 C-6b"
+rationale: >
+  `link_only` means possession of a single-use delivery token and nothing else: **no person is
+  identified**. It exists in the model so that implementations needing it are honest about it, not
+  so it becomes a convenient default. Both halves are conformance points, so this case covers both
+  and the deployment profile states which one applies. A receipt that cannot say who decided is not
+  a receipt — so where `link_only` is accepted, the actor must read `anonymous_link` and the Server
+  must not invent a principal identity it does not have.
+
+requires:
+  principals: [machine_a, human_link_only]
+
+steps:
+  - name: raise a request that declares the link_only grade
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c06b-${run_id}"
+      body:
+        waiter_ref: "run:c06b-${run_id}"
+        prompt:
+          title: "Confirm you received the parcel"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: received
+                type: attestation
+                required: true
+          capabilities: []
+          authority:
+            min_role: viewer
+            auth_strength: link_only
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a deployment that forbids link_only refuses the answer
+    when: {flag: link_only_permitted, is: false}
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_link_only
+      headers:
+        Idempotency-Key: "c06b-answer-${run_id}"
+      body:
+        values: {received: true}
+      expect:
+        status: 403
+        body:
+          - path: error.code
+            equals: auth_strength_not_permitted
+            because: >
+              §4.4 — a deployment profile MAY forbid link_only entirely, and when it does the code
+              is specific: this is not a role the caller could be granted.
+
+  - name: and the request stays pending, still answerable by an identified person
+    when: {flag: link_only_permitted, is: false}
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+          - path: receipt
+            is_null: true
+
+  - name: a deployment that opted in accepts the answer
+    when: {flag: link_only_permitted, is: true}
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_link_only
+      headers:
+        Idempotency-Key: "c06b-answer-${run_id}"
+      body:
+        values: {received: true}
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+
+  - name: and the receipt says plainly that nobody was identified
+    when: {flag: link_only_permitted, is: true}
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: actor.type
+            equals: anonymous_link
+            because: "§4.4 — the receipt records the grade honestly rather than implying a person"
+          - path: actor.principal_id
+            is_null: true
+            because: >
+              §4.4 — a Server MUST NOT record a principal identity it does not have. A receipt that
+              names a user here would be a fabricated person.
+          - path: actor.auth_strength
+            equals: link_only

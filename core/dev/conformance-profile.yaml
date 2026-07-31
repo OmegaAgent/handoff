@@ -1,0 +1,71 @@
+# Deployment profile for running the Handoff conformance suite against handoffd.
+#
+# Everything the suite cannot discover over HTTP: credentials, the deployment choices the
+# specification leaves open, and the few probes that must reach below the API. The credentials here
+# belong to a disposable conformance database and are the only ones this file should ever hold.
+
+principals:
+  # Tenant A: org_01K3M7QW8ZC4YRXB2N6VD9FTHA
+  machine_a:       {kind: machine,      token: "omg_handoff_test_ka_conformance", org: org_a}
+  # A SECOND machine in the same tenant, which C-5 needs and nothing else does. Without it the only
+  # machine that ever calls /answer is the one that raised the request, so "refused because it is a
+  # machine" and "refused because it is the requester" are the same observation — and a Server that
+  # checked identity instead of principal type would pass the whole suite while letting one agent
+  # approve another agent's refund.
+  machine_a2:      {kind: machine,      token: "omg_handoff_test_ka2_conformance", org: org_a}
+  human_editor:    {kind: human_bearer, token: "hs_editor_one_conformance",       org: org_a}
+  human_editor_2:  {kind: human_bearer, token: "hs_editor_two_conformance",       org: org_a}
+  human_viewer:    {kind: human_bearer, token: "hs_viewer_conformance",           org: org_a}
+  human_admin:     {kind: human_bearer, token: "hs_admin_conformance",            org: org_a}
+  # Possession of a single-use delivery token and nothing else. No person is identified.
+  human_link_only: {kind: human_bearer, token: "lnk_single_use_conformance",      org: org_a}
+
+  # Tenant B: org_01K3M7QW8ZC4YRXB2N6VD9FTHB. C-19 and C-20 cannot run at all without a genuinely
+  # separate second tenant.
+  machine_b:       {kind: machine,      token: "omg_handoff_test_kb_conformance", org: org_b}
+
+deployment:
+  # §4.4. This deployment refuses an answer at the link_only grade. The raise that declares the
+  # grade is still accepted; it is the answer that is refused, with auth_strength_not_permitted.
+  link_only_permitted: false
+
+hooks:
+  logs: "tail -n 5000 \"${HANDOFF_RUN_DIR:-core/dev/.run}/handoffd.log\""
+
+  # C-15. One mutation, aimed where the suite says, as the application's own database role. The
+  # receipt targets must be REFUSED by the storage engine itself, because §9.4 puts the application
+  # inside the threat model; the request target must be APPLIED, which is how the suite tells a
+  # refusal apart from a command that never ran.
+  #
+  # There is no chain hook here any more. The suite walks the chain itself, over the receipts it
+  # reads from this deployment's HTTP surface, in its own implementation of signing.md §2.2 — so
+  # `receipt_chain_verify` and `chain_tamper_is_detected` are gone rather than tightened. A
+  # deployment cannot narrate a digest it did not compute.
+  storage_mutate: "core/dev/scripts/storage-mutate.sh"
+
+  # C-24. RFC 8785 canonicalization, checked against the published signing fixtures.
+  canonicalize: "core/dev/scripts/canonicalize.sh"
+
+  # C-21. The protocol defines the outbound delivery model but no inbound channel-adapter surface,
+  # so the deployment injects the message.
+  channel_inbound: "core/dev/scripts/inject-channel-message.sh"
+
+  # C-22. The runtime observing the target change, with no person asserting anything.
+  observe_page_state_change: "core/dev/scripts/observe-page-change.sh"
+
+  # C-23. The event record, and the crash that proves the two writes are one transaction.
+  events: "core/dev/scripts/dump-events.sh"
+  crash_between_state_and_event: "core/dev/scripts/crash-between-writes.sh"
+
+callback:
+  bind: "127.0.0.1:0"
+  # Two active secrets, because rotation is an overlap and C-18 cannot observe one with a single
+  # secret. handoffd is started with both in HANDOFF_CALLBACK_SECRETS.
+  secret: "whsec_2f8a91c4e7b3d05a6c1e9f47b28d3a05"
+  secret_previous: "whsec_9d41c07be5a2f36819b4d0e7c5a81f62"
+
+# Longest the suite will sleep in real time. The TTL cases advance by PT5S and the callback case by
+# PT20S; handoffd sweeps every 250 ms, so real time is fast enough and no clock hook is needed.
+max_real_sleep: PT30S
+
+fixtures_root: spec/fixtures

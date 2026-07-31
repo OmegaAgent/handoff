@@ -1,0 +1,119 @@
+id: C-6
+title: An answerer below the declared min_role is refused, and authority is checked at answer time
+level: 1
+invariants: [I6]
+spec:
+  - "§4.3 — authority is declared on the request and evaluated at answer time"
+  - "§4.4 — auth_strength grades"
+  - "§18 C-6"
+rationale: >
+  Required authority is data on the request, not a branch per endpoint. It is evaluated against the
+  answerer's identity **at the moment of the answer**, so a role checked at raise time and cached is
+  wrong: the person who ends up clicking is not necessarily the person the ask was addressed to.
+  The receipt must then say both what was required and what was satisfied, or an audit cannot tell
+  a properly authorized decision from a lucky one.
+
+requires:
+  principals: [machine_a, human_viewer, human_editor]
+
+steps:
+  - name: raise a request that requires the editor role
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c06-${run_id}"
+      body:
+        waiter_ref: "run:c06-${run_id}"
+        prompt:
+          title: "Refund $2,400 to Acme Corp?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Refund it"}
+                  - {id: reject, label: "Don't refund"}
+          capabilities: []
+          authority:
+            min_role: editor
+            auth_strength: session
+            reason: "a refund leaves the building"
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a viewer tries to answer
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_viewer
+      headers:
+        Idempotency-Key: "c06-viewer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 403
+        body:
+          - path: error.code
+            equals: insufficient_authority
+            because: "§4.4 — an answer below the declared grade is refused"
+
+  - name: the request is still pending and still answerable
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+          - path: receipt
+            is_null: true
+
+  - name: an editor answers the same request
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c06-editor-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+
+  - name: the receipt records what was required and what was satisfied
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: authority.required.min_role
+            equals: editor
+            because: "§9.2 — the receipt records what was required"
+          - path: authority.satisfied
+            equals: session
+            because: >
+              §9.2 — and separately what was actually satisfied. openapi.yaml types
+              `authority.satisfied` as the achieved auth_strength string; the prose example in §9.2
+              shows an object, and openapi.yaml is authoritative for syntax.
+          - path: actor.type
+            equals: user
+            because: "§9.2 — a Server MUST NOT record `user` unless it authenticated a person"
+          - path: actor.principal_id
+            matches: "^usr_"
+          - path: actor.role_at_decision
+            equals: editor
+            because: "§4.4 — the role is a snapshot taken at the decision, not read back later"

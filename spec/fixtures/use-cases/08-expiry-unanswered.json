@@ -1,0 +1,25 @@
+{
+  "pattern": "expiry-when-nobody-answers",
+  "note": "NOT a request shape either. It is the TTL policy of the request plus transitions R3 and R6. The waiter receives a typed terminal answer; it never receives silence. The receipt names the policy, so no audit can mistake it for consent.",
+  "raise": null,
+  "answer": null,
+  "expect": {
+    "at_attempt_lapse": {
+      "signal_type": "attempt_lapsed",
+      "signal_count": 1,
+      "state": "pending",
+      "urgency_state": "waiting",
+      "still_listed": true,
+      "still_answerable": true
+    },
+    "at_request_expiry": {
+      "state": "expired",
+      "signal_type": "expired",
+      "effective": "deny",
+      "receipt_kind": "policy",
+      "receipt_actor_type": "policy",
+      "receipt_authority_satisfied": "none"
+    },
+    "waiter_never_receives_silence": true
+  }
+}

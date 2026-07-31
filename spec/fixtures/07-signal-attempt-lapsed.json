@@ -1,0 +1,14 @@
+{
+  "id": "sig_01K3MB2R4T8ZC4YRXB2N6VD9FT",
+  "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+  "waiter_ref": "run:0198f2a1",
+  "type": "attempt_lapsed",
+  "sequence": 1,
+  "resume_token": "rt_01K3MB2R578ZC4YRXB2N6VD9FT",
+  "decision": null,
+  "resume_ref": null,
+  "resume_payload": null,
+  "attempts": 1,
+  "created_at": "2026-07-30T14:22:11Z",
+  "acked_at": null
+}

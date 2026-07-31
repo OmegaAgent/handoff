@@ -1,0 +1,268 @@
+id: C-15
+title: Storage itself refuses to update or delete a receipt, and the hash chain proves history
+level: 1
+invariants: [I2]
+spec:
+  - "§9.4 — immutability enforced in three layers: application, storage, chain"
+  - "§9.5 — a correction is a new receipt, never an edit"
+  - "§18 C-15 — must be asserted from the storage layer, not through the application"
+rationale: >
+  §9.4 is explicit that application-level immutability is insufficient, **because the threat
+  includes the application**. Asserting this over HTTP alone would only prove that the API has no
+  update route, which is the easy half.
+
+  ## What this case measures, and what it takes on trust
+
+  Two rounds of review defeated the earlier version of this case, and the second defeat is worth
+  stating plainly because it shaped the case you are reading. Every assertion here used to be a
+  sentence a deployment-supplied hook printed. A reviewer replaced all four hooks with about fifteen
+  lines of shell that touched no storage and ran no verifier — echoing the receipt id and the chain
+  head, both of which the suite had handed them as arguments, and brute-forcing the one value it had
+  not — and got a complete green run against a deployment with mutable receipts and no chain
+  verifier at all.
+
+  The rule that came out of it: **a claim the suite can compute, the suite computes.** Asking the
+  party under test for the answer measures its willingness to answer.
+
+  So the chain is no longer a hook. The suite reads the tenant's receipts from the deployment's own
+  HTTP surface and walks them in its own implementation of `signing.md` §2.2 — recomputing every
+  `chain.digest` from the receipt's own content, requiring the exported head to be the head that
+  walk arrives at, and then rewriting each receipt in turn to require the walk to break. A
+  deployment that has not built a chain cannot serve receipts whose stored digests are those hashes.
+  There is nothing here to narrate.
+
+  The storage layer is different in kind, and the case says so rather than implying otherwise.
+  Nothing the suite can send over HTTP attempts an `UPDATE`, and no verifier can distinguish "the
+  engine refused my write" from "I never wrote" by looking at an unchanged row. What the suite can
+  do — and does — is refuse to accept a sentence as the outcome:
+
+  - Every attempt is followed by **re-reading the receipt over HTTP** and requiring byte-identical
+    bytes. A refusal that is really a mutation that landed fails here.
+  - The same command, aimed at a row the engine **does** permit writing, must land and must become
+    visible over HTTP. A hook that touches no storage cannot make a nonce appear in a request the
+    suite then reads back. This is what ties the deployment's storage seam to the API this suite
+    talks to — and it is what makes the two refusals mean something rather than nothing.
+
+  What remains attested rather than measured is narrow and stated here so nobody has to infer it: a
+  deployment that implements `storage_mutate` honestly for `target: request` and stubs the
+  `target: receipt` branch has written a deliberate lie, and this case would not catch it.
+  `conformance/GATE.md` lists that alongside C-23's crash probe as the assertions a published run
+  attests rather than demonstrates. Closing it needs the suite to perform the mutation itself
+  against a supplied store credential, which needs a database driver per engine — see `BACKLOG.md`.
+
+  ## What the deployment must supply
+
+  One command under `hooks:`, `storage_mutate`, invoked with its arguments as environment variables
+  named `HANDOFF_ARG_<KEY>`:
+
+  | argument | values |
+  |---|---|
+  | `target` | `receipt` or `request` — the stored object to aim at |
+  | `operation` | `update` or `delete` |
+  | `id` | the object's id, as the HTTP surface reports it |
+  | `value` | for an update, the value to write where the object's content would show it |
+
+  It must be **one command, parameterized** — the same statement shape for every target, as the
+  application's own database role. An update writes `value` somewhere the object's HTTP
+  representation would show it: a receipt's `decision.note`, a request's `prompt.title`. It exits
+  with whatever the engine returns.
+
+  A conforming deployment has a rule, trigger or grant that refuses both operations on a receipt, so
+  those two exit non-zero, and permits them on a request, so that one exits zero.
+
+requires:
+  principals: [machine_a, human_editor]
+  hooks:
+    - storage_mutate
+
+steps:
+  - name: raise and answer, producing a receipt
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c15-${run_id}"
+      body:
+        waiter_ref: "run:c15-${run_id}"
+        prompt:
+          title: "Approve the vendor payment?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Pay it"}
+                  - {id: reject, label: "Hold"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a person decides
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c15-answer-${run_id}"
+      body:
+        values: {decision: approve}
+        note: "Invoice matches the purchase order."
+      expect:
+        status: 200
+      capture:
+        receipt: receipt.id
+        digest: receipt.digest
+
+  - name: record the chain head before anything is attempted
+    http:
+      method: GET
+      path: /receipts/chain-head
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: head_digest
+            matches: "^sha256:"
+          - path: height
+            exists: true
+      capture:
+        head: head_digest
+        height: height
+
+  - name: the suite walks the chain itself, from the receipts the deployment served
+    verify_chain:
+      as: machine_a
+      receipts: /receipts
+      head: /receipts/chain-head
+      must_include: ["${receipt}"]
+      at_least: 1
+      because: >
+        §9.4.3 — the chain must verify over the full history, not just the newest entry. Every
+        digest here is recomputed from the receipt's own content by this suite's implementation of
+        `signing.md` §2.2, which shares no code with any server and is checked against the published
+        vectors in `spec/fixtures/signing/`. Two things follow that a hook could not establish: the
+        head this deployment exports is the head of the chain it serves, and its canonicalization
+        agrees with everyone else's — a receipt whose digest only its own server can reproduce is a
+        receipt nobody can verify, which is the whole property §9 exists for.
+
+        The walk then rewrites each receipt in turn and requires it to fail. A verification nobody
+        has watched fail is an instrument of unknown sensitivity, and §9.4's claim is per-entry:
+        altering *any* historical receipt invalidates the head.
+
+  - name: the same command, aimed at a row the engine does permit, really writes
+    storage_mutation:
+      hook: storage_mutate
+      args:
+        target: request
+        operation: update
+        id: "${req}"
+        value: "${nonce}-control"
+      expect: applied
+      observe:
+        path: /requests/${req}
+        as: machine_a
+        body:
+          - path: prompt.title
+            equals: "${nonce}-control"
+            because: >
+              The write reached the store this API reads from, so the seam the two refusals below
+              are attempted through is a live one.
+      because: >
+        The positive control, and the reason the refusals below are observations rather than
+        sentences. "The storage engine refused my write" and "I never wrote" look identical from
+        outside: both leave the receipt exactly as it was. So the same command, with the same shape,
+        is first aimed at a row the engine permits — and the suite requires the value to appear in
+        what the HTTP surface serves afterwards. A hook that touches no storage fails here, and a
+        hook pointed at some other database fails here too, because the nonce never reaches the
+        store this suite is reading.
+
+  - name: the storage engine refuses an UPDATE on the receipt
+    storage_mutation:
+      hook: storage_mutate
+      args:
+        target: receipt
+        operation: update
+        id: "${receipt}"
+        value: "${nonce}-update"
+      expect: refused
+      output_matches:
+        - "(?i)(append.?only|immutab|refus|reject|denied|not permitted|violat|read.?only)"
+      observe:
+        path: /requests/${req}/receipt
+        as: machine_a
+        body:
+          - path: id
+            same_as: receipt
+          - path: decision.values.decision
+            equals: approve
+          - path: chain.digest
+            same_as: digest
+          - path: chain.prev_digest
+            exists: true
+            because: "§9.4.3 — each receipt links to its predecessor in the same tenant"
+          - path: ""
+            not_contains_text: "${nonce}-update"
+            because: >
+              The value the mutation tried to write is nowhere in the receipt. This is the same fact
+              as the byte comparison the runner makes, said in a way a reader can check by eye.
+      because: >
+        §9.4.2 — the storage engine itself MUST reject mutation. This must be attempted from the
+        storage layer directly: an application that has no update route still fails this requirement
+        if its database role can write the row.
+
+        The exit code is not the assertion. `false` exits non-zero, which is exactly what a refused
+        mutation looks like from outside, so what decides this step is the receipt itself — read
+        again over HTTP after the attempt and required to be byte-for-byte what it was before.
+
+  - name: the storage engine refuses a DELETE on the receipt
+    storage_mutation:
+      hook: storage_mutate
+      args:
+        target: receipt
+        operation: delete
+        id: "${receipt}"
+      expect: refused
+      output_matches:
+        - "(?i)(append.?only|immutab|refus|reject|denied|not permitted|violat|read.?only)"
+      observe:
+        path: /requests/${req}/receipt
+        as: machine_a
+        body:
+          - path: id
+            same_as: receipt
+          - path: chain.digest
+            same_as: digest
+      because: >
+        §9.4.2 — deletion is rejected by storage for the same reason, and shown the same way: the
+        receipt is still served, and still byte-identical.
+
+  - name: the chain head is unchanged
+    http:
+      method: GET
+      path: /receipts/chain-head
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: head_digest
+            same_as: head
+          - path: height
+            same_as: height
+
+  - name: and the chain still verifies, after everything that was attempted against it
+    verify_chain:
+      as: machine_a
+      receipts: /receipts
+      head: /receipts/chain-head
+      must_include: ["${receipt}"]
+      at_least: 1
+      because: >
+        §9.4 — the walk is repeated after the attempts, so the case ends on the same measurement it
+        opened with rather than on the last thing a command said.

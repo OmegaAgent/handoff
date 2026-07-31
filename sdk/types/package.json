@@ -1,0 +1,39 @@
+{
+  "name": "@handoffproto/types",
+  "version": "0.1.0",
+  "description": "TypeScript declarations for the Handoff protocol, mirroring spec/openapi.yaml. Types only — no runtime, no dependencies.",
+  "license": "MIT",
+  "types": "index.d.ts",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.d.ts",
+    "scripts/check-drift.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "handoff",
+    "handoff-protocol",
+    "human-in-the-loop",
+    "openapi",
+    "types",
+    "typescript"
+  ],
+  "scripts": {
+    "check": "node scripts/check-drift.mjs",
+    "test": "node scripts/check-drift.mjs",
+    "typecheck": "tsc --noEmit --strict index.d.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

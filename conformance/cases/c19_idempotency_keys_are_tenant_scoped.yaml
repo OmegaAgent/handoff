@@ -1,0 +1,154 @@
+id: C-19
+title: Two tenants using the identical idempotency key both succeed and see only their own
+level: 1
+invariants: [I17, I20]
+spec:
+  - "§3.1 — Idempotency-Key is scoped (org_id, principal_id)"
+  - "§3.2.2 — every uniqueness constraint on a client-supplied key is scoped by tenant"
+  - "§18 C-19"
+rationale: >
+  §18 names this one of the two tests that pass in development and fail in production. An unscoped
+  uniqueness constraint does not merely risk a collision — it causes one tenant's key to silently
+  absorb another tenant's write. For a request store, that is a dropped human ask, and it produces
+  no error anywhere: tenant B's raise returns 200 with tenant A's request, tenant B's agent waits
+  on a request it cannot see, and nobody is paged. Nothing in the logs says anything went wrong.
+
+requires:
+  principals: [machine_a, machine_b]
+
+steps:
+  - name: tenant A raises with a key
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "shared-key-${run_id}"
+      body:
+        waiter_ref: "run:c19-a-${run_id}"
+        prompt:
+          title: "Tenant A: approve the refund?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req_a: id
+        org_a: org_id
+
+  - name: tenant B raises with the identical key and a different body
+    http:
+      method: POST
+      path: /requests
+      as: machine_b
+      headers:
+        Idempotency-Key: "shared-key-${run_id}"
+      body:
+        waiter_ref: "run:c19-b-${run_id}"
+        prompt:
+          title: "Tenant B: approve the payout?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+        body:
+          - path: id
+            differs_from: req_a
+            because: >
+              §3.2.2 — two tenants using the identical key MUST both succeed. A 200 here, returning
+              tenant A's request, is the silent absorption this case exists to catch.
+          - path: org_id
+            not_equals: "${org_a}"
+          - path: prompt.title
+            equals: "Tenant B: approve the payout?"
+            because: "tenant B got its own ask, not a copy of tenant A's"
+      capture:
+        req_b: id
+
+  - name: tenant A cannot see tenant B's request
+    http:
+      method: GET
+      path: /requests/${req_b}
+      as: machine_a
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: >
+              §3.2.3 — 404 rather than 403, so that the existence of another tenant's object is not
+              disclosed
+
+  - name: tenant B cannot see tenant A's request
+    http:
+      method: GET
+      path: /requests/${req_a}
+      as: machine_b
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+
+  - name: each still reads its own
+    http:
+      method: GET
+      path: /requests/${req_a}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: req_a
+          - path: org_id
+            same_as: org_a
+
+  - name: within one tenant the same key still collapses to one request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "shared-key-${run_id}"
+      body:
+        waiter_ref: "run:c19-a-${run_id}"
+        prompt:
+          title: "Tenant A: approve the refund?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: req_a
+            because: "tenant scoping widens nothing: inside one tenant, one key is still one request"

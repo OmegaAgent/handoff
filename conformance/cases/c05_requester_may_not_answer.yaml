@@ -1,0 +1,172 @@
+id: C-5
+title: A machine key calling /answer is refused by principal type
+level: 1
+invariants: [I15]
+spec:
+  - "§4.1 — a requester principal may never answer"
+  - "§4.2 — the requester ≠ decider rule, enforced by principal type"
+  - "§18 C-5"
+rationale: >
+  Without this rule an agent holding an API key can approve itself, and every other guarantee in the
+  specification is decoration. §4.2 is explicit that it is enforced by principal *type*, not by role
+  or scope or a deployment setting: there must be no configuration under which a machine can satisfy
+  a human-intervention request.
+
+  ## Why two machines and a person, when one machine looked like enough
+
+  For two rounds this case answered only with the key that raised the request — the most privileged
+  machine available — and asserted a refusal. A reviewer pointed out what that cannot see. For that
+  one principal, "is a machine" and "is the requester" are the same fact, so a Server that had
+  replaced the type check with `principal.id == request.created_by` passed every case in the suite
+  while letting **any other machine key answer** — one agent approving another agent's refund, which
+  is the exact thing §4.2 exists to forbid.
+
+  So the case now runs the three-way probe that tells the two rules apart:
+
+  - `machine_a2` — a different machine, same tenant, **not** the requester — is refused. Only the
+    principal-type rule refuses this one; the identity rule would allow it.
+  - `machine_a` — the requester itself — is refused. Both rules refuse this one.
+  - `human_editor` — a person — succeeds. This is the positive control, and without it the two
+    refusals above are equally consistent with an endpoint that refuses everybody.
+
+  A case that only ever observes refusals cannot distinguish enforcement from breakage.
+
+requires:
+  principals: [machine_a, machine_a2, human_editor]
+
+steps:
+  - name: raise a request as a machine principal
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c05-${run_id}"
+      body:
+        waiter_ref: "run:c05-${run_id}"
+        prompt:
+          title: "Approve your own refund?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: viewer, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a different machine, which did not raise it, tries to answer
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: machine_a2
+      headers:
+        Idempotency-Key: "c05-answer-other-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 403
+        body:
+          - path: error.code
+            equals: requester_may_not_answer
+            because: >
+              §4.2 — the rule is about principal *type*, so a machine that is not the requester is
+              refused for the same reason and with the same code as one that is. This is the step
+              that separates the load-bearing rule from a weaker one that would let a second agent
+              approve the first agent's request: a Server checking `principal.id ==
+              request.created_by` returns 200 here.
+
+  - name: the same machine key that raised it tries to answer
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: machine_a
+      headers:
+        Idempotency-Key: "c05-answer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 403
+        body:
+          - path: error.code
+            equals: requester_may_not_answer
+            because: >
+              §4.2 — a Server MUST enforce this by principal type. `insufficient_authority` would be
+              the wrong code: it implies a role that could be granted, and no role may ever grant a
+              machine the power to answer.
+
+  - name: nothing was decided
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+          - path: receipt
+            is_null: true
+          - path: authorization
+            is_null: true
+
+  - name: no receipt exists
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: "§9 — a receipt exists only once a decision has been made"
+
+  - name: a person answers the same request, and is not refused
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c05-answer-human-${run_id}"
+      body:
+        values: {decision: approve}
+        note: "Checked against the ledger."
+      expect:
+        status: 200
+        body:
+          - path: request.state
+            equals: answered
+            because: >
+              The positive control. Three refusals in a row are equally consistent with an endpoint
+              that refuses everybody, and a case made only of refusals cannot tell enforcement from
+              breakage.
+      capture:
+        receipt: receipt.id
+
+  - name: and the record says a person decided it
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: answered
+          - path: receipt.id
+            same_as: receipt
+          - path: receipt.actor.type
+            equals: user
+            because: >
+              §9.7 — the receipt names the person who decided. What the three refusals were
+              protecting is not the 403 itself: it is that the settled record can only ever say a
+              person answered.

@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.handoff.dev/v0.1/request.schema.json",
+  "title": "Handoff Request",
+  "description": "A durable ask directed at a person. `$id` is a stable identifier, not a fetchable location. Normative meaning is in handoff-protocol-v0.1.md; the wire contract is openapi.yaml.",
+  "type": "object",
+  "required": ["id", "state", "version", "org_id", "waiter_ref", "prompt", "requires", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "#/$defs/RequestId" },
+    "state": {
+      "enum": ["pending", "answered", "expired", "cancelled", "superseded"],
+      "description": "`pending` is the only non-terminal state. A server MUST NOT transition out of a terminal state."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Incremented by every amendment, including a progressive-disclosure step. The receipt records the version the person decided on."
+    },
+    "org_id": { "$ref": "#/$defs/OrgId" },
+    "waiter_ref": { "$ref": "#/$defs/WaiterRef" },
+    "urgency": { "enum": ["low", "normal", "high", "critical"], "default": "normal" },
+    "urgency_state": {
+      "enum": ["attention", "waiting"],
+      "description": "Becomes `waiting` when the attempt clock lapses. This MUST NOT affect the request's visibility (I4)."
+    },
+    "prompt": { "$ref": "#/$defs/Prompt" },
+    "requires": { "$ref": "#/$defs/Requires" },
+    "mode": {
+      "enum": ["advisory", "gated"],
+      "default": "advisory",
+      "description": "Declared per request. A deployment MUST NOT impose `gated` on a class of actions."
+    },
+    "presentation_binding": { "enum": ["advisory", "strict"], "default": "advisory" },
+    "liveness": { "enum": ["durable", "leased"], "default": "durable" },
+    "on_waiter_terminal": { "enum": ["keep", "cancel"] },
+    "ttl_policy": { "$ref": "#/$defs/TtlPolicy" },
+    "routing": { "$ref": "#/$defs/Routing" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Null means the request never expires. Absence of a TTL is legal and means the ask stands until answered, cancelled, or superseded."
+    },
+    "attempt_expires_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "The independent attempt clock. On lapse the waiter is nudged exactly once and the request stays pending and listed."
+    },
+    "answered_at": { "type": ["string", "null"], "format": "date-time" },
+    "superseded_by": { "oneOf": [{ "$ref": "#/$defs/RequestId" }, { "type": "null" }] },
+    "cancel_reason": { "type": ["string", "null"] },
+    "surface_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "A locator, not a capability. Opening it MUST prompt for authentication; possession of it is never authority."
+    },
+    "deliveries": { "type": "array", "items": { "$ref": "delivery-attempt.schema.json#/$defs/Delivery" } },
+    "receipt": {
+      "oneOf": [{ "$ref": "receipt.schema.json" }, { "type": "null" }],
+      "description": "Null while pending. At most one decision receipt ever exists for a request (I1)."
+    },
+    "authorization": {
+      "type": ["object", "null"],
+      "description": "Minted with the receipt. Single-use, redeemable idempotently per effect_key (I10). Full shape in openapi.yaml#/components/schemas/Authorization.",
+      "additionalProperties": true
+    },
+    "waiter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": { "enum": ["armed", "signalled", "delivering", "acked", "orphaned", "released"] },
+        "liveness": { "enum": ["durable", "leased"] }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Opaque to the server. `metadata.hint` is a non-normative analytics label; the core MUST NOT branch on it (I14). Keys prefixed `x-` are stored and returned verbatim and never interpreted.",
+      "additionalProperties": true
+    }
+  },
+
+  "$defs": {
+    "Ulid": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "RequestId": { "type": "string", "pattern": "^req_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "OrgId": { "type": "string", "pattern": "^org_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "PrincipalId": { "type": "string", "pattern": "^(usr|sa)_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "GrantHandle": { "type": "string", "pattern": "^hg_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "SinkRef": { "type": "string", "pattern": "^snk_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "Duration": {
+      "type": "string",
+      "pattern": "^P(?!$)(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$",
+      "description": "ISO 8601 duration of exact length, e.g. PT15M, PT4H, P1D, P2W. Years and months are not permitted: P1M is 28 to 31 days depending on when the clock starts, so a TTL or lease expressed in them is not a fixed length. For retention windows see CalendarDuration."
+    },
+    "CalendarDuration": {
+      "type": "string",
+      "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$",
+      "description": "ISO 8601 duration that may use years and months, resolved against a calendar. Used ONLY for retention windows. It MUST NOT be used for a TTL, an attempt window, a grant expiry, a session lease, or a ladder delay."
+    },
+
+    "WaiterRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Opaque, caller-owned grouping key naming the unit of work that is waiting. A server MUST NOT parse or interpret it."
+    },
+
+    "Prompt": {
+      "type": "object",
+      "required": ["title"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "body": { "type": "string", "description": "Markdown. Rendered to the person and covered by the receipt's rendered digest." },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/Evidence" } }
+      }
+    },
+
+    "Evidence": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["link", "table", "image", "document", "text"] },
+        "label": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "value": { "description": "Structured evidence, shape determined by `kind`." },
+        "ref": { "type": "string" }
+      }
+    },
+
+    "Requires": {
+      "type": "object",
+      "required": ["v"],
+      "additionalProperties": false,
+      "description": "The declaration that drives the renderer, the router, and the validator. There is no request-kind field anywhere in this protocol (I14).",
+      "properties": {
+        "v": {
+          "const": 1,
+          "description": "Envelope version. A server that does not implement the declared version MUST reject with 400 unsupported_requires_version and create nothing (I21)."
+        },
+        "answer": { "$ref": "#/$defs/AnswerSpec" },
+        "capabilities": { "type": "array", "items": { "$ref": "#/$defs/CapabilityDeclaration" } },
+        "authority": { "$ref": "#/$defs/Authority" }
+      }
+    },
+
+    "AnswerSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Field" },
+          "description": "MAY be empty. An empty list means the whole request is an attestation: there is nothing to type and the person acts out of band."
+        },
+        "value_sink": {
+          "type": "object",
+          "required": ["provider", "ref"],
+          "additionalProperties": false,
+          "description": "Where secret values travel. The protocol carries the declaration; the values travel a channel the runtime owns.",
+          "properties": {
+            "provider": { "type": "string" },
+            "op": { "type": "string" },
+            "ref": { "type": "string", "description": "Opaque provider resource reference. Never a URL." }
+          }
+        }
+      }
+    },
+
+    "Field": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "label": { "type": "string" },
+        "type": {
+          "enum": ["choice", "text", "number", "boolean", "secret", "attestation", "document", "file_ref"],
+          "description": "Closed and versioned. An unknown type MUST be rejected with 400 unsupported_field_type — never rendered as a text input (I21)."
+        },
+        "required": { "type": "boolean", "default": false },
+        "help": { "type": "string" },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "label"],
+            "additionalProperties": false,
+            "properties": { "id": { "type": "string" }, "label": { "type": "string" } }
+          }
+        },
+        "multi": { "type": "boolean", "default": false },
+        "max_len": { "type": "integer", "minimum": 1 },
+        "min": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "description": "For `number`, inclusive lower bound. `requires` is digest-covered through `request_digest`, so §1.4 applies: integral in value and within ±(2^53 − 1). A non-integer bound is rejected at raise with 400 invalid_request. JSON Schema's `integer` matches on value, so 2.0 validates here and a Server normalizes it to 2." },
+        "max": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "description": "For `number`, inclusive upper bound. Digest-covered on the same terms as `min`." },
+        "initial": { "description": "Seed value for `document` and `text` fields. Never used for `secret`." },
+        "schema_ref": { "type": "string", "format": "uri" },
+        "sink_ref": { "$ref": "#/$defs/SinkRef" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "choice" } }, "required": ["type"] },
+          "then": { "required": ["options"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "secret" } }, "required": ["type"] },
+          "then": {
+            "not": { "required": ["initial"] },
+            "description": "A secret field MUST NOT carry a seed value, and its answer carries only {\"provided\": true} (I7)."
+          }
+        }
+      ]
+    },
+
+    "CapabilityDeclaration": {
+      "type": "object",
+      "required": ["handle", "type", "scope"],
+      "additionalProperties": false,
+      "description": "Something the person must be handed in order to be able to answer. Always an opaque handle; the protocol never carries a resolvable address by value (I8).",
+      "properties": {
+        "handle": { "$ref": "#/$defs/GrantHandle" },
+        "type": { "type": "string", "description": "Open vocabulary, e.g. `interactive_surface`. An unrecognized type MUST be rejected, never ignored." },
+        "scope": { "enum": ["view", "drive"] },
+        "provider": { "type": "string", "description": "Registry coordinate. The core MUST NOT match on this string." },
+        "resource_ref": { "type": "string", "description": "Opaque provider resource id. Never a URL." },
+        "label": { "type": "string" },
+        "purpose": { "type": "string" },
+        "optional": { "type": "boolean", "default": false },
+        "ttl": { "$ref": "#/$defs/Duration" },
+        "blast_radius_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+
+    "Authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Evaluated at answer time against the answerer's authenticated identity (I6). If any field has type `secret`, the server MUST raise min_role to its administrative role and auth_strength to at least `session`.",
+      "properties": {
+        "min_role": { "enum": ["viewer", "editor", "admin"] },
+        "auth_strength": {
+          "enum": ["link_only", "session", "reauth", "mfa"],
+          "default": "session",
+          "description": "Ordered link_only < session < reauth < mfa. `link_only` identifies no person and MUST be explicitly enabled by the deployment."
+        },
+        "assignees": { "type": "array", "items": { "$ref": "#/$defs/Target" } },
+        "quorum": { "type": "integer", "minimum": 1, "default": 1 },
+        "forbid_requester": {
+          "const": true,
+          "description": "Always true. A requester principal can never answer its own request (I15); the field is present for clarity and a server MUST reject `false`."
+        },
+        "reason": { "type": "string", "description": "Shown to the person: why this level of authority is being asked for." }
+      }
+    },
+
+    "Target": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "description": "Resolved to a set of principals through one resolution port. The core MUST NOT branch per kind.",
+      "properties": {
+        "kind": { "enum": ["principal", "role", "group", "rotation", "anyone"] },
+        "value": { "type": "string" }
+      }
+    },
+
+    "Routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Deployment policy, resolved server-side at raise time and snapshotted onto the request so a later policy edit cannot change what happened.",
+      "properties": {
+        "targets": { "type": "array", "items": { "$ref": "#/$defs/Target" } },
+        "ladder": { "type": "array", "items": { "$ref": "#/$defs/LadderRung" } }
+      }
+    },
+
+    "LadderRung": {
+      "type": "object",
+      "required": ["after", "channels"],
+      "additionalProperties": false,
+      "description": "A rung mints deliveries, never a request (I3).",
+      "properties": {
+        "after": { "$ref": "#/$defs/Duration" },
+        "channels": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "to": { "$ref": "#/$defs/Target" }
+      }
+    },
+
+    "TtlPolicy": {
+      "type": "object",
+      "required": ["on_expiry"],
+      "additionalProperties": false,
+      "description": "Fail toward a typed terminal answer, never toward silence; when the answer must be guessed, guess no.",
+      "properties": {
+        "on_expiry": { "enum": ["escalate", "expire_and_deny", "default", "park"] },
+        "default_answer": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "REQUIRED when on_expiry is `default`, and MUST have been declared at raise time. The resulting receipt records actor.type = \"policy\"."
+        },
+        "reminder_every": { "$ref": "#/$defs/Duration", "description": "Reminder cadence under `park`." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "on_expiry": { "const": "default" } }, "required": ["on_expiry"] },
+          "then": { "required": ["default_answer"] }
+        }
+      ]
+    }
+  }
+}

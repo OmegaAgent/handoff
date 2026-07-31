@@ -1,0 +1,105 @@
+id: C-2
+title: A repeated dedupe_key collapses onto the pending request instead of asking again
+level: 1
+invariants: [I1, I20]
+spec:
+  - "§3.1 — dedupe_key is ask-once, scoped (org_id, waiter_ref)"
+  - "§3.3.3 — no Idempotency-Key and a pending request with the same dedupe_key merges forward"
+  - "§6.2 R2 — amendment"
+  - "§18 C-2"
+rationale: >
+  Retry safety and ask-once are different questions, and collapsing them into one key is the usual
+  mistake. A loop that re-raises the same ask every tick must page a person once, not once a tick —
+  and the second raise is not discarded either: its prompt and requires merge forward and the
+  version increments, so the person sees the newest description of the same ask.
+
+requires:
+  principals: [machine_a]
+
+steps:
+  - name: raise with an explicit dedupe key
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c02-first-${run_id}"
+      body:
+        waiter_ref: "run:c02-${run_id}"
+        dedupe_key: "c02-dedupe-${run_id}"
+        prompt:
+          title: "Approve the deploy?"
+          body: "Build 8821 is ready."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Ship it"}
+                  - {id: reject, label: "Hold"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+        body:
+          - path: state
+            equals: pending
+          - path: version
+            equals: 1
+      capture:
+        req: id
+
+  - name: raise again with the same dedupe key and a better description
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c02-second-${run_id}"
+      body:
+        waiter_ref: "run:c02-${run_id}"
+        dedupe_key: "c02-dedupe-${run_id}"
+        prompt:
+          title: "Approve the deploy?"
+          body: "Build 8821 is ready. Staging has been green for 40 minutes."
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Ship it"}
+                  - {id: reject, label: "Hold"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: req
+            because: "§3.3.3 — a pending request with the same dedupe_key is the same request"
+          - path: version
+            equals: 2
+            because: "§3.3.3 — the newer raise merges forward and increments version"
+          - path: prompt.body
+            matches: "green for 40 minutes"
+            because: "the merge is forward: the person sees the newest description"
+
+  - name: exactly one request exists under this waiter
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c02-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${req}"]
+            because: "ask-once means one request and therefore at most one receipt (I1)"

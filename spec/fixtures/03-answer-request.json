@@ -1,0 +1,10 @@
+{
+  "values": {
+    "decision": "approve",
+    "note": "Confirmed with Acme on the phone."
+  },
+  "via_delivery_id": "dlv_01K3M7QW9A8ZC4YRXB2N6VD9FT",
+  "partial": false,
+  "disposition": "decide",
+  "rendered_digest": "sha256:7e6d5c4b3a291807f6e5d4c3b2a190817e6d5c4b3a291807f6e5d4c3b2a19081"
+}

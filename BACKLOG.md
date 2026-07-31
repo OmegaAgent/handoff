@@ -1,8 +1,180 @@
-# BACKLOG — Handoff (Night Hack 2026-07-24)
+# BACKLOG — Handoff
 
 Ranked. Top = handle first. Non-blockers get deferred here instead of stopping the build.
 
-## Shipped tonight (verified in production, not just written)
+## Stated gaps — things that do not exist, said plainly
+
+- ~~**Row-level security is proven on 11 of 19 tenant-scoped tables.**~~ **Closed.** Proven on
+  **20 of 20**. The population was 19 because `handoff_request_dispositions` was missing from the
+  test's list — neither proven nor named as unproven — and eight of the rest held rows for one
+  tenant only, so their per-table comparison was between two empty sets. Both tenants now run
+  through one `populate` function, which is what keeps them symmetric: an asymmetric fixture is how
+  the eight holes appeared. The "which tables are uncovered" `eprintln!` is now a per-table
+  assertion, because `cargo test` captures stdout and never printed it on a passing run, which is
+  exactly the case where it mattered. A second assertion compares the list against `pg_policies`, so a
+  table that gains a policy without gaining an entry fails rather than being silently exempt.
+
+- ~~**Row-level security does not protect a query that never named a tenant, and two request-scoped
+  paths do not name one.**~~ **Closed for the request-scoped surface.** It was three paths, not two
+  — `POST /deliveries/{id}/redeliver` was in the same state and no probe had reached it, which is
+  the argument for probing widely rather than probing the paths you already suspect. `delivery`,
+  `delivery_attempts`, `redeliver`, `idempotent_replay` and `remember_idempotent` now open a
+  `tenant_tx` instead of issuing against the pool, and
+  `every_request_scoped_path_names_its_tenant` drives seventeen routes with an **empty** exception
+  list. The rows returned did not change: each of those queries already carried
+  `WHERE tenant_ref = …`, and the policy's restrictive branch is that same predicate, so this moved
+  row-level security from beside the primary defence to underneath it.
+
+- **The policy still passes when no tenant is named, and cannot be made to fail closed without a
+  deliberate cross-tenant marker.** Authentication resolves a credential to a tenant (§4.1), so the
+  query that discovers the tenant cannot have named it: a fail-closed policy on
+  `handoff_principals` makes every authenticated request answer `401`. Measured, not reasoned. The
+  deadline sweep and the delivery claim are in the same position by construction — they act across
+  every tenant, so there is nothing for them to name.
+
+  Closing this needs a distinct GUC value those three set on purpose, so that "no tenant, and I
+  meant it" is a different state from "no tenant, because somebody forgot". That is a store-wide
+  change rather than a local one: every statement still issued on the pool has to move inside a
+  transaction that names something, because a transaction-local setting cannot attach to a
+  pool statement and a session-level one leaks to whoever borrows that connection next. Until then,
+  a query that names no tenant sees every tenant's rows, and `SECURITY.md` says so in those words.
+
+An empty directory named after a package is worse than an absent one, because it implies a
+deliverable. These are the things a reader might reasonably expect to find and will not.
+
+- **`@handoffproto/types` is hand-written, not generated.** *(Corrected: an earlier revision of this
+  file said the package did not exist. It does — that entry was written from a stale look at the
+  tree and was wrong.)* `sdk/types/index.d.ts` covers all 87 schemas in `spec/openapi.yaml`, and
+  `scripts/check-drift.mjs` enumerates the schema names from the spec and fails if a declaration is
+  missing, with no YAML parser and no dependencies. That is a real guard, but it checks **presence,
+  not shape**: a schema whose fields change while its name stays put will pass. Wiring a genuine
+  generator, or extending the drift check to compare members, is still open.
+- **No case exists for a Level 2 deployment that declines the continuation extension.** C-17 covers
+  the positive path only.
+- ~~The conformance CI job is still `continue-on-error`.~~ **Done.** Removed when the first cases
+  landed. Until the reference server was green the job asserted the inverse property — that the
+  suite reports red against a stub implementing nothing — and it fails the build if the suite ever
+  reports conformance against that stub.
+
+- **No encryption at rest for `resume_payload`, so the field is refused.** §14 requires a Server
+  that stores continuation state to encrypt it at rest. `handoff-store-postgres` implements no
+  encryption — `resume_payload` is a plain `text` column and `grep -rn encrypt` over the store
+  returns nothing. Rather than keep a runtime's private state in the clear, `handoffd` **rejects a
+  raise carrying `resume_payload` with `400 invalid_request`**, which §14 explicitly permits of a
+  Level 1 Server, and `GET /meta` reports Level 1 with no extensions — derived from that same
+  capability rather than hardcoded. `resume_ref` is still accepted: it is a pointer the runtime
+  owns, carries no secret, and §14 places no encryption requirement on it.
+
+  Closing this means implementing encryption at rest **with a documented key source** — where the
+  key lives, who can read it, how it rotates, and what happens to stored payloads when it does.
+  That is a design decision, not a code change, and inventing one to make a field work would be
+  the same shortcut this entry exists to avoid. Until then the continuation extension is
+  unimplemented and unadvertised, and C-17 is correctly out of scope.
+
+  An earlier revision of `handoff-protocol`'s `Continuation::resume_payload` doc comment said
+  "encrypted at rest by the Server" as though it were a property of the type. It is corrected;
+  a comment asserting a guarantee no code provides is worse than no comment.
+
+## Open now — H0, publish the contract
+
+Landed in H0:
+- Apache-2.0 repository default with MIT retained on `sdk/**` and on the preserved prior art.
+  `NOTICE`, `TRADEMARKS.md`, `CONTRIBUTING.md` (DCO, no CLA), `GOVERNANCE.md`, `SECURITY.md`.
+- The §2.2 tree: `core/` Rust workspace (six crates, builds clean), `sdk/python`,
+  `examples/night-hack/` holding the hackathon build as prior art.
+- `handoff-human` 0.2.0: module renamed `human` → `handoff`, with `human` kept as a deprecated
+  re-export that warns. Removed in 0.3.0.
+- CI with no secrets: fmt, clippy, build, test, docs; Python SDK lint and import surface; a wired
+  conformance job; a spec-change-needs-a-conformance-case rule; secret hygiene.
+- Repo identity standardized on `OmegaAgent/handoff`.
+
+Still open before the first public push, in order:
+1. **Reserve the names.** `handoff-protocol`, `handoff-core`, `handoff-store-postgres`,
+   `handoff-adapters`, `handoff-server`, `handoff-conformance` on crates.io, and the npm scope for
+   the TypeScript SDK. Fallbacks exist (`handoffproto-*`, `@handoff-protocol/*`) but the choice must
+   be made before the spec is published, not after.
+2. ~~`spec/` v0.1.~~ **Done.** Frozen, with 21 invariants, an OpenAPI contract, JSON Schemas, and signing vectors that reproduce.
+3. **Confirm the copyright holder going forward.** The published MIT grant says
+   `Noureddin Bakir`; the company packages say `Omegas`. Pick the entity that will hold the
+   trademark and use it consistently from here. Do not rewrite the published grant.
+4. **Decide whether the conformance suite gates a managed deploy from day one or from v1.0.**
+   Day one is stronger and slower. A gate added later is a gate that never gets added.
+
+## H5 — the managed adapter and the cutover
+
+Landed in `managed/` (closed, `UNLICENSED`, `publish = false`) and `docs/cutover-plan.md`. Eight seam
+ports implemented against the Ωmegas control plane over HTTP; 76 tests; the outbox and reconciler are
+tested against a real Postgres because durability is not a property a fake can demonstrate.
+
+**Blocking, and needing an owner decision rather than a schedule:**
+
+1. **Machine auth as specified cannot serve an out-of-repo Handoff.** It is an Axum extractor doing
+   an indexed fetch against `api_keys` inside the omega repo, and `handoff.omegas.dev` has neither.
+   `managed/…/auth.rs` implements the recommended client-credentials exchange, but until an owner
+   rules, **Handoff's public API has no mechanism** — not merely no date. Everything else in the
+   managed tier is downstream of this.
+2. **Attestation is unbuilt in both tiers.** No key, no custody decision, no verification endpoint,
+   no owner. `signer.rs` refuses rather than signing with something convenient. **Do not market
+   independent attestation before it exists** — it is the strongest item on the upgrade list and the
+   one we currently cannot deliver.
+3. **The revocable viewer token is unbuilt**, so browser takeover cannot be offered. `takeover.rs`
+   refuses and deliberately does **not** fall back to today's broadcast URL (defect B-2).
+
+**Ordered follow-ups:**
+
+4. **`Store::chain` is the wrong read for a reconciler.** It returns a tenant's whole chain, because
+   it exists to serve the open verifier. Reconciling from it is O(chain) per pass rather than O(new),
+   and it will not stay acceptable on a large tenant. The fix is a cursored read on the open store —
+   an upstream port change, in the open repo.
+5. **Tenant discovery has no home.** `Reconciler::run_for` takes one tenant; nothing enumerates them.
+   Querying the open store's tables from the managed crate would couple the adapter to the core's
+   schema, which is the coupling the whole arrangement exists to avoid. `Store::tenants()` upstream,
+   or the deployment drives it from the set it already knows.
+6. **The managed delivery fleet has no transports.** `delivery.rs` declares what the fleet should be
+   and refuses the two shapes that must never ship; the reviewed Slack app, the warmed SES identity,
+   and the numbers are operational assets, not code.
+6a. ~~`advance_delivery_grade` has no HTTP route.~~ **Done (H4).**
+   `POST /v1/deliveries/{delivery_id}/grade`, scope `handoff:requests:route`, tenant from the
+   credential. It accepts `delivered` and `seen` only: `acted` means the person answered *through
+   this delivery* and is established by an answer landing and nothing else, so accepting it would
+   let a routing key write "they decided" onto a delivery with no decision behind it; `dispatched`
+   is the send's own claim and is already recorded by the attempt that made it. **Still to do on
+   the managed side:** a webhook ingress that drives it from SES delivery notifications and Slack
+   events. Until that exists, managed deliveries stay at `dispatched` — the route is no longer the
+   blocker, the ingress is.
+7. **Wiring attestation needs an open port.** The receipt is sealed inside the answer transaction and
+   nothing in `Store` takes a signer. It must be an upstream change, or the hosted tier produces
+   receipts the open verifier cannot check — which is a vendor claim rather than evidence.
+8. **`usage_events.idempotency_key` is globally unique, not per-org (B-10).** The adapter mints
+   org-scoped keys and refuses any that are not, but a server assuming global uniqueness still
+   collides across products. Fix on the ingest endpoint.
+9. **`events` is not append-only at the database**, and two live `UPDATE events SET instance_id`
+   statements must go before the audit mirror can be trusted. The API also drops `payload`, which is
+   exactly the field a receipt summary lives in.
+
+**A defect in our own tooling, found while verifying H5:**
+
+10. ~~`core/dev/run-conformance.sh` is unsafe to run concurrently.~~ **Fixed (`baba8fe`).** Every
+    resource the script owns now derives from one per-run token, and both ports are obtained by
+    asking the kernel for a free one rather than derived arithmetically — an offset only makes a
+    collision rarer. Proof: two suites started concurrently with **no environment variables at
+    all**, both 24/24 exit 0, from the identical invocation that had produced 17/24, 19/24, 22/24
+    and 23/24.
+
+    Worth keeping the diagnosis, because the failure shape recurs: the harness had also been
+    *measuring a server it did not start*. An orphan held the port, the newly launched server
+    failed to bind and exited, and the readiness probe checked `curl` before checking whether its
+    own process was alive — so a stranger's 200 read as a healthy start, and the suite then
+    measured an older build against a stale database. **Not one of those failures was an assertion
+    about the protocol.** A measurement tool that corrupts a peer does not look broken; it looks
+    like a finding.
+
+## Prior art — the hackathon build (Night Hack, 2026-07-24)
+
+Preserved under `examples/night-hack/`. What follows is that build's own backlog, kept because the
+direction section below is still the direction.
+
+### Shipped that night (verified in production, not just written)
 - Hosted API: create request / long-poll / resolve. The long-poll returns the instant a human
   resolves (measured 3s against a 25s wait), so a blocked agent resumes immediately.
 - Python SDK, one file, standard library only: `ask()`, `clear_wall()`, `create_request()`,
@@ -15,7 +187,9 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
   design: a paging failure never blocks request creation.
 - Demo wall: a self-controlled portal whose verification step requires a genuinely trusted click,
   with the payoff held in a `<template>` so it is absent from the DOM until a human clears it.
-- Public: https://handoff.omegas.dev · https://github.com/NoureddinBakir/handoff (MIT).
+- Public at the time: a hosted deployment plus the MIT repository. The hostname is deliberately
+  not repeated here — that deployment had no authentication, and its own docs recorded that anyone
+  holding the URL could ring a real phone. See SECURITY.md.
 
 ## Direction (owner, 2026-07-25): the multi-channel communication layer, person-centric
 
@@ -66,10 +240,11 @@ highest-bandwidth channel, and it is the one that is built.
    reveal, so "a human cleared it" needs a server-side notion of clearance.
 3. **State is in one process.** A redeploy drops pending requests. Fine for a hack, wrong for
    anything real — needs durable storage before anyone else can rely on it.
-4. Nothing outstanding on hosting. `handoff.omegas.dev` is live on a Let's Encrypt cert, A and
-   AAAA records pointing at the Fly app, DNS-only. Note for later: the old
-   `CLOUDFLARE_DNS_API_TOKEN` is EXPIRED and `hipocampus/.env`'s `CLOUDFLARE_API_TOKEN` cannot see
-   the zone — the working token is the one in `omega/.env.live` (named RED_LINE in Cloudflare).
+4. Nothing outstanding on hosting for the hack build. *(Operational detail redacted: an earlier
+   revision of this line named which private files hold working credentials, which token was
+   expired, and the console name of the working one. No literal values, so this repository's own
+   secret-hygiene job could not catch it — and in a repository intended to be published, a map to
+   where the keys live is the part an attacker actually wants. Whoever needs it has the runbook.)*
 
 ## Deferred (non-blocking)
 - **Paging-UX escalation ladder** — owner-approved direction, full spec in `PAGING-UX.md` (quiet
@@ -95,5 +270,5 @@ highest-bandwidth channel, and it is the one that is built.
   hangs when the phone API is down.
 - 2026-07-24: long-poll plus one `asyncio.Event` per request is the entire blocking primitive. No
   queue, no broker, no websocket on the agent side.
-- 2026-07-24: the expired Cloudflare DNS token cost us the vanity domain. Verify a credential by
-  calling the API that will actually use it, not by finding it in a `.env` file.
+- 2026-07-24: an expired DNS token cost us the vanity domain. Verify a credential by calling the API
+  that will actually use it, not by finding it in a `.env` file.

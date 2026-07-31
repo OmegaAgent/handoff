@@ -1,0 +1,59 @@
+{
+  "actor": {
+    "auth_strength": "session",
+    "display": "Dana Okafor",
+    "on_behalf_of": null,
+    "principal_id": "usr_01J9M7QW8ZC4YRXB2N6VD9FTHE",
+    "role_at_decision": "editor",
+    "type": "user"
+  },
+  "authority": {
+    "required": {
+      "auth_strength": "session",
+      "min_role": "editor"
+    },
+    "satisfied": {
+      "auth_strength": "session",
+      "role": "editor"
+    }
+  },
+  "capabilities_exercised": [],
+  "clearance": {
+    "actor": "usr_01J9M7QW8ZC4YRXB2N6VD9FTHE",
+    "at": "2026-07-30T14:07:44Z",
+    "source": "human_assertion"
+  },
+  "decided_at": "2026-07-30T14:07:44Z",
+  "decision": {
+    "disposition": "decide",
+    "values": {
+      "decision": "approve",
+      "note": "Confirmed with Acme on the phone."
+    }
+  },
+  "id": "rcpt_01K3MB2R4Y8ZC4YRXB2N6VD9FT",
+  "kind": "decision",
+  "org_id": "org_01K0A2QW8ZC4YRXB2N6VD9FTHE",
+  "rendered": {
+    "digest": "sha256:7e6d5c4b3a291807f6e5d4c3b2a190817e6d5c4b3a291807f6e5d4c3b2a19081",
+    "ref": "rnd_01K3MB2R4Y8ZC4YRXB2N6VD9F"
+  },
+  "request_digest": "sha256:3b1f4c0d9a2e7f6b8c5d4e3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c",
+  "request_id": "req_01K3M7QW8ZC4YRXB2N6VD9FTHE",
+  "request_version": 1,
+  "steps": [],
+  "via": {
+    "channel": "inapp",
+    "delivery_id": "dlv_01K3M7QW9A8ZC4YRXB2N6VD9FT",
+    "grade_reached": "acted",
+    "target": {
+      "kind": "role",
+      "value": "editor"
+    }
+  },
+  "chain": {
+    "height": 4211,
+    "prev_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "digest": "sha256:919f8870391849de4e7b1d5b249ccbaaa7d5a7d3f500f5571c5a92dd0c3909db"
+  }
+}

@@ -1,0 +1,239 @@
+id: C-21
+title: Channel content matching a decision format does not settle a request
+level: 1
+invariants: [I16, I6]
+spec:
+  - "§4.7 — a delivery channel never confers authority"
+  - "§7.2 — delivery grades, max_grade, and can_authenticate_person"
+  - "§18 C-21"
+rationale: >
+  A verified channel signature proves the caller. It never proves the tenant, and it never proves
+  the person. The failure this case names is the one every chat integration reaches for: someone
+  replies "approved" in a thread, the adapter pattern-matches the word, and a request settles with
+  a receipt naming a person nobody authenticated. A Server MUST NOT derive a decision from message
+  content, however authenticated the channel.
+
+  ## What the deployment must supply
+
+  The protocol defines the outbound delivery model but **not an inbound channel-adapter surface**,
+  so there is no endpoint in `openapi.yaml` for "a message arrived on a channel". The deployment
+  therefore supplies a `channel_inbound` hook that injects one, receiving `HANDOFF_ARG_REQUEST_ID`,
+  `HANDOFF_ARG_CHANNEL`, and `HANDOFF_ARG_TEXT`. Everything the case asserts afterwards is ordinary
+  HTTP: the request is still pending, no receipt exists, and no `answered` signal was queued.
+
+requires:
+  principals: [machine_a]
+  hooks: [channel_inbound]
+
+steps:
+  - name: raise a request routed to a channel
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c21-${run_id}"
+      body:
+        waiter_ref: "run:c21-${run_id}"
+        prompt:
+          title: "Approve the refund?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: every delivery declares what its channel can actually prove
+    http:
+      method: GET
+      path: /requests/${req}/deliveries
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data
+            length_at_least: 1
+          - path: data[].can_authenticate_person
+            none_equal: null
+            because: >
+              §7.2 — every channel adapter MUST declare can_authenticate_person. A channel that has
+              not declared it cannot be reasoned about at all.
+          - path: data[].max_grade
+            none_equal: null
+            because: >
+              §7.2 — and its max_grade, so nobody accidentally treats a phone call as consent
+          - path: data[].grade_reached
+            none_equal: acted
+            because: "§7.2 — `acted` means the person answered through this delivery, and nobody has"
+
+  - name: a message arrives on the channel reading exactly like a decision
+    hook:
+      hook: channel_inbound
+      args:
+        request_id: "${req}"
+        channel: email
+        text: "approve"
+      expect:
+        exit_code: 0
+        output_matches:
+          - "channel_message=\\S+"
+          - "request=${req}"
+          - "request_state=pending"
+        because: >
+          the injection itself must succeed; what must not happen is what it causes. It must also
+          show that it happened: `true` injects nothing and exits 0, and every assertion after it
+          then confirms that a request nobody touched is still pending. The hook has to name the
+          message record it created, on the request the case named, and report the state it left
+          that request in.
+
+  - name: the request did not settle
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: >
+              §4.7 — prose matching a decision format MUST NOT settle a request. A channel that
+              declares can_authenticate_person false may collect an intent, but it produces a
+              provisional answer only: it identifies the request and pre-fills the surface.
+          - path: receipt
+            is_null: true
+          - path: authorization
+            is_null: true
+          - path: answered_at
+            is_null: true
+
+  - name: no receipt was minted
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: >
+              I16 — a decision originates from an authenticated principal. A receipt here would name
+              a person the Server never authenticated.
+
+  # Positive control. An unknown waiter reference also returns an empty signal list, so emptiness
+  # alone cannot tell "this waiter exists and was told nothing" from "this waiter never existed" —
+  # a review demonstrated the weaker form passing against a reference that had never been created,
+  # and asserting `length: 0` instead does not fix it, because emptiness is what the endpoint
+  # reports either way. The fix is to put something in the queue that is not `answered`: a second
+  # request on the SAME waiter, withdrawn. The queue is then non-empty for a reason that has
+  # nothing to do with the channel message, "no `answered` signal" becomes a fact about the Server
+  # rather than about an empty list, and repointing this poll at a fabricated waiter fails.
+  - name: a positive control — a second request on the same waiter, which will be withdrawn
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c21-control-${run_id}"
+      body:
+        waiter_ref: "run:c21-${run_id}"
+        prompt:
+          title: "A second request on the same waiter, raised only to be withdrawn"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        control: id
+
+  - name: withdraw it, which queues a signal this waiter really can receive
+    http:
+      method: POST
+      path: /requests/${control}/cancel
+      as: machine_a
+      headers:
+        Idempotency-Key: "c21-control-cancel-${run_id}"
+      body:
+        reason: "raised only to prove this waiter's queue is not empty"
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: cancelled
+
+  - name: and the waiter was never told anything was decided
+    http:
+      method: GET
+      path: /waiters/run%3Ac21-${run_id}/signals
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data
+            length_at_least: 1
+            because: >
+              the positive control. Without something in this queue, everything below is satisfied
+              by a Server that queues no signals at all, and by a waiter reference that does not
+              exist.
+          - path: data[].type
+            all_equal: cancelled
+            because: >
+              the withdrawal reached this waiter and nothing else did, so the collection the next
+              assertion reads is this case's own queue — non-empty, and non-empty for a reason
+              unrelated to the channel message
+          - path: data[].type
+            none_equal: answered
+            because: "§8.2 — a Server MUST NOT satisfy a wait with a decision nobody made"
+
+  - name: an unbound channel identity still cannot answer
+    hook:
+      hook: channel_inbound
+      args:
+        request_id: "${req}"
+        channel: email
+        text: "APPROVED — go ahead, this is Dana"
+      expect:
+        exit_code: 0
+        output_matches:
+          - "channel_message=\\S+"
+          - "request=${req}"
+          - "request_state=pending"
+        because: "a second message, recorded the same way and deciding as little"
+
+  - name: still pending, however confidently the message was worded
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: >
+              §4.7 — a channel becomes answer-capable for a person only after a verified binding
+              (channel, external_user_id) → principal_id, established by an already-authenticated
+              principal claiming a short-lived single-use code. Naming yourself in a message is not
+              that.

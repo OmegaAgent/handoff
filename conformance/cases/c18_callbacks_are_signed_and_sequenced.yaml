@@ -1,0 +1,177 @@
+id: C-18
+title: Outbound callbacks are signed, sequenced, replay-rejectable, and consumed only by an ack
+level: 1
+invariants: [I13]
+spec:
+  - "§15 — callbacks and signatures"
+  - "§15.3 — a valid signature proves the SENDER; it never proves the TENANT"
+  - "§8.3 — reading a signal MUST NOT consume it"
+  - "signing.md §1 — headers, canonical string, verification, rotation, test vectors"
+  - "§18 C-18"
+rationale: >
+  A callback is the protocol crossing a trust boundary outward, so it is the one place where a
+  receiver has to be able to tell a genuine signal from a replayed, tampered, or stale one. Three of
+  the checks below — replay onto a different delivery, a one-byte body change, a timestamp outside
+  the window — are really assertions about what the **canonical string binds**. The suite evaluates
+  them by taking a genuine callback the Server sent, altering exactly one element, and requiring
+  that verification now fails. A Server that signed only the body would emit a signature that
+  survives being lifted onto another delivery, and this is what catches it.
+
+  The invariant §18 maps this case to is I13, and the reason is the sentence in §15.3: a valid
+  signature proves the sender, never the tenant. So the case also asserts that the callback body
+  carries no tenant identifier at all — a receiver that could read tenancy from the body eventually
+  will.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: start a local callback receiver that answers 200 and never acks
+    callback_receiver:
+      bind_url_to: callback_url
+      respond_status: 200
+
+  - name: raise a request that registers the callback
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c18-${run_id}"
+      body:
+        waiter_ref: "run:c18-${run_id}"
+        liveness: durable
+        callback:
+          url: "${callback_url}"
+        prompt:
+          title: "Approve the release?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Ship"}
+                  - {id: reject, label: "Hold"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: the person answers, which enqueues a signal
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c18-answer-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 200
+
+  - name: the callback arrives signed, sequenced, and carrying no resolvable address
+    callback_assert:
+      timeout: PT30S
+      at_least: 1
+      checks:
+        - signed
+        - sequence_monotonic_per_waiter
+        - carries_no_resolvable_url
+        - tenancy_not_derivable_from_body
+      because: >
+        signing.md §1.1 — Handoff-Signature, -Delivery, -Signal, -Version, -Sequence, and
+        -Idempotency-Key are each MUST, the sequence header must agree with the body, and the
+        idempotency key must be the delivery id so a receiver can dedupe without parsing.
+        §15.6 — identifiers and typed values only. §15.3 and I13 — tenancy is never in the body.
+
+  - name: the signature binds body, timestamp, and delivery
+    callback_assert:
+      timeout: PT5S
+      at_least: 1
+      checks:
+        - signature_verifies
+        - one_byte_tamper_rejected
+        - replay_onto_other_delivery_rejected
+        - stale_timestamp_rejected
+        - rotation_overlap_both_verify
+      because: >
+        signing.md §1.2 — the canonical string is version ‖ LF ‖ timestamp ‖ LF ‖ delivery_id ‖ LF ‖
+        sha256(body), so altering any one of those four must break verification. §1.3.2 — the
+        freshness window is 300 seconds. §1.4.2 — while two secrets are active the Server MUST sign
+        with both and emit both as separate v1= elements, so there is no window in which valid
+        callbacks fail. The last check needs `callback.secret` and `callback.secret_previous` in the
+        profile, because a rotation overlap cannot be observed with one secret.
+
+  - name: give the Server time to retry the un-acked callback
+    advance_clock:
+      by: PT20S
+
+  - name: a 2xx did not consume the signal
+    callback_assert:
+      timeout: PT30S
+      at_least: 2
+      checks:
+        - redelivers_until_acked
+      because: >
+        §15.4 — a 2xx from a receiver marks the callback dispatched; it MUST NOT consume the signal.
+        §8.3 — a receiver that returns 2xx and then crashes before applying the decision has not
+        received it, and the Server MUST continue redelivering until an explicit ack arrives.
+
+  - name: the signal is still unacked and still readable
+    http:
+      method: GET
+      path: /waiters/run%3Ac18-${run_id}/signals
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data[0].acked_at
+            is_null: true
+          - path: data[0].attempts
+            exists: true
+            because: >
+              `Signal.attempts` is an integer in the wire contract, not a collection. Asserting a
+              length on it could never hold for a conforming Server; presence is what this step
+              actually needs, and the redelivery counting is asserted below.
+      capture:
+        signal: data[0].id
+        token: data[0].resume_token
+
+  - name: every callback attempt is inspectable by the tenant
+    http:
+      method: GET
+      path: /signals/${signal}/attempts
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: data
+            length_at_least: 2
+            because: >
+              §15.5 — every attempt MUST be inspectable by the tenant. A webhook you cannot inspect
+              is a webhook you cannot debug at 3 a.m.
+          - path: data[0].status_code
+            equals: 200
+          - path: data[].outcome
+            none_equal: null
+
+  - name: the ack, and only the ack, stops it
+    http:
+      method: POST
+      path: /signals/${signal}/ack
+      as: machine_a
+      headers:
+        Idempotency-Key: "c18-ack-${run_id}"
+      body:
+        resume_token: "${token}"
+        applied: true
+      expect:
+        status: 200
+        body:
+          - path: first_ack
+            equals: true

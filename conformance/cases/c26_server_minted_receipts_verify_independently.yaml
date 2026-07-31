@@ -1,0 +1,208 @@
+id: C-26
+title: A receipt this Server minted verifies under an implementation that shares none of its code
+level: 1
+invariants: [I2]
+spec:
+  - "§9.4 — the chain is the tamper-evidence, and it is verifiable by a party holding no secret"
+  - "§1.4 — digest-covered content carries integer literals only"
+  - "signing.md §2.2 — the receipt core and the chain digest"
+  - "signing.md §3 — canonical JSON, and the two traps that produce digests stable in one
+    implementation and wrong across two"
+rationale: >
+  `signing.md` opens by saying what a receipt is for: a record *"verifiable by a party who was never
+  given a secret and must not be able to forge one — an auditor, a regulator, a customer after they
+  have left."* Every other receipt case in this suite reads what the Server says about its own
+  receipts. This one does the arithmetic.
+
+  ## The failure this case exists to catch
+
+  A hostile review found two receipts that the reference server minted through the ordinary answer
+  path, stored, and served — and that the project's **own published Python SDK** reported as forged.
+  Once because the two canonicalizers disagreed about member ordering above U+D7FF, and once because
+  a float reached a digest-covered position. Both were invisible from the HTTP surface: the Server
+  verified its own receipts perfectly, because a verifier that shares code with the producer proves
+  only self-consistency. The chain "worked" and nobody outside could check it.
+
+  Nothing in the suite would have caught either, so both were found by a person reading code. That
+  is the gap this case closes.
+
+  ## How it is checked
+
+  The suite recomputes the digests itself, in its own implementation of `signing.md` §2.2 that
+  depends on no protocol crate and is checked against the published vectors in
+  `spec/fixtures/signing/`. There is no hook here, and nothing for a deployment to assert: a
+  disagreement about canonical bytes is a different digest, and a different digest is a red case.
+
+  ## Why the payload looks like that
+
+  A `document` field accepts any non-null JSON value (§5.3), so caller-chosen object keys travel
+  into `decision.values` and from there into the hashed receipt core. The answer below carries the
+  shapes where independent canonicalizers actually diverge, rather than the shapes that are easy to
+  agree on. It is the same payload `scripts/verify-minted-receipts.sh` sends to the two published
+  SDKs, deliberately: the two checks should mean the same thing by "hard to canonicalize".
+
+  - `😀` (U+1F600) and `！` (U+FF01) as **object keys, together**. Neither alone proves anything.
+    RFC 8785 §3.2.3 orders members by UTF-16 code units, so the emoji — a surrogate pair beginning
+    0xD83D — sorts *below* `！`, while by code point it sorts above. An implementation using a
+    code-point sort emits different bytes for this exact object and computes a different digest.
+    That was the live defect, in a published SDK, for three rounds.
+  - The **empty-string key**, which sorts before everything and is easy to mishandle.
+  - The same pair **nested below the top level**, where a canonicalizer that sorted only the root
+    would still pass.
+  - Numbers at **both ends** of ±(2^53 − 1) — the last values a double carries intact, and the
+    boundary where a canonicalizer that routes numbers through a float loses the last digit
+    silently.
+  - A string carrying **JSON escapes and a raw non-ASCII character**, since escaping is the other
+    half of canonical string output: RFC 8785 §3.2.2.2 escapes the quote, the backslash and the
+    control characters, and emits everything else as UTF-8 rather than as a `\u` escape.
+
+  A C-26 that answered `{"decision": "approve"}` and verified the result would prove only what the
+  receipts of every other case already prove.
+
+  ## What a green C-26 does not tell you
+
+  Stated because a passing probe is the claim easiest to accept without asking what it would have
+  taken to see the defect — and because the two canonicalization defects this case exists for were
+  both missed once by a verification pass that looked like this one and stressed the wrong axis.
+
+  - **A misreading this suite shares with the Server.** If the harness and the reference
+    implementation are wrong the same way, C-26 is green and both are wrong. Nothing inside this
+    repository can close that; `scripts/verify-minted-receipts.sh` does, by handing the same
+    receipts to the two published SDKs, which share no line of code with either.
+  - **Regions of the canonicalizer this payload does not visit.** Control characters inside a
+    **key** rather than a value, deeply nested arrays of objects, and numbers outside ±(2^53 − 1),
+    which never reach a receipt because they are refused at the door. A defect confined to one of
+    those is invisible here.
+  - **Receipt kinds this case does not mint.** A `policy` receipt from an expiry, a `correction`,
+    and receipts carrying `rendered`, `steps`, `capabilities_exercised` or `clearance`. In a full
+    suite run the walk covers every receipt the whole run produced, including those; run alone with
+    `--case C-26`, it covers this one.
+  - **The detached signature of `signing.md` §2.3.** This case verifies the chain, not the Ed25519
+    signature over it. Nothing here would notice a broken `kid` or a signature over the wrong input.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise a request whose answer carries a document
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c26-${run_id}"
+      body:
+        waiter_ref: "run:c26-${run_id}"
+        prompt:
+          title: "Confirm the reconciliation payload?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: payload
+                type: document
+                required: true
+              - name: at_max_safe
+                type: number
+                required: true
+              - name: at_min_safe
+                type: number
+                required: true
+              - name: note
+                type: text
+                required: true
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        req: id
+
+  - name: a person answers with content that puts the canonicalizers to work
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c26-answer-${run_id}"
+      body:
+        values:
+          payload:
+            "！": 1
+            "😀": 2
+            "a": 0
+            "": 3
+            "nested":
+              "😀": {"！": [1, 2]}
+              "": {"z": 0, "！": 1}
+          at_max_safe: 9007199254740991
+          at_min_safe: -9007199254740991
+          note: "café \"quoted\" \\ backslash\nsecond line\ttab"
+        note: "Matches the statement line for line."
+      expect:
+        status: 200
+      capture:
+        receipt: receipt.id
+        digest: receipt.digest
+
+  - name: the Server kept what it was given, key for key
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: receipt
+          - path: decision.values.payload
+            contains_text: "😀"
+            because: >
+              A Server that dropped or transliterated the keys would mint a perfectly verifiable
+              receipt of content nobody submitted, and the digest check below would pass. What the
+              receipt records has to be what the person actually answered (§9.2).
+          - path: decision.values.payload
+            contains_text: "！"
+          - path: decision.values.at_max_safe
+            equals: 9007199254740991
+            because: >
+              §1.4 — both ends of ±(2^53 − 1) are admitted exactly. A canonicalizer that took these
+              through a float would return 9007199254740992 here, which is the kind of defect that
+              surfaces years later in somebody else's audit.
+          - path: decision.values.at_min_safe
+            equals: -9007199254740991
+          - path: decision.values.note
+            contains_text: "café"
+            because: >
+              RFC 8785 §3.2.2.2 — non-ASCII is carried as UTF-8 rather than escaped, and the quote,
+              the backslash and the control characters are escaped rather than carried. Both halves
+              have to survive the round trip for the digest below to mean anything.
+          - path: chain.digest
+            same_as: digest
+          - path: chain.prev_digest
+            exists: true
+
+  - name: an implementation that shares no code with this Server recomputes the same digests
+    verify_chain:
+      as: machine_a
+      receipts: /receipts
+      head: /receipts/chain-head
+      must_include: ["${receipt}"]
+      standalone: ["${receipt}"]
+      genesis: true
+      at_least: 1
+      because: >
+        `signing.md` §2.2, computed here rather than asked for. The receipt just minted is
+        recomputed from its own content — canonical bytes, core hash, chain digest — by the suite's
+        own implementation of the specification, which is checked against the published vectors and
+        shares nothing with any server. If this deployment's canonicalization disagrees with the
+        specification in any of the ways `signing.md` §3 warns about, the digest it stored is not
+        the digest that comes back, and this case is red.
+
+        `standalone` is the auditor's position stated exactly: one receipt, no chain, no secret,
+        and the record either verifies or it does not.
+
+        `genesis` pins where the chain starts. A chain enumerated from 0 verifies against itself
+        perfectly and seals identical content over different bytes, because `height` leads the
+        hashed chain input — so the first receipt must be at height 1, and its predecessor must be
+        the 64 ASCII zeros, stored rather than implied.

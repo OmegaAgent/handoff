@@ -1,0 +1,91 @@
+{
+  "pattern": "login-assistance",
+  "note": "Credential VALUES never travel this path. The secret field declares a sink; the answer carries only {\"provided\": true}. The admin floor is DERIVED from the presence of a secret field, not hand-written per interaction type.",
+  "raise": {
+    "waiter_ref": "run:0198f2a1",
+    "urgency": "high",
+    "prompt": {
+      "title": "Sign in to app.example.com for this workspace's browser",
+      "body": "Your credentials go straight to the browser and never pass through the agent."
+    },
+    "requires": {
+      "v": 1,
+      "answer": {
+        "fields": [
+          {
+            "name": "email",
+            "label": "Email or username",
+            "type": "text",
+            "required": true
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "secret",
+            "required": true,
+            "sink_ref": "snk_01K3M7QW8ZC4YRXB2N6VD9FTHF"
+          }
+        ],
+        "value_sink": {
+          "provider": "example/browser",
+          "op": "submit_credentials",
+          "ref": "opaque:bs_4KpQ"
+        }
+      },
+      "capabilities": [
+        {
+          "handle": "hg_01K3M7QW8ZC4YRXB2N6VD9FTHG",
+          "type": "interactive_surface",
+          "scope": "drive",
+          "provider": "example/browser",
+          "resource_ref": "opaque:bs_4KpQ",
+          "optional": true,
+          "ttl": "PT15M",
+          "label": "the browser the agent is driving",
+          "purpose": "Finish sign-in yourself if the site uses single sign-on or a challenge.",
+          "blast_radius_digest": "sha256:9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c9f2c8a1b0d3e4f5a6b7c8d9e0f1a2b3c"
+        }
+      ],
+      "authority": {
+        "min_role": "admin",
+        "auth_strength": "session",
+        "quorum": 1,
+        "forbid_requester": true,
+        "reason": "the resulting session outlives the run"
+      }
+    },
+    "attempt_ttl": "PT15M",
+    "ttl_policy": {
+      "on_expiry": "park",
+      "reminder_every": "PT1H"
+    },
+    "metadata": {
+      "hint": "credential"
+    }
+  },
+  "sink_submission": {
+    "values": {
+      "email": "dana@example.com",
+      "password": "<never leaves TLS>"
+    }
+  },
+  "answer": {
+    "values": {
+      "email": {
+        "provided": true
+      },
+      "password": {
+        "provided": true
+      }
+    }
+  },
+  "expect": {
+    "state": "answered",
+    "receipt_actor_type": "user",
+    "no_secret_value_anywhere": true,
+    "derived_authority_floor": {
+      "min_role": "admin",
+      "auth_strength": "session"
+    }
+  }
+}

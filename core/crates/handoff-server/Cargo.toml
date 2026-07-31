@@ -1,0 +1,44 @@
+[package]
+name = "handoff-server"
+description = "handoffd — the Handoff reference server. Self-hostable, single-tenant by default, no dependency on any hosted service."
+license = "Apache-2.0"
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "handoffd"
+path = "src/main.rs"
+
+[dependencies]
+# The channels this build can route to. Every scaffolded one is compiled in on purpose: a ladder
+# rung naming `email` should record `channel_not_configured` and say what is missing, which needs
+# the adapter present, rather than `channel_unknown`, which only says nobody wired it up.
+handoff-adapters = { workspace = true, features = ["email", "slack", "voice"] }
+handoff-core.workspace = true
+handoff-protocol.workspace = true
+handoff-store-postgres.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

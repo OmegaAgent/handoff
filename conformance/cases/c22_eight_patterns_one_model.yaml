@@ -1,0 +1,187 @@
+id: C-22
+title: All eight interaction patterns work with no request-kind anywhere, and clearance is asserted
+level: 1
+invariants: [I14, I16]
+spec:
+  - "§5.1 — the core MUST NOT switch on a request kind, type, or interaction type"
+  - "§5.6 — the eight required interaction patterns, on one model"
+  - "§9.7 — clearance MUST be asserted, never inferred"
+  - "§18 C-22"
+rationale: >
+  I14 is the design claim the whole object model rests on: a new interaction type arrives as a new
+  field type or capability type behind the declaration, never as a new branch. The way that claim
+  fails in practice is quiet — a `kind` or `hint` that started as a label becomes a discriminator
+  the renderer switches on, and within two releases there is a branch per case again. So this case
+  raises every published fixture through the one endpoint and then greps the entire wire traffic for
+  a discriminator, allowing only the places where `kind` is a genuine protocol field.
+
+  The second half is §9.7. Observed state change — a URL change, a page transition — MAY prompt a
+  surface to ask a person to confirm, and a deployment MAY choose to auto-answer from it. What it
+  must never do is record that as a person. A page-state change alone produces no clearance receipt.
+
+  ## How the fixtures are read
+
+  `spec/fixtures/use-cases/` holds one document per pattern. Each is an envelope — `pattern`, a
+  `note`, a `raise` body, and the expectations — rather than a bare request body, so this case posts
+  the `raise` member.
+
+  Two of the eight have `raise: null` on purpose. §5.6 resolves reassign/escalate to an
+  **operation** and expiry/unanswered to a **policy**, and says so explicitly: modelling them as
+  kinds would grow a renderer branch and a state per case. `when_present: raise` therefore skips
+  them here and `expect_excluded: 2` asserts that exactly two were skipped, so the exclusion is a
+  claim this case makes rather than a filter that could quietly grow. Their behaviour is covered by
+  C-14 and C-10 respectively.
+
+  ## What the deployment must supply
+
+  An `observe_page_state_change` hook, receiving `HANDOFF_ARG_REQUEST_ID`, which simulates the
+  runtime observing the target page change without any person asserting anything.
+
+requires:
+  principals: [machine_a]
+  hooks: [observe_page_state_change]
+  fixtures: use-cases
+
+steps:
+  - name: every published interaction pattern is accepted through the one endpoint
+    for_each_fixture:
+      at_least: 8
+      when_present: raise
+      expect_excluded: 2
+      steps:
+        - name: raise the fixture unmodified
+          http:
+            method: POST
+            path: /requests
+            as: machine_a
+            headers:
+              Idempotency-Key: "c22-${fixture_name}-${run_id}"
+            body: "${fixture_raise}"
+            expect:
+              status: 201
+              body:
+                - path: state
+                  equals: pending
+                  because: >
+                    §5.6 — every pattern is a different population of the same three declarations,
+                    and none of them adds a branch to a conforming Server
+            capture:
+              fixture_req: id
+
+        - name: and is readable and answerable at its canonical URL
+          http:
+            method: GET
+            path: /requests/${fixture_req}
+            as: machine_a
+            expect:
+              status: 200
+              body:
+                - path: requires.v
+                  equals: 1
+                - path: surface_url
+                  exists: true
+                  because: "I4 — a pending request is answerable at its canonical URL"
+
+  - name: no request-kind discriminator appears anywhere in the wire traffic
+    forbid_keys:
+      keys: [request_kind, interaction_type, request_type, ask_kind]
+      because: >
+        §5.1 — a request declares what it needs; the renderer, the router, and the validator are
+        driven entirely by that declaration. `metadata.hint` is deliberately not on this list: it is
+        permitted as a non-normative analytics label, and §5.1 separately forbids branching on it.
+
+  - name: nor does a bare kind field on a request
+    forbid_keys:
+      keys: [kind]
+      allow_paths:
+        - "evidence[].kind"
+        - "targets[].kind"
+        - "assignees[].kind"
+        - "target.kind"
+        - "to.kind"
+        - "delegate_to.kind"
+        - "transport.kind"
+      because: >
+        §5.1 — Evidence, Target, and GrantTransport carry a legitimate `kind`; a request does not.
+        This case reads only requests, so a `kind` at the root of a document here is a
+        discriminator, not a protocol field.
+
+  - name: raise a takeover-shaped request that can only be cleared by assertion
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c22-clearance-${run_id}"
+      body:
+        waiter_ref: "run:c22-clearance-${run_id}"
+        prompt:
+          title: "Clear the challenge on app.example.com"
+        requires:
+          v: 1
+          answer:
+            fields: []
+          capabilities: []
+          authority: {min_role: admin, auth_strength: session}
+        metadata:
+          hint: takeover
+      expect:
+        status: 201
+        body:
+          - path: requires.answer.fields
+            length: 0
+            because: >
+              §5.3.1 — an empty field list is meaningful: the whole request is an attestation, there
+              is nothing to type, and the person acts out of band
+      capture:
+        req: id
+
+  - name: the runtime observes the page change on its own
+    hook:
+      hook: observe_page_state_change
+      args:
+        request_id: "${req}"
+      expect:
+        exit_code: 0
+        output_matches:
+          - "observation=\\S+"
+          - "request=${req}"
+          - "request_state=pending"
+          - "receipts=0"
+        because: >
+          §9.7 — the observation has to have been recorded for the two steps below to be about
+          anything. `true` observes nothing and exits 0, and the assertions that follow then say
+          only that a request nobody touched is still pending, which is true of every request in
+          the suite. The hook must name the observation it recorded, on the request the case named,
+          and report that recording it moved neither the state nor the receipt count.
+
+  - name: an observation alone decides nothing
+    http:
+      method: GET
+      path: /requests/${req}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: >
+              §9.7 — clearance MUST be asserted, never inferred. Observed state change may prompt a
+              surface to ask a person to confirm; it is not itself a confirmation.
+          - path: receipt
+            is_null: true
+
+  - name: and no clearance receipt was minted
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: >
+              §9.7 — where a deployment does choose to auto-answer from an observation, the receipt
+              records source `runtime_inference` with a null actor. A Server MUST NOT fabricate a
+              person. Producing nothing at all, as here, is the other conforming choice.

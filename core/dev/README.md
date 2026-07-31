@@ -1,0 +1,89 @@
+# Running the conformance suite against `handoffd`
+
+```
+core/dev/run-conformance.sh            # create a database, run every Level 1 case, tear down
+core/dev/run-conformance.sh --case C-8 # one case
+KEEP=1 core/dev/run-conformance.sh     # leave the database up for inspection
+```
+
+The script creates a **disposable database per run**, seeds `bootstrap.json`, starts `handoffd`,
+and points the suite at it. It refuses to touch a database called `omega` or `omega_e2e`.
+
+## Why the database is disposable
+
+Several cases raise fixture requests that never expire, and a `dedupe_key` collapses onto a
+`pending` request from an earlier run (§3.3 rule 3) — so a second run against the same store would
+see `200` where the case requires `201`. A clean store is what makes a run measure this build
+rather than the residue of the last one.
+
+## What is below the HTTP API, and why
+
+Some requirements cannot be asserted over HTTP by construction, and the suite expresses each as a
+hook the deployment supplies (`conformance-profile.yaml`). The table lists every hook this profile
+defines; a hook missing from it is how `logs` went unlisted here for a while.
+
+| Hook | Case | Why it cannot be HTTP |
+|---|---|---|
+| `logs` | C-7, C-17 | §12.3 makes "no secret in a log line" normative, and a log line is not a response body. A hook that fails, or that prints nothing, fails the case: there is no version of "we could not show you" that is a pass. |
+| `storage_mutate` | C-15 | §9.4 puts the application inside the threat model, so a mutation must be attempted **as the application's own database role**. One command, parameterized by target and operation: the receipt targets must be refused by the engine, and the request target must succeed — that control is what tells a refusal apart from a command that never ran. |
+| `channel_inbound` | C-21 | The protocol defines the outbound delivery model but deliberately **no inbound channel-adapter surface**. |
+| `observe_page_state_change` | C-22 | A runtime observation is not an API call, and §9.7 requires it to produce no receipt. |
+| `events`, `crash_between_state_and_event` | C-23 | The protocol publishes no endpoint listing events, and killing a process between two writes is not an HTTP operation. |
+| `canonicalize` | C-24 | RFC 8785 canonicalization is a pure function over bytes, checked against the published signing fixtures. |
+
+**The chain is no longer on this list.** `receipt_chain_verify` and `chain_tamper_is_detected` were
+deleted rather than tightened, along with the two scripts behind them. A hostile review passed C-15
+against a deployment with no verifier at all by echoing the chain head the suite had handed the hook
+as an argument, and the answer to that is not a longer required output: the suite now reads the
+receipts over HTTP and walks the chain in its own implementation of `signing.md` §2.2. There is
+nothing left for a deployment to assert. `handoffd verify-chain` remains as an operator tool — it is
+how you check your own receipts still verify — but nothing in the suite asks it anything.
+
+Each remaining hook is a real operator tool rather than a test fixture: `logs` is however you
+already read your logs, and the rest are `handoffd` subcommands or one SQL statement.
+
+A hook is never satisfied by its exit code alone, and — since the second review — a hook's own words
+are never the last thing a case looks at either. `storage_mutate` is judged by re-reading the object
+over HTTP after the attempt. What each of the others must print is in `conformance/README.md`, along
+with the three cases that a deployment could still fake, named there rather than implied.
+
+## The crash probe
+
+`crash-between-writes.sh` starts a second `handoffd` with `HANDOFF_CRASH_POINT=answer_after_state_write`,
+raises and answers a request through it, and the process aborts **inside the open transaction**,
+after the state row is written and before the event row is. It then restarts and asserts that either
+both writes are present or neither is. §18 calls C-23 the case an implementation is most tempted to
+skip, because emitting the event just after the commit passes every happy-path test; this is what
+makes it fail when it should.
+
+`HANDOFF_CRASH_POINT` is unset in every deployment that is not running this suite, and changes
+nothing when unset.
+
+## Row-level security needs a role that cannot bypass it
+
+Twenty of the twenty-one `handoff_*` tables have RLS enabled and forced — every one that carries a
+`tenant_ref`. The exception is `handoff_migrations`, which holds applied migration numbers and no
+tenant's data. **A superuser, or any role with `BYPASSRLS`, ignores every policy**, which leaves
+this defence inert while every test still passes.
+
+Run `handoffd` as a role that **owns its own schema and has neither `SUPERUSER` nor `BYPASSRLS`**:
+`CREATE DATABASE handoff OWNER handoff_app`. `FORCE ROW LEVEL SECURITY` keeps the owner subject to
+the policies, and ownership is needed rather than optional, because `handoffd` applies migrations
+on every start — a role with only `SELECT, INSERT, UPDATE, DELETE` cannot start it, and fails with
+`permission denied for schema public`.
+
+The policy passes when **no** tenant has been named, and that half cannot be removed:
+authentication resolves a credential to a tenant (§4.1), so the query that discovers the tenant is
+unable to name it, and the cross-tenant sweeps have no tenant to name either. RLS therefore catches
+a query that named its tenant and then lost its `WHERE tenant_ref = …`, and does not catch one that
+named no tenant at all.
+
+Two integration tests hold this down, and both refuse to pass vacuously:
+
+| Test | What it asserts |
+|---|---|
+| `row_level_security_holds_on_every_tenant_scoped_table` | Per table, on **length and identity**, that a query without the predicate returns exactly the caller's rows. It first asserts that the *other* tenant owns a row in that table, because otherwise the comparison is between two empty sets; and that the role it used does not bypass RLS. |
+| `every_request_scoped_path_names_its_tenant` | Tightens the policy to fail closed on all but `handoff_principals`, then drives seventeen routes and asserts each still answers, so "each request-scoped transaction names its tenant" is measured rather than asserted. Its list of exceptions is empty; it may shrink and cannot grow. |
+
+The tenant predicate in every query is the primary defence; RLS is the one that catches the day
+somebody forgets it.

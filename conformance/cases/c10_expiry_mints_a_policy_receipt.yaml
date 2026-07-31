@@ -1,0 +1,144 @@
+id: C-10
+title: An expired request mints a policy receipt and a typed terminal signal
+level: 1
+invariants: [I11]
+spec:
+  - "§6.2 R6 — TTL sweep"
+  - "§6.4 — request TTL policies"
+  - "§9.6 — policy receipts"
+  - "§18 C-10"
+rationale: >
+  A request never goes quiet. Nobody answering is itself an outcome, and it produces a typed
+  terminal signal the runtime can branch on plus a receipt the audit can read. The receipt must be
+  visibly **not** a human decision: `actor.type = "policy"` and `authority.satisfied = "none"`. A
+  record that cannot distinguish a person from a policy from a passer-by is not a record.
+
+requires:
+  principals: [machine_a, human_editor]
+
+steps:
+  - name: raise with a short TTL and expire_and_deny
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c10-${run_id}"
+      body:
+        waiter_ref: "run:c10-${run_id}"
+        liveness: durable
+        prompt:
+          title: "Approve the wire transfer?"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options:
+                  - {id: approve, label: "Approve"}
+                  - {id: reject, label: "Reject"}
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+        ttl: PT2S
+        ttl_policy:
+          on_expiry: expire_and_deny
+      expect:
+        status: 201
+        body:
+          - path: expires_at
+            is_null: false
+      capture:
+        req: id
+
+  - name: let the request TTL lapse
+    advance_clock:
+      by: PT5S
+
+  - name: the request reaches expired
+    poll:
+      timeout: PT60S
+      interval: PT2S
+      call:
+        method: GET
+        path: /requests/${req}
+        as: machine_a
+        expect:
+          status: 200
+          body:
+            - path: state
+              equals: expired
+            - path: receipt.id
+              matches: "^rcpt_"
+              because: "§6.2 R6 — the sweep mints a policy receipt in the same transaction"
+        capture:
+          receipt: receipt.id
+
+  - name: the receipt says a policy decided, not a person
+    http:
+      method: GET
+      path: /requests/${req}/receipt
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: id
+            same_as: receipt
+          - path: kind
+            equals: policy
+          - path: actor.type
+            equals: policy
+            because: "§9.6 — visibly not a human decision"
+          - path: actor.principal_id
+            is_null: true
+            because: "§9.7 — a Server MUST NOT fabricate a person"
+          - path: authority.satisfied
+            equals: none
+            because: "§9.6 — authority.satisfied = none on a policy receipt"
+          - path: chain.digest
+            matches: "^sha256:"
+            because: "§9.4 — a policy receipt is in the chain like any other"
+
+  - name: the waiter received a typed terminal signal
+    poll:
+      timeout: PT30S
+      interval: PT2S
+      call:
+        method: GET
+        path: /waiters/run%3Ac10-${run_id}/signals
+        as: machine_a
+        expect:
+          status: 200
+          body:
+            - path: data[0].type
+              equals: expired
+              because: "I11 — every terminal transition produces a typed terminal signal"
+            - path: data[0].decision.outcome
+              equals: expired
+            - path: data[0].decision.source
+              equals: policy
+            - path: data[0].decision.effective
+              equals: deny
+              because: "§6.4 — under expire_and_deny, unanswered means no"
+            - path: data[0].resume_token
+              matches: "^rt_"
+              because: "§8.2 W4 — the ack needs a token, so the signal carries one"
+
+  - name: a terminal request cannot then be answered
+    http:
+      method: POST
+      path: /requests/${req}/answer
+      as: human_editor
+      headers:
+        Idempotency-Key: "c10-late-${run_id}"
+      body:
+        values: {decision: approve}
+      expect:
+        status: 409
+        body:
+          - path: error.code
+            equals: request_expired
+            because: >
+              §6.7.2 — when the conditional write affects no row the Server inspects the current
+              state and returns the specific code for it

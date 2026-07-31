@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.handoff.dev/v0.1/delivery-attempt.schema.json",
+  "title": "Handoff Delivery Attempt",
+  "description": "One transport attempt inside one delivery. A delivery is a first-class tracked entity, not a side effect of a notification sweep: escalation, reminders, re-delivery, and channel fallback all mint deliveries, never requests (I3). The root of this schema is a single attempt; `$defs/Delivery` is the containing record.",
+  "type": "object",
+  "required": ["n", "started_at", "outcome"],
+  "additionalProperties": false,
+  "properties": {
+    "n": { "type": "integer", "minimum": 1, "description": "1-based attempt number within its delivery." },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": ["string", "null"], "format": "date-time" },
+    "outcome": {
+      "enum": ["accepted", "transient_failure", "permanent_failure", "timeout", "suppressed"],
+      "description": "`accepted` means the transport took it — it is not evidence a person received anything. Only a grade above `dispatched` is that (see Delivery.grade_reached)."
+    },
+    "transport_status": {
+      "type": ["string", "null"],
+      "description": "Transport-native status, e.g. an HTTP status code or a provider error name. Opaque to the core."
+    },
+    "error": { "type": ["string", "null"], "description": "Human-readable failure detail. MUST NOT contain a secret value or a resolvable capability address (I8, I18)." },
+    "next_attempt_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Set while the delivery is `retrying`. Backoff MUST be exponential with jitter."
+    },
+    "delivery_id": { "$ref": "#/$defs/DeliveryId", "description": "Present when the attempt is served outside its delivery record." },
+    "request_id": { "$ref": "request.schema.json#/$defs/RequestId", "description": "Present when the attempt is served outside its delivery record." }
+  },
+
+  "$defs": {
+    "DeliveryId": { "type": "string", "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$" },
+
+    "Delivery": {
+      "type": "object",
+      "title": "Handoff Delivery",
+      "description": "One attempt to put a request in front of a person through one channel. A raise MUST NOT block on delivery: deliveries return `queued` and a channel outage never fails the raise.",
+      "required": ["id", "request_id", "channel", "state", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/DeliveryId" },
+        "request_id": { "$ref": "request.schema.json#/$defs/RequestId" },
+        "channel": {
+          "type": "string",
+          "description": "Open vocabulary. Adding a channel adds an adapter and a policy row, never a branch at a call site."
+        },
+        "target": { "$ref": "request.schema.json#/$defs/Target" },
+        "rung": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Which escalation rung minted this delivery. Rung 0 fires at raise time."
+        },
+        "state": {
+          "enum": ["queued", "suppressed", "sending", "dispatched", "retrying", "failed", "delivered", "bounced", "seen", "acted", "stale", "cancelled"],
+          "description": "Terminal states: suppressed, failed, bounced, acted, stale, cancelled. `cancelled` means the request settled before dispatch; `stale` means it settled elsewhere after dispatch."
+        },
+        "suppressed_reason": {
+          "enum": ["quiet_hours", "duplicate", "consent_missing", "policy"],
+          "description": "Why a queued delivery was never attempted."
+        },
+        "grade_reached": {
+          "oneOf": [
+            {
+              "enum": ["dispatched", "delivered", "seen", "acted"],
+              "description": "dispatched = our transport accepted it. delivered = the channel says it reached the person's endpoint. seen = the person opened the surface, authenticated. acted = the person answered through this delivery."
+            },
+            { "type": "null" }
+          ]
+        },
+        "max_grade": {
+          "enum": ["dispatched", "delivered", "seen", "acted"],
+          "description": "Declared by the channel adapter. A server MUST NOT record a grade above it. A voice page that cannot collect a decision declares `delivered`, and is then structurally unable to be mistaken for consent."
+        },
+        "can_authenticate_person": {
+          "type": "boolean",
+          "description": "Declared by the channel adapter. A channel declaring false may deliver and may collect an intent, but its answer is provisional and MUST NOT settle the request (I6)."
+        },
+        "attempts": { "type": "array", "items": { "$ref": "#" } },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "suppressed" } }, "required": ["state"] },
+          "then": { "required": ["suppressed_reason"] }
+        }
+      ]
+    }
+  }
+}

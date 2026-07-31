@@ -1,0 +1,257 @@
+id: C-20
+title: Every read returns exactly the caller's tenant's rows, and cross-tenant mutation fails
+level: 1
+invariants: [I17, I13]
+spec:
+  - "§3.2 — identity is tenant-scoped"
+  - "§4.1 and I13 — tenancy is resolved from stored state bound to the key, never from a body"
+  - "§4.6 — an identifier is not an authorization"
+  - "§18 C-20 — asserted on length and identity, never on `contains`"
+rationale: >
+  §18 is unusually specific about how to assert this, and the reason is worth restating: a query
+  missing its tenant predicate returns a **superset**, and a `contains` assertion passes against a
+  superset. Every listing check below therefore uses `set_equals`, which compares length and
+  identity together — the only form that fails when a row that should be invisible is present.
+
+  The mutation half matters just as much and is usually untested: refusing to *show* another
+  tenant's request is not the same as refusing to *cancel* it. The last step re-reads tenant A's
+  request from tenant A to prove it was untouched, rather than trusting the 404 that tenant B saw.
+
+requires:
+  principals: [machine_a, machine_b]
+
+steps:
+  - name: tenant A raises its first request
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c20-a1-${run_id}"
+      body:
+        waiter_ref: "run:c20-a-${run_id}"
+        prompt:
+          title: "Tenant A, ask one"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        a1: id
+        org_a: org_id
+
+  - name: tenant A raises its second request under the same waiter
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c20-a2-${run_id}"
+      body:
+        waiter_ref: "run:c20-a-${run_id}"
+        dedupe_key: "c20-a2-${run_id}"
+        prompt:
+          title: "Tenant A, ask two"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        a2: id
+
+  - name: tenant B raises one of its own
+    http:
+      method: POST
+      path: /requests
+      as: machine_b
+      headers:
+        Idempotency-Key: "c20-b1-${run_id}"
+      body:
+        waiter_ref: "run:c20-b-${run_id}"
+        prompt:
+          title: "Tenant B, ask one"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+      expect:
+        status: 201
+      capture:
+        b1: id
+
+  - name: tenant A's listing is exactly tenant A's rows
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c20-a-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${a1}", "${a2}"]
+            because: >
+              length and identity together. A `contains` assertion here would pass even if tenant
+              B's row were in the page, which is precisely the production failure.
+          - path: data[].org_id
+            all_equal: "${org_a}"
+            because: "every row in the page belongs to the calling tenant"
+
+  - name: tenant A sees nothing under tenant B's waiter reference
+    http:
+      method: GET
+      path: /requests
+      as: machine_a
+      query:
+        waiter_ref: "run:c20-b-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data
+            length: 0
+            because: >
+              §3.4 — waiter_ref is an opaque grouping key, and knowing another tenant's key must
+              reveal nothing
+
+  - name: tenant B's listing is exactly tenant B's row
+    http:
+      method: GET
+      path: /requests
+      as: machine_b
+      query:
+        waiter_ref: "run:c20-b-${run_id}"
+      expect:
+        status: 200
+        body:
+          - path: data[].id
+            set_equals: ["${b1}"]
+
+  - name: tenant B cannot cancel tenant A's request
+    http:
+      method: POST
+      path: /requests/${a1}/cancel
+      as: machine_b
+      headers:
+        Idempotency-Key: "c20-cross-cancel-${run_id}"
+      body:
+        reason: "cross-tenant write attempt"
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: >
+              §3.2.3 — 404 rather than 403, because existence is itself sensitive. Refusing to show
+              a row and refusing to write it are separate checks, and only the second one is tested
+              here.
+
+  - name: tenant B cannot amend it either
+    http:
+      method: POST
+      path: /requests/${a1}/amend
+      as: machine_b
+      headers:
+        Idempotency-Key: "c20-cross-amend-${run_id}"
+      body:
+        prompt:
+          title: "Tenant B rewrote this"
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+
+  - name: tenant A re-reads its request and finds it untouched
+    http:
+      method: GET
+      path: /requests/${a1}
+      as: machine_a
+      expect:
+        status: 200
+        body:
+          - path: state
+            equals: pending
+            because: "the refused cancel left no partial effect"
+          - path: prompt.title
+            equals: "Tenant A, ask one"
+            because: "the refused amend did not rewrite the ask"
+          - path: version
+            equals: 1
+          - path: cancel_reason
+            is_null: true
+
+  - name: a tenant identifier supplied in the body is ignored
+    http:
+      method: POST
+      path: /requests
+      as: machine_a
+      headers:
+        Idempotency-Key: "c20-body-tenant-${run_id}"
+      body:
+        waiter_ref: "run:c20-body-tenant-${run_id}"
+        prompt:
+          title: "Tenant A, with tenant B named in the metadata"
+        requires:
+          v: 1
+          answer:
+            fields:
+              - name: decision
+                type: choice
+                required: true
+                options: [{id: yes_, label: "Yes"}, {id: no_, label: "No"}]
+          capabilities: []
+          authority: {min_role: editor, auth_strength: session}
+        metadata:
+          org_id: "org_belonging_to_someone_else"
+          tenant_id: "org_belonging_to_someone_else"
+      expect:
+        status: 201
+        body:
+          - path: org_id
+            same_as: org_a
+            because: >
+              I13 — a Server MUST resolve the tenant from stored state bound to the key and MUST NOT
+              read it from any request body. §4.1 says the same of an API key: it carries no user
+              identity and no tenancy of its own beyond what the Server has stored for it.
+          - path: metadata.org_id
+            equals: "org_belonging_to_someone_else"
+            because: >
+              §19 — metadata is stored and returned verbatim and never interpreted. The point is
+              that it was carried, not obeyed.
+      capture:
+        planted: id
+
+  - name: and tenant B still cannot see it
+    http:
+      method: GET
+      path: /requests/${planted}
+      as: machine_b
+      expect:
+        status: 404
+        body:
+          - path: error.code
+            equals: request_not_found
+            because: "naming another tenant in a body does not move a row into it"

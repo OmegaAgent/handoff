@@ -1,0 +1,203 @@
+# Deployment profile for the Handoff conformance suite.
+#
+#   handoff-conformance --base-url https://handoff.example.com/v1 --profile my-profile.yaml
+#
+# The suite speaks only HTTP, so everything it cannot discover over HTTP lives here: credentials,
+# the deployment choices the specification deliberately leaves open, and the few probes that must
+# reach below the API. Nothing in this file is a case. Cases live in `conformance/cases/` and are
+# the same for every deployment; this file is what makes them runnable against yours.
+#
+# Without a profile the suite still runs every case, and every case fails with a stated reason.
+# That is intentional: an unconfigured deployment has demonstrated nothing.
+
+base_url: http://127.0.0.1:8080/v1
+
+# ---------------------------------------------------------------------------- principals
+#
+# Cases name principals by alias. `kind` decides how the credential is presented:
+#   machine       — Authorization: Bearer <token>, resolving to a service_account principal
+#   human_bearer  — Authorization: Bearer <token>, resolving to a human principal
+#   human_cookie  — Cookie: handoff_session=<token>
+#   none          — no credential (the built-in `anonymous` alias, which needs no entry here)
+#
+# `org` is for your own reference only. The suite never sends it: tenancy is resolved by the Server
+# from stored state, never from anything in a request body (I13).
+principals:
+  # Tenant A.
+  machine_a:
+    kind: machine
+    token: "omg_handoff_test_ka_REPLACE_ME"
+    org: org_a
+  # A SECOND machine principal in the SAME tenant, which C-5 needs. Without it the only machine that
+  # ever calls /answer is the one that raised the request, and "refused because it is a machine" is
+  # then indistinguishable from "refused because it is the requester" — a Server enforcing §4.2 by
+  # identity rather than by principal type would pass every case while letting one agent approve
+  # another agent's refund.
+  machine_a2:
+    kind: machine
+    token: "omg_handoff_test_ka2_REPLACE_ME"
+    org: org_a
+  human_editor:
+    kind: human_bearer
+    token: "REPLACE_ME"
+    org: org_a
+  human_editor_2:
+    kind: human_bearer
+    token: "REPLACE_ME"
+    org: org_a
+  human_viewer:
+    kind: human_bearer
+    token: "REPLACE_ME"
+    org: org_a
+  human_admin:
+    kind: human_bearer
+    token: "REPLACE_ME"
+    org: org_a
+  # Possession of a single-use delivery token and nothing else. No person is identified.
+  human_link_only:
+    kind: human_bearer
+    token: "REPLACE_ME"
+    org: org_a
+
+  # Tenant B. C-19 and C-20 are the tests that pass in development and fail in production, and
+  # they cannot run at all without a genuinely separate second tenant.
+  machine_b:
+    kind: machine
+    token: "omg_handoff_test_kb_REPLACE_ME"
+    org: org_b
+
+# ---------------------------------------------------------------------------- deployment choices
+#
+# Where the specification permits a deployment to choose, the profile states the choice and the
+# case asserts the behaviour that choice implies. A case never guesses.
+deployment:
+  # §4.4 — `link_only` is defined but constrained. `false` means the Server refuses an answer at
+  # that grade with 403 auth_strength_not_permitted. `true` means it accepts it and the receipt
+  # records actor.type = "anonymous_link" with no principal id.
+  link_only_permitted: false
+
+# ---------------------------------------------------------------------------- hooks
+#
+# Commands run with `sh -c`. Arguments arrive as environment variables named
+# `HANDOFF_ARG_<UPPERCASE_KEY>`.
+#
+# These exist because a handful of requirements are below the HTTP API by construction. Putting a
+# database driver in the runner instead would make the suite an assertion about our storage choice
+# rather than about the protocol, and would stop it testing implementations written in other
+# languages.
+#
+# Every hook below is REQUIRED: the commands here are exactly the ones the case set names, and a
+# case whose hook is missing FAILS rather than being skipped. `advance_clock` is the only optional
+# one, and it is commented out. That correspondence is checked by a test in this crate
+# (`profile_example_defines_every_hook_the_cases_require`) rather than maintained by hand, because
+# a review found this file missing `canonicalize` — which meant every implementer who started from
+# it failed C-24 for a missing hook rather than for anything about their implementation.
+#
+# ## Exit status is not what the case asserts, and neither is anything a hook prints
+#
+# It cannot be. Every hook below has a one-word shell command that exits the way its case wants —
+# `false` for a mutation that must be refused, `true` for everything else — and a suite that checked
+# only the status would hand a conformance claim to a deployment that implemented none of this. A
+# hostile review demonstrated exactly that. The next round it demonstrated the sequel: requiring the
+# hook to *print evidence* is defeated the same way, because every value the case can require is
+# either handed to the hook as an argument or small enough to guess, and the claimant writes the
+# hook.
+#
+# So the number of hooks went down instead. Anything the suite can compute from what it read over
+# HTTP, the suite computes — the receipt chain is walked inside the runner now, in its own
+# implementation of `signing.md` §2.2, and there is no chain hook to supply. What remains below is
+# the residue that is genuinely not reachable over HTTP, and each one is judged by an observation
+# the suite makes afterwards rather than by what the command said.
+hooks:
+  # C-7, C-17 — the scans must search logs. §12.3 makes "no secret in a log line" normative, and a
+  # deployment that cannot show its logs has not demonstrated it. A `logs` hook that fails, or that
+  # prints nothing, fails the case: there is no version of "we could not show you" that is a pass.
+  logs: "docker compose logs --no-color --since 10m"
+
+  # C-15 — §9.4 requires immutability at the storage layer, "because the threat includes the
+  # application". ONE command, parameterized, run as the application's own database role:
+  #
+  #   HANDOFF_ARG_TARGET     receipt | request
+  #   HANDOFF_ARG_OPERATION  update | delete
+  #   HANDOFF_ARG_ID         the object's id, as the HTTP surface reports it
+  #   HANDOFF_ARG_VALUE      for an update, the value to write where the object's content shows it
+  #
+  # An update must write VALUE somewhere the object's HTTP representation would carry it — a
+  # receipt's `decision.note`, a request's `prompt.title` — because C-15 decides the step by reading
+  # the object back over HTTP, not by what this command prints. The receipt targets must be refused
+  # by the engine; the request target must succeed and become visible. That control is what
+  # distinguishes a storage engine refusing a write from a command that never wrote: from outside,
+  # both leave the receipt exactly as it was.
+  #
+  # Implement it as one statement shape for both targets. A version that is honest for `request` and
+  # stubbed for `receipt` is a deliberate lie rather than an omission, and `conformance/GATE.md`
+  # says so where a reader of a published run will see it.
+  storage_mutate: "./scripts/storage-mutate.sh"
+
+  # C-21 — the protocol defines the outbound delivery model but no inbound channel-adapter surface,
+  # so the deployment injects the message. Receives REQUEST_ID, CHANNEL, TEXT.
+  # Must print: `channel_message=<id> request=<id> channel=<name> request_state=<state>`, read back
+  # from storage. Everything C-21 asserts afterwards is about a message that has to exist.
+  channel_inbound: "./scripts/inject-channel-message.sh"
+
+  # C-22 — simulate the runtime observing the target page change, with no person asserting anything.
+  # Must print: `observation=<id> request=<id> request_state=<state> receipts=<n>`.
+  observe_page_state_change: "./scripts/observe-page-change.sh"
+
+  # C-23 — §6.2 requires every transition to emit its event in the same transaction as the state
+  # change, and the protocol publishes no endpoint that lists events, so the deployment prints them.
+  # One event per line, each naming its type. Receives REQUEST_ID.
+  events: "./scripts/dump-events.sh"
+
+  # C-24 — canonicalize a document per RFC 8785 and print three lines: the canonical bytes, then
+  # `bytes=<n>`, then `sha256=<lowercase hex>`. Receives either PATH (repository-relative) or JSON
+  # (an inline document).
+  #
+  # Not reachable over HTTP, which is why it is a hook: two implementations that disagree about
+  # member ordering or number formatting compute different digests for the same receipt, and
+  # nothing errors — the chain simply stops verifying for somebody, later, with no way to establish
+  # which side was right. Running this against the published signing fixtures is how a deployment
+  # shows its canonicalization agrees with everyone else's. §1.4 restricts digest-covered content
+  # to integers within the safe-integer bound, so a conforming canonicalizer either emits the same
+  # bytes as a complete JCS implementation or refuses a value outside the band; it never rounds one.
+  canonicalize: "./scripts/canonicalize.sh"
+
+  # C-23 — induce a settling write, kill the Server between the state write and the event write,
+  # restart, and exit 0 only if both are present or neither is. This is the only assertion that
+  # distinguishes a real transaction from an emit-after-commit that has not crashed yet.
+  #
+  # Must print: `crash_point_reached=<name> instance_exit=<non-zero> … agree=yes`. "Both present"
+  # is what a normal commit looks like too, so this hook has to show that the process was actually
+  # interrupted at the seam and left by a fault. If your build cannot induce the crash, this must
+  # FAIL — reporting agreement you never tested is the failure the case exists to catch.
+  crash_between_state_and_event: "./scripts/crash-between-writes.sh"
+
+  # C-9, C-10, C-18 — optional. Where a deployment can move its own clock, the TTL cases run in
+  # milliseconds instead of real seconds. Receives BY as an ISO-8601 duration. Without it the suite
+  # sleeps for real, up to `max_real_sleep`.
+  # advance_clock: "./scripts/advance-clock.sh"
+
+# ---------------------------------------------------------------------------- callbacks (C-18)
+callback:
+  # Where the suite's own receiver listens. Port 0 picks a free one.
+  bind: "127.0.0.1:0"
+  # Host and port to write into the URL handed to the Server, when it reaches the runner through a
+  # tunnel or a container network rather than at the bind address directly.
+  # advertise: "host.docker.internal:9099"
+  #
+  # The signing secret for this endpoint, and the previous one during a rotation overlap. The
+  # signature scheme is `spec/signing.md`, which §15 cites as normative. Supply at least `secret`,
+  # or C-18's signature assertions fail with that reason rather than passing vacuously. Two active
+  # secrets are what let C-18 observe a rotation overlap at all: with one, there is nothing to
+  # rotate from.
+  # secret: "REPLACE_ME"
+  # secret_previous: "REPLACE_ME"
+
+# ---------------------------------------------------------------------------- misc
+#
+# Longest the suite will sleep in real time when there is no `advance_clock` hook. Supply the hook
+# rather than raising this.
+max_real_sleep: PT30S
+
+# Where the specification's fixtures live, relative to the repository root.
+fixtures_root: spec/fixtures
