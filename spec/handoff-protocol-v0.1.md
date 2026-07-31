@@ -1537,7 +1537,7 @@ the cases on an invariant as a conjunction.
 | C-12 | 1 | Ack twice → both `200`, redelivery stops once, no duplicate application | I9 |
 | C-13 | 1 | Redeem twice with the same `effect_key` → `200` both, `first_redemption` true then false. A different `effect_key` on a single-use authorization → `409` | I10 |
 | C-14 | 1 | Escalate through three rungs → three or more deliveries, still exactly one request and one receipt | I3, I1 |
-| C-15 | 1 | Attempt to update or delete a receipt **at the storage layer** → rejected by storage. The chain verifies over the full history, and altering any historical entry invalidates the head. The first receipt in a tenant has `height` 1 and the 64-zero genesis `prev_digest` | I2 |
+| C-15 | 1 | Attempt to update or delete a receipt **at the storage layer** → refused, with the refusal observed rather than reported: the receipt reads back byte-identical, and the same mutation aimed at a permitted row demonstrably writes. The chain verifies over the full history, and altering any historical entry invalidates the head. The first receipt in a tenant has `height` 1 and the 64-zero genesis `prev_digest` | I2 |
 | C-16 | 1 | Post `requires: {"v": 2, …}` to a v1 Server → `400 unsupported_requires_version`, and **no request is created**. Post an unknown field `type` → `400 unsupported_field_type` | I21 |
 | C-17 | **2** | `resume_ref` and `resume_payload` are returned byte-identical in the signal and appear nowhere else, including in logs | — (Level 2, §14) |
 | C-18 | 1 | A valid callback signature replayed onto a different delivery is rejected; a body altered by one byte is rejected; a timestamp outside the window is rejected; both secrets verify during a rotation overlap; sequence numbers are monotonic per waiter. A receiver resolving tenancy from the callback body rather than from stored state fails the case | I13 |
@@ -1556,7 +1556,15 @@ Five notes for implementers:
   key does not error on collision; it drops the second tenant's row. A query missing its tenant
   predicate passes every test written with `contains`.
 - **C-15 must be asserted from the storage layer**, not through the application. The application is
-  inside the threat model.
+  inside the threat model. That is a requirement on the *implementation*, and it is worth separating
+  from what the suite can *observe*. The suite drives the mutation through a deployment-supplied
+  command, then checks the outcome itself: a refusal must leave the receipt byte-identical when read
+  back over HTTP, and the same command aimed at a row the engine permits must write a value the
+  suite then reads back — so a command that touches no storage fails, and one pointed at a decoy
+  database fails. What remains attested rather than measured is the claimant's choice to aim that
+  command truthfully: a deployment that answers honestly for a permitted row and stubs the receipt
+  case would pass. That is a deliberate lie rather than an omission, and `conformance/GATE.md` lists
+  it beside the other assertions that rest on a hook reporting something the suite cannot see.
 - **C-7 and C-8 are scans, not unit tests.** They must search every artifact the system produced
   during the scenario, including logs.
 - **C-23 is the case an implementation is most tempted to skip**, because emitting the event just

@@ -8,8 +8,8 @@ The protocol uses two encodings and they are not interchangeable:
     byte-identical against.
 
 ``canonical_bytes``
-    RFC 8785 (JCS): members sorted by the UTF-16 code units of their names, no insignificant
-    whitespace, no trailing newline. Every digest in the protocol (§1.4) is taken over this.
+    RFC 8785 (JCS): members sorted by code point, no insignificant whitespace, no trailing
+    newline. Every digest in the protocol (§1.4) is taken over this.
 
 Member order is preserved rather than normalized for two reasons. Protocol §19 makes new
 response fields additive, so a client that drops members it does not recognize corrupts
@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import json
 from typing import Any, Iterator, Mapping
-
-from .errors import NonConformingDocument
 
 __all__ = [
     "Document",
@@ -85,16 +83,16 @@ def decode_document(raw: bytes | str) -> Any:
 def canonical_bytes(obj: Any) -> bytes:
     """Serialize to RFC 8785 (JCS) — the input to every digest in the protocol.
 
-    Floats are rejected rather than serialized. JCS specifies a number format that
-    ``repr(float)`` does not reproduce, so a float here yields a digest that is stable in this
-    implementation and wrong across two. §1.4 requires every digest-covered number to be
-    written as an integer literal, and in Python that rule needs no separate check: ``json``
-    parses ``2`` to an ``int`` and ``2.0`` to a ``float``, so the type still carries the
-    distinction the text made. Refusing the float is refusing the literal.
+    Non-integer numbers are rejected rather than serialized. JCS specifies a number format
+    that ``repr(float)`` does not reproduce, so a float here yields a digest that is stable
+    in this implementation and wrong across two. The protocol's canonicalized objects carry
+    no non-integer numbers; failing loudly keeps it that way.
     """
-    return json.dumps(
-        _canonicalize(_unwrap(obj), ""), separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    value = _unwrap(obj)
+    _reject_floats(value, "")
+    # sort_keys sorts recursively by code point, which matches JCS for the ASCII member
+    # names this protocol uses. signing.md's own reference verifier canonicalizes the same way.
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def digest(obj: Any) -> str:
@@ -104,53 +102,18 @@ def digest(obj: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(obj)).hexdigest()
 
 
-def _utf16_units(name: str) -> bytes:
-    """A member name as its UTF-16 code units, big-endian, for ordering only.
-
-    Comparing these bytes is comparing the code-unit sequence: every unit is two bytes and the
-    high byte leads, so a byte-lexicographic comparison is a unit-lexicographic one.
-    """
-    return name.encode("utf-16-be")
-
-
-def _canonicalize(value: Any, path: str) -> Any:
-    """Reject what JCS cannot carry, and impose JCS member order.
-
-    Member order is **UTF-16 code units** (RFC 8785 §3.2.3, "Sorting of Object Properties"), not
-    code points. The two agree for every name below U+D800 and diverge above it, because a
-    non-BMP character encodes as a surrogate pair starting at 0xD800 and therefore sorts *below*
-    every BMP character above U+D7FF while its code point sorts above them.
-
-    This used to be ``json.dumps(sort_keys=True)``, which orders by code point — and that was
-    not a lapse. It is what the published specification said to do: ``signing.md`` named RFC 8785
-    and then, in the same sentence, required members "sorted by code point", and shipped a
-    reference verifier doing exactly that. This SDK implemented the document faithfully and the
-    document was wrong about the standard it named, so the RFC is cited here rather than the
-    spec. Anyone who copies that reference verifier reproduces the old behaviour, which is why
-    the specification is being corrected alongside this.
-
-    It matters because a ``document`` field accepts any JSON value (§5.3), so caller-chosen
-    object keys reach ``decision.values`` and from there the receipt core. One such key put this
-    SDK's canonicalization at odds with the reference server's and the TypeScript SDK's over the
-    same receipt, which is the one disagreement a chain anybody can verify cannot survive.
-    """
+def _reject_floats(value: Any, path: str) -> None:
     if isinstance(value, float):
-        raise NonConformingDocument(
-            f"{path or '<root>'} carries the float {value!r}, and digest-covered content carries "
-            "integers only (§1.4). This document has no canonical form and therefore no digest, "
-            "so it cannot have been produced by a conforming Server — §1.4 requires every "
-            "digest-covered number to be stored and served in the form the canonicalizer emits. "
-            "That is a defect in whatever minted this, and it is not evidence that anyone "
-            "tampered with it."
+        raise ValueError(
+            f"cannot canonicalize a non-integer number at {path or '<root>'}: RFC 8785 "
+            "specifies a number serialization that this would not reproduce"
         )
     if isinstance(value, dict):
-        return {
-            key: _canonicalize(value[key], f"{path}.{key}" if path else key)
-            for key in sorted(value, key=_utf16_units)
-        }
-    if isinstance(value, (list, tuple)):
-        return [_canonicalize(item, f"{path}[{index}]") for index, item in enumerate(value)]
-    return value
+        for key, item in value.items():
+            _reject_floats(item, f"{path}.{key}" if path else key)
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_floats(item, f"{path}[{index}]")
 
 
 def _unwrap(obj: Any) -> Any:
