@@ -30,9 +30,12 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPEC = ROOT / "spec"
 failures: list[str] = []
+ran = 0
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
+    global ran
+    ran += 1
     print(f"  {'ok  ' if ok else 'FAIL'}  {label}{('  — ' + detail) if detail and not ok else ''}")
     if not ok:
         failures.append(label)
@@ -109,8 +112,18 @@ else:
     except Exception as exc:
         check("the published snippet executes as written", False, f"{type(exc).__name__}: {exc}")
 
+    # A missing name is a FAILURE, not a reason to do less work. Guarding the rest of this file on
+    # `if canonical_json:` meant a snippet that executed but no longer defined it took both fixture
+    # verifications and the whole ordering section with it — 14 checks instead of 18, nothing red,
+    # exit 0, and this script still printing that everything checks out. That is precisely the shape
+    # `conformance/README.md` warns about, in the file written to catch it elsewhere.
     canonical_json = ns.get("canonical_json")
-    if canonical_json:
+    check(
+        "the published snippet defines canonical_json, so the checks below can run",
+        callable(canonical_json),
+        f"names defined: {sorted(k for k in ns if not k.startswith('__'))}",
+    )
+    if callable(canonical_json):
         for name in sorted(p.name for p in SPEC.glob("fixtures/*receipt*.json")):
             doc = json.loads((SPEC / "fixtures" / name).read_text())
             if "chain" not in doc:
@@ -131,7 +144,21 @@ else:
         check("the emoji key sorts before the fullwidth exclamation", correct.decode().index("\U0001F600") < correct.decode().index("！"))
 
 print()
-if failures:
-    print(f"{len(failures)} check(s) failed: " + ", ".join(failures))
+
+# A floor, because "nothing failed" and "nothing ran" print identically. This number may only rise:
+# if a check is deliberately removed, lower it in the same commit and say why. Two paths have already
+# been found that quietly did less work while still reporting success — a missing `cryptography`
+# skipping the signature checks, and a snippet that stopped defining the name the rest of the file
+# needed. Counting is the cheap defence against the third one.
+EXPECTED_CHECKS = 19
+if ran < EXPECTED_CHECKS:
+    print(
+        f"only {ran} of at least {EXPECTED_CHECKS} checks ran. Something was skipped rather than "
+        f"failed, which is the failure mode this count exists to catch."
+    )
     sys.exit(1)
-print("every published artifact checks out against code that shares nothing with the implementation")
+
+if failures:
+    print(f"{len(failures)} of {ran} check(s) failed: " + ", ".join(failures))
+    sys.exit(1)
+print(f"all {ran} checks pass — the published artifacts hold up against code that shares nothing with the implementation")
