@@ -1,0 +1,71 @@
+# The conformance runner, as a machine that lives inside the deployment's own network.
+#
+# Running the suite from a laptop against a cloud deployment cannot demonstrate three of its cases,
+# and none of the three reasons is a defect in the server:
+#
+#   C-11  the runner has to abandon a long poll mid-flight, which it only does over plain HTTP
+#   C-18  the Server must reach the suite's callback receiver, and a laptop has no address it can
+#         call back to
+#   C-23  the crash probe starts a second handoffd against the same database, which needs the
+#         binary and the store beside it
+#
+# All three dissolve when the runner sits inside the same private network: the base URL can be the
+# app's internal address over plain HTTP, the receiver has a 6PN address the Server can reach, and
+# the crash instance runs locally against the same store. This image is that runner.
+#
+# It is temporary by construction. It carries no paging credential, it is never bound to a public
+# address, and the machine that runs it is destroyed when the run is over.
+
+FROM rust:1.94-slim-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Built from the REPOSITORY ROOT as context, because the runner needs the cases, the hook scripts
+# and the fixtures as well as the crates -- the suite is declarative data plus a binary, and an
+# image with only the binary can run nothing.
+COPY . .
+
+# Both binaries: the runner drives the suite, and `handoffd` is what the C-23 hook starts as its
+# crash instance and what the channel and observation hooks shell out to.
+RUN cd core \
+    && cargo build --release --locked -p handoff-conformance --bin handoff-conformance \
+    && cargo build --release --locked -p handoff-server --bin handoffd \
+    && strip target/release/handoff-conformance target/release/handoffd
+
+FROM debian:bookworm-slim AS runtime
+
+# `postgresql-client` because several hooks are psql one-liners against the store, `curl` because
+# the crash hook drives HTTP against its own instance, and `jq` for the hooks that read JSON.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates postgresql-client curl jq python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# flyctl, so the `logs` hook can fetch the DEPLOYED server's logs. C-7 and C-8 are scans over every
+# artifact the run produced, logs included, and a deployment that cannot show its logs cannot
+# demonstrate that a secret stayed out of them. Locally the hook tails a file; against a remote
+# boundary the logs live behind the platform's API, so the runner needs a client for it.
+RUN curl -fsSL https://fly.io/install.sh | FLYCTL_INSTALL=/usr/local sh \
+    && /usr/local/bin/flyctl version
+
+COPY --from=build /src/core/target/release/handoff-conformance /usr/local/bin/handoff-conformance
+COPY --from=build /src/core/target/release/handoffd /usr/local/bin/handoffd
+
+# The declarative half of the suite: the cases, the hook scripts they name, and the fixtures the
+# canonicalization cases read. These are data, not code, and they are what makes the run auditable.
+WORKDIR /suite
+COPY conformance /suite/conformance
+COPY core/dev/scripts /suite/core/dev/scripts
+COPY spec/fixtures /suite/spec/fixtures
+# §18's case table in machine-readable form. The runner reads it to know which cases exist at which
+# level, so without it the suite cannot even enumerate itself.
+COPY spec/conformance-map.json /suite/spec/conformance-map.json
+
+ENV HANDOFFD=/usr/local/bin/handoffd \
+    HANDOFF_RUN_DIR=/tmp/run
+
+# Idle by default. The run is driven by `fly machine run … --command`, so the machine does nothing
+# until it is told to, and does nothing at all if the command fails to be given.
+CMD ["sleep", "infinity"]

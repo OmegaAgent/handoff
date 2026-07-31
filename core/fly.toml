@@ -16,7 +16,12 @@ primary_region = "sjc"
   dockerfile = "Dockerfile"
 
 [env]
-  HANDOFF_BIND = "0.0.0.0:8080"
+  # `[::]` and not `0.0.0.0`. Fly's private network is IPv6, so a listener bound to the IPv4
+  # wildcard is unreachable from every other machine in the organisation -- the edge proxy still
+  # serves it publicly, which is exactly what makes this hard to notice. Found by running the
+  # conformance suite from inside the network and watching every case fail to connect while the
+  # public URL answered 200. On Linux a `::` bind accepts IPv4 as well, so this is strictly wider.
+  HANDOFF_BIND = "[::]:8080"
   # link_only cannot settle a request here. §4.3 permits a deployment to allow it; this one does
   # not, and C-6b asserts the refusal against that declaration.
   HANDOFF_LINK_ONLY_PERMITTED = "false"

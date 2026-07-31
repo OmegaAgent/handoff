@@ -50,7 +50,9 @@ WORKDIR /home/handoff
 
 # Bind on all interfaces inside the container; the platform decides what reaches it. Every other
 # setting is supplied at run time so this image is not specific to any one deployment.
-ENV HANDOFF_BIND=0.0.0.0:8080
+# `[::]`, not `0.0.0.0`: on a platform whose private network is IPv6, the IPv4 wildcard is
+# reachable from the edge proxy and from nothing else. A `::` bind accepts IPv4 too.
+ENV HANDOFF_BIND=[::]:8080
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

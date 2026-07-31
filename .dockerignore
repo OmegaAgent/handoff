@@ -1,0 +1,7 @@
+# Build artifacts are gigabytes and are rebuilt inside the image anyway. Without this the daemon
+# uploads every stale test binary in core/target as build context, which is slow, and on a
+# constrained disk it is worse than slow.
+**/target/
+**/node_modules/
+.git/
+*.log
