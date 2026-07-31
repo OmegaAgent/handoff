@@ -38,6 +38,7 @@ sha2.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+sha2 = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

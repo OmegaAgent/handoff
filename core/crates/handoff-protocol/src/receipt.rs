@@ -123,10 +123,14 @@ impl<'de> Deserialize<'de> for Digest {
 // Canonical JSON (RFC 8785 subset)
 // ---------------------------------------------------------------------------------------------
 
+/// The largest integer an IEEE-754 double distinguishes from its neighbours, `2^53 − 1`.
+pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
 /// Serialize `value` to its canonical UTF-8 form.
 ///
-/// See the module documentation for the two deliberate narrowings. Every digest defined by the
-/// protocol is taken over the output of this function (§1.4).
+/// See the module documentation for the deliberate narrowing: digest-covered content carries
+/// **integers only**, bounded to ±(2^53 − 1). Every digest defined by the protocol is taken over
+/// the output of this function (§1.4).
 pub fn canonical_json(value: &Value) -> Result<Vec<u8>> {
     let mut out = String::new();
     write_canonical(value, &mut out)?;
@@ -179,11 +183,22 @@ fn write_canonical(value: &Value, out: &mut String) -> Result<()> {
 }
 
 fn write_number(n: &serde_json::Number, out: &mut String) -> Result<()> {
+    // The safe-integer bound applies to every arm, not only the floating-point one. An integer
+    // arriving as `i64` used to short-circuit straight to output, so a value beyond 2^53 − 1
+    // canonicalized happily here while the answer layer rejected it — the two disagreed, and the
+    // one that mattered for a digest was the permissive one.
+    const SAFE: i64 = 9_007_199_254_740_991;
     if let Some(i) = n.as_i64() {
+        if i.abs() > SAFE {
+            return Err(unsafe_integer(&i.to_string()));
+        }
         out.push_str(&i.to_string());
         return Ok(());
     }
     if let Some(u) = n.as_u64() {
+        if u > SAFE as u64 {
+            return Err(unsafe_integer(&u.to_string()));
+        }
         out.push_str(&u.to_string());
         return Ok(());
     }
@@ -204,21 +219,48 @@ fn write_number(n: &serde_json::Number, out: &mut String) -> Result<()> {
         out.push('0');
         return Ok(());
     }
-    let magnitude = f.abs();
-    if !(1e-6..1e21).contains(&magnitude) {
+    // Digest-covered content carries **integers only**, bounded to ±(2^53 − 1).
+    //
+    // An earlier profile admitted any number in `1e-6 ≤ |x| < 1e21`, on the reasoning that
+    // `Number::toString` produces plain decimal there. That reasoning holds for the *notation* and
+    // still leaves the *value* unsafe: RFC 8785 inherits ECMAScript number formatting, which is
+    // precisely the thing independent implementations do not reproduce reliably, and asking three
+    // languages to agree on float formatting is how a fourth ends up disagreeing. Both published
+    // SDKs refuse non-integers outright, and a receipt only one implementation can canonicalize is
+    // a receipt nobody can verify — which is the whole claim the chain exists to make.
+    //
+    // Integers are exact in IEEE-754 up to 2^53 − 1 and render identically everywhere, so the two
+    // old bounds collapse into one rule: no fractional part, and inside the safe-integer range. A
+    // Client carrying an exact decimal quantity — money, most obviously — sends it as `text`,
+    // which sidesteps binary floating point rather than negotiating with it.
+    if f.fract() != 0.0 {
         return Err(ProtocolError::new(
             ErrorCode::InvalidRequest,
             format!(
-                "{f:e} is outside the range this profile canonicalizes; serializers disagree \
-                 about exponent form there, and a receipt nobody can re-canonicalize is a receipt \
-                 nobody can verify"
+                "{f} is not an integer, and digest-covered content carries integers only: RFC 8785 \
+                 inherits a number serialization independent implementations do not reproduce. \
+                 Carry an exact decimal quantity as `text`."
             ),
         ));
     }
-    // Inside that range Rust's shortest round-trip decimal and ECMAScript's `Number::toString`
-    // agree, and neither uses exponent notation.
-    out.push_str(&f.to_string());
+    if f.abs() > MAX_SAFE_INTEGER {
+        return Err(unsafe_integer(&format!("{f}")));
+    }
+    // Written as a plain integer: no exponent, no fractional part, no locale, nothing to disagree
+    // about.
+    out.push_str(&format!("{}", f as i64));
     Ok(())
+}
+
+/// The one message every arm of [`write_number`] uses for an out-of-range integer.
+fn unsafe_integer(rendered: &str) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::InvalidRequest,
+        format!(
+            "{rendered} is outside ±(2^53 − 1), beyond which a value cannot be distinguished from \
+             its neighbours, so a receipt would record a figure nobody entered"
+        ),
+    )
 }
 
 fn write_string(s: &str, out: &mut String) {
@@ -321,7 +363,12 @@ pub struct ReceiptActor {
     #[serde(rename = "type")]
     pub actor_type: ActorType,
     /// The principal, where there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Always serialized, `null` when the actor is not a person. §4.4 and §9.7 both turn on the
+    /// difference between "nobody was identified" and "not recorded", and an absent key cannot
+    /// express the first. It is also part of the hashed receipt core, so it must be present for a
+    /// third party to reproduce the digest.
+    #[serde(default)]
     pub principal_id: Option<PrincipalId>,
     /// Display name frozen at decision time, so a later rename does not rewrite history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -396,7 +443,10 @@ pub struct ReceiptRendered {
     /// Digest of the rendering.
     pub digest: Digest,
     /// Opaque pointer to the retained render. Never a public URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Serialized as `ref`, which is what `openapi.yaml` and the published
+    /// `fixtures/signing/receipt-core.json` both spell it. The Rust field cannot use that name.
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
 }
 
@@ -658,10 +708,12 @@ impl Receipt {
         Ok(())
     }
 
-    /// The canonical form this receipt's digest is taken over: everything **except** the digest
-    /// itself, which cannot hash itself.
+    /// **Step 1 of `signing.md` §2.2** — the receipt core: this receipt with its `chain` member
+    /// removed entirely.
     ///
-    /// `prev_digest` and `height` are included, which is what links the chain.
+    /// The whole member goes, not just `digest`. `height` and `prev_digest` are inputs to step 2
+    /// and must not also be inside the hashed object, or the two steps would double-count them and
+    /// no independent implementation of §2.2 would agree with this one.
     pub fn canonical_form(&self) -> Result<Value> {
         let mut value = serde_json::to_value(self).map_err(|e| {
             ProtocolError::new(
@@ -669,22 +721,20 @@ impl Receipt {
                 format!("receipt is not serializable: {e}"),
             )
         })?;
-        if let Some(chain) = value.get_mut("chain").and_then(Value::as_object_mut) {
-            chain.remove("digest");
+        if let Some(object) = value.as_object_mut() {
+            object.remove("chain");
         }
         Ok(value)
     }
 
-    /// The digest this receipt would carry given the chain link it is being written into.
-    fn digest_with(&self, height: u64, prev_digest: Option<&Digest>) -> Result<Digest> {
-        let mut probe = self.clone();
-        probe.chain = Some(ChainLink {
-            height,
-            prev_digest: prev_digest.cloned(),
-            // Any value; `canonical_form` removes it before hashing.
-            digest: Digest::sha256(b""),
-        });
-        digest_of(&probe.canonical_form()?)
+    /// `lowercase_hex(SHA-256(receipt_core))`, **without** a `sha256:` prefix (§2.2 step 1).
+    pub fn core_hash(&self) -> Result<String> {
+        let bytes = canonical_json(&self.canonical_form()?)?;
+        let mut hex = String::with_capacity(64);
+        for byte in Sha256::digest(&bytes) {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        Ok(hex)
     }
 
     /// Seal this receipt into a tenant's chain, immediately after `previous`.
@@ -695,15 +745,40 @@ impl Receipt {
     pub fn seal(mut self, previous: Option<&ChainLink>) -> Result<Self> {
         self.validate()?;
         let height = previous.map_or(1, |p| p.height + 1);
-        let prev_digest = previous.map(|p| p.digest.clone());
-        let digest = self.digest_with(height, prev_digest.as_ref())?;
+        // §2.2: for the first receipt in a tenant the predecessor is 64 ASCII zeros. It is stored,
+        // not merely substituted during the computation, so that a party holding **one** receipt
+        // can verify it without being handed the chain — which is the whole point of the receipt.
+        let prev_digest = previous
+            .map(|p| p.digest.clone())
+            .unwrap_or_else(genesis_prev_digest);
+        let digest = chain_digest(height, &prev_digest, &self.core_hash()?);
         self.chain = Some(ChainLink {
             height,
-            prev_digest,
+            prev_digest: Some(prev_digest),
             digest,
         });
         Ok(self)
     }
+}
+
+/// The predecessor of the first receipt in a tenant: 64 ASCII zeros, prefixed (`signing.md` §2.2).
+pub fn genesis_prev_digest() -> Digest {
+    Digest::parse(&format!("sha256:{}", "0".repeat(64)))
+        .expect("64 zeros is a well-formed sha256 digest")
+}
+
+/// **Step 2 of `signing.md` §2.2** — the chain digest.
+///
+/// ```text
+/// chain_input  = height ‖ LF ‖ prev_digest ‖ LF ‖ core_hash
+/// chain.digest = "sha256:" ‖ lowercase_hex( SHA-256( chain_input ) )
+/// ```
+///
+/// `prev_digest` carries its `sha256:` prefix; `core_hash` does not. `height` is inside the input
+/// so an entry cannot be excised and the remaining entries re-linked without detection.
+pub fn chain_digest(height: u64, prev_digest: &Digest, core_hash: &str) -> Digest {
+    let input = format!("{height}\n{prev_digest}\n{core_hash}");
+    Digest::sha256(input.as_bytes())
 }
 
 /// Walk a tenant's receipts in order, recompute every digest, and return the exportable head.
@@ -749,12 +824,15 @@ pub fn verify_chain(receipts: &[Receipt], as_of: Timestamp) -> Result<Option<Cha
                 link.height
             )));
         }
-        if link.prev_digest.as_ref() != previous.map(|p| &p.digest) {
+        // §2.2: the predecessor of the first receipt is 64 ASCII zeros, and it is stored, so this
+        // reads the same field for every position rather than special-casing the genesis.
+        let expected_prev = previous.map_or_else(genesis_prev_digest, |p| p.digest.clone());
+        if link.prev_digest.as_ref() != Some(&expected_prev) {
             return Err(broken(
                 "prev_digest does not name the previous receipt".to_string(),
             ));
         }
-        let recomputed = receipt.digest_with(link.height, link.prev_digest.as_ref())?;
+        let recomputed = chain_digest(link.height, &expected_prev, &receipt.core_hash()?);
         if recomputed != link.digest {
             return Err(broken(
                 "the recorded digest does not match the receipt's content; it has been altered"
@@ -956,18 +1034,32 @@ mod tests {
             (json!(2400), "2400"),
             // The same number, whether the client wrote it as an integer or a float.
             (json!(2400.0), "2400"),
-            (json!(1.5), "1.5"),
             (json!(-17), "-17"),
+            (json!(9_007_199_254_740_991i64), "9007199254740991"),
+            (json!(-9_007_199_254_740_991i64), "-9007199254740991"),
         ] {
             let rendered =
                 String::from_utf8(canonical_json(&value).expect("canonical")).expect("utf8");
             assert_eq!(rendered, expected, "{value}");
         }
-        // Outside the unambiguous range, fail closed rather than guess an exponent form.
-        for out_of_range in [json!(1e21), json!(1e-7), json!(-1e21)] {
+
+        // Digest-covered content carries integers only. A non-integer is refused rather than
+        // rendered, because RFC 8785 inherits ECMAScript number formatting and both published SDKs
+        // refuse to canonicalize one at all — a receipt only this implementation can canonicalize
+        // is a receipt nobody can verify.
+        for non_integer in [json!(1.5), json!(0.000_001), json!(-2.25), json!(1e-7)] {
             assert!(
-                canonical_json(&out_of_range).is_err(),
-                "{out_of_range} must be refused, not approximated"
+                canonical_json(&non_integer).is_err(),
+                "{non_integer} must be refused, not rendered"
+            );
+        }
+
+        // And beyond the safe-integer range a value cannot be told from its neighbours, so a
+        // receipt would record a figure nobody entered.
+        for unsafe_integer in [json!(9_007_199_254_740_992i64), json!(1e21), json!(-1e21)] {
+            assert!(
+                canonical_json(&unsafe_integer).is_err(),
+                "{unsafe_integer} must be refused, not approximated"
             );
         }
     }
@@ -995,6 +1087,76 @@ mod tests {
         );
     }
 
+    // ------------------------------------------- the published vectors of `signing.md` §2.5
+    //
+    // These constants are the specification's, not this implementation's. That is the entire
+    // point: the previous construction was self-consistent — it sealed and verified with the same
+    // code, so every test passed — while computing a digest no independent implementation of §2.2
+    // could reproduce. A check that shares code with the producer proves only self-consistency.
+    // These numbers come from outside the crate and cannot be satisfied by agreeing with itself.
+
+    /// `sha256(receipt_core)` from §2.5.
+    const VECTOR_CORE_HASH: &str =
+        "2763f39ef8a61d493106d3db302ec36cae5c024ca3da3a019d483ccc29704ad1";
+    /// The height from §2.5.
+    const VECTOR_HEIGHT: u64 = 4211;
+    /// The published `chain.digest` for that core hash at that height.
+    const VECTOR_CHAIN_DIGEST: &str =
+        "sha256:919f8870391849de4e7b1d5b249ccbaaa7d5a7d3f500f5571c5a92dd0c3909db";
+
+    #[test]
+    fn the_published_chain_digest_vector_reproduces_exactly() {
+        let digest = chain_digest(VECTOR_HEIGHT, &genesis_prev_digest(), VECTOR_CORE_HASH);
+        assert_eq!(digest.as_str(), VECTOR_CHAIN_DIGEST);
+    }
+
+    #[test]
+    fn the_genesis_predecessor_is_sixty_four_zeros() {
+        assert_eq!(
+            genesis_prev_digest().as_str(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn the_chain_input_is_three_fields_separated_by_two_line_feeds() {
+        // Written out from §2.2's prose rather than by calling `chain_digest`, so this fails if the
+        // construction is ever changed to hash something else — which is exactly what had happened.
+        let expected = {
+            let input = format!(
+                "{VECTOR_HEIGHT}\nsha256:{}\n{VECTOR_CORE_HASH}",
+                "0".repeat(64)
+            );
+            assert_eq!(input.matches('\n').count(), 2);
+            Digest::sha256(input.as_bytes())
+        };
+        assert_eq!(expected.as_str(), VECTOR_CHAIN_DIGEST);
+        assert_eq!(
+            chain_digest(VECTOR_HEIGHT, &genesis_prev_digest(), VECTOR_CORE_HASH),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_receipt_core_excludes_the_whole_chain_member_not_just_the_digest() {
+        // §2.2 step 1 removes `chain` entirely. Leaving `height` or `prev_digest` inside the hashed
+        // object double-counts them, because step 2 already covers both — and that alone is enough
+        // for no other implementation to agree with this one.
+        let sealed = receipt("rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE")
+            .seal(None)
+            .expect("seal");
+        let core = sealed.canonical_form().expect("core");
+        assert!(
+            core.get("chain").is_none(),
+            "the receipt core carries no chain member at all"
+        );
+        // And the core hash is over that object, unchanged by which chain link it was sealed into.
+        let unsealed_core = receipt("rcpt_01K3MB2R4YC4YRXB2N6VD9FTHE")
+            .canonical_form()
+            .expect("core");
+        assert_eq!(core, unsealed_core);
+    }
+
     // -------------------------------------------------------------- the chain (§9.4, C-15)
 
     #[test]
@@ -1004,9 +1166,14 @@ mod tests {
             .expect("seal");
         let link = first.chain.clone().expect("sealed");
         assert_eq!(link.height, 1);
-        assert!(
-            link.prev_digest.is_none(),
-            "the first receipt in a tenant has no predecessor"
+        // `signing.md` §2.2: the predecessor of the first receipt in a tenant is 64 ASCII zeros,
+        // and it is **stored** rather than substituted at verification time. A party holding one
+        // receipt and nothing else has to be able to verify it, and it cannot if the field it needs
+        // is absent.
+        assert_eq!(
+            link.prev_digest.as_ref(),
+            Some(&genesis_prev_digest()),
+            "the first receipt names the genesis predecessor"
         );
 
         let second = receipt("rcpt_01K3MB2R4ZC4YRXB2N6VD9FTHE")

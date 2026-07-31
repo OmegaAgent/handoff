@@ -10,7 +10,7 @@ use sqlx::Row;
 
 #[tokio::test]
 async fn a_parked_request_its_waiter_and_its_unacked_signal_all_survive_sigkill() {
-    let mut deployment = Deployment::start("kill9", 18101).await;
+    let mut deployment = Deployment::start("kill9").await;
     let waiter = "run:kill9-durability";
 
     // A request nobody has answered yet, with a durable waiter: the wait is worth keeping even if

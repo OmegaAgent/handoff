@@ -34,7 +34,7 @@ async fn post_plain(
 
 #[tokio::test]
 async fn a_channel_reports_later_evidence_but_never_claims_the_person_decided() {
-    let deployment = Deployment::start("grades", 18109).await;
+    let deployment = Deployment::start("grades").await;
 
     let (status, raised) = post(
         &deployment.base,
@@ -148,7 +148,7 @@ async fn a_grade_report_replays_under_an_idempotency_key() {
     // I20: every mutating operation is idempotent under a caller-supplied key. The advance itself
     // is already idempotent by construction, so this checks the other half — that a retry with the
     // key returns the *stored* response rather than re-deriving one.
-    let deployment = Deployment::start("grades-key", 18111).await;
+    let deployment = Deployment::start("grades-key").await;
     let (_, raised) = post(
         &deployment.base,
         "/requests",
@@ -205,7 +205,7 @@ async fn a_grade_report_replays_under_an_idempotency_key() {
 
 #[tokio::test]
 async fn a_delivery_in_another_tenant_is_indistinguishable_from_one_that_never_existed() {
-    let deployment = Deployment::start("grades-iso", 18110).await;
+    let deployment = Deployment::start("grades-iso").await;
     let (status, refused) = post_plain(
         &deployment.base,
         "/deliveries/dlv_01K3MB2R6C8ZC4YRXB2N6VD9FT/grade",
@@ -226,7 +226,7 @@ async fn a_receipt_never_names_a_delivery_that_was_never_sent() {
     //
     // A receipt is the artifact the whole product exists to make trustworthy, so a false claim here
     // is the worst one available.
-    let deployment = Deployment::start("receipt-via", 18112).await;
+    let deployment = Deployment::start("receipt-via").await;
 
     let mut body = raise_body("run:receipt-via", "Approve the release?");
     body["routing"] = serde_json::json!({

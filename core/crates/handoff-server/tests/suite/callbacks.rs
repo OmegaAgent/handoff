@@ -104,7 +104,6 @@ async fn a_receiver_that_fails_then_succeeds_is_pushed_until_it_acks() {
     let (receiver, callback_url) = start_receiver(vec![500, 200]).await;
     let deployment = Deployment::start_with(
         "callbacks",
-        18108,
         &[(
             "HANDOFF_CALLBACK_SECRETS",
             &format!("{SECRET_A},{SECRET_B}"),

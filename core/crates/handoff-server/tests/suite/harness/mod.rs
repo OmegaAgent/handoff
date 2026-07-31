@@ -51,16 +51,30 @@ pub const ORG_A: &str = "org_01K3M7QW8ZC4YRXB2N6VD9FTHA";
 pub const ORG_B: &str = "org_01K3M7QW8ZC4YRXB2N6VD9FTHB";
 
 impl Deployment {
+    /// A port the OS says is free. Never a preferred number.
+    ///
+    /// Tests in one binary run in parallel, so a fixed port is a collision waiting for the next
+    /// test file, and the failure is nasty: the loser fails to bind while the winner answers, so a
+    /// test can silently exercise another test's server, or watch its own die mid-run. An earlier
+    /// version tried a caller's preferred port first and fell back — which still handed the same
+    /// number to two deployments whenever both asked at once. Preferring nothing removes the class.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .map(|address| address.port())
+            .expect("the OS can assign a free port")
+    }
+
     /// Create a database, seed credentials, and start `handoffd`.
-    pub async fn start(label: &str, port: u16) -> Deployment {
-        Self::start_with(label, port, &[]).await
+    pub async fn start(label: &str) -> Deployment {
+        Self::start_with(label, &[]).await
     }
 
     /// The same, with extra environment for the server process.
     ///
     /// Callback signing is the case this exists for: `HANDOFF_CALLBACK_SECRETS` is deployment
     /// configuration, and a test about rotation needs two of them, which no default can supply.
-    pub async fn start_with(label: &str, port: u16, env: &[(&str, &str)]) -> Deployment {
+    pub async fn start_with(label: &str, env: &[(&str, &str)]) -> Deployment {
         let database = format!(
             "handoff_test_{label}_{}",
             std::time::SystemTime::now()
@@ -93,6 +107,7 @@ impl Deployment {
         )
         .expect("write the bootstrap file");
 
+        let port = Self::free_port();
         let mut deployment = Deployment {
             database,
             url,
@@ -131,13 +146,55 @@ impl Deployment {
             .expect("handoffd starts");
         self.server = Some(child);
 
-        for _ in 0..200 {
-            if reqwest::get(format!("{}/meta", self.base)).await.is_ok() {
-                return;
+        // `free_port` probes by binding and then *releases* the socket before `handoffd` binds it,
+        // so two tests starting at the same moment can be handed the same port and one of them
+        // loses the race. The loser's process exits immediately, and waiting twenty seconds for a
+        // corpse to answer produced exactly the intermittent "connection refused" that made this
+        // suite untrustworthy under load.
+        //
+        // So: notice that the child is gone, take a genuinely fresh port, and try again. The probe
+        // cannot be made atomic without handing the listener to the child, and a bounded retry
+        // buys the same reliability for a fraction of the complexity.
+        for attempt in 0..8 {
+            for _ in 0..100 {
+                if reqwest::get(format!("{}/meta", self.base)).await.is_ok() {
+                    return;
+                }
+                if let Some(server) = self.server.as_mut() {
+                    if matches!(server.try_wait(), Ok(Some(_))) {
+                        break; // it exited; almost always a lost race for the port
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if attempt == 7 {
+                break;
+            }
+            if let Some(mut server) = self.server.take() {
+                let _ = server.kill();
+                let _ = server.wait();
+            }
+            self.port = Self::free_port();
+            self.base = format!("http://127.0.0.1:{}/v1", self.port);
+            let child = Command::new(env!("CARGO_BIN_EXE_handoffd"))
+                .arg("serve")
+                .envs(
+                    self.env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                )
+                .env("HANDOFF_DATABASE_URL", &self.url)
+                .env("HANDOFF_BOOTSTRAP", &self.bootstrap)
+                .env("HANDOFF_BIND", format!("127.0.0.1:{}", self.port))
+                .env("HANDOFF_SWEEP_INTERVAL_MS", "250")
+                .env("HANDOFF_MAX_CONNECTIONS", "4")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("handoffd starts");
+            self.server = Some(child);
         }
-        panic!("handoffd never answered on port {}", self.port);
+        panic!("handoffd never answered, last port {}", self.port);
     }
 
     /// The process id, so a test can send it a signal.

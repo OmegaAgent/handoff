@@ -88,12 +88,24 @@ receipts that one implementation can verify and another cannot.
 This protocol therefore emits a **strict subset** of legal JCS output. In any object over which a
 digest defined by this specification is computed:
 
-1. Every JSON number MUST be finite, and MUST be either `0` or in the range `1e-6 ≤ |x| < 1e21` —
-   exactly the band in which `Number::toString` produces plain decimal notation.
-2. Every JSON number with no fractional part MUST be within ±(2^53 − 1), so that it round-trips
-   through an IEEE-754 double without loss.
-3. A Server MUST reject an answer carrying a number outside either bound with
+1. Every JSON number MUST be finite and MUST be an **integer**. A number with a fractional part
+   MUST be rejected.
+2. Every JSON number MUST be within ±(2^53 − 1), so that it round-trips through an IEEE-754 double
+   without loss.
+3. A Server MUST reject an answer carrying a number outside either rule with
    `422 answer_validation_failed`, naming the offending field.
+
+> **Why integers only, when JCS permits more.** An earlier revision of this section admitted any
+> number in `1e-6 ≤ |x| < 1e21`, reasoning that `Number::toString` produces plain decimal there. That
+> reasoning is correct about the *notation* and still leaves the *value* unsafe: RFC 8785 inherits
+> ECMAScript number formatting, which is precisely what independent implementations do not reproduce
+> reliably. It was not theoretical — a reference server minted receipts carrying `1.5` that neither
+> published SDK could canonicalize at all, so a decision a person really made produced a receipt
+> nobody could verify. Integers are exact in IEEE-754 to 2^53 − 1 and render identically everywhere,
+> which collapses two bounds into one rule with no ambiguity left to disagree about.
+>
+> A Client carrying an exact decimal quantity — money, most obviously — sends it as `text`, which
+> sidesteps binary floating point rather than negotiating with it.
 
 Output meeting these constraints is valid JCS, so an implementation with a complete JCS
 canonicalizer is conforming and needs no change. An implementation that refuses to *emit* numbers
@@ -1460,7 +1472,7 @@ Level 1 invariant, and C-17 is the only such case.
 | C-21 | 1 | Channel content matching a decision format does not settle a request; a channel declaring `can_authenticate_person: false` produces a provisional answer only | I16, I6 |
 | C-22 | 1 | All eight interaction patterns in `fixtures/use-cases/` are accepted and answerable with **no request-kind field anywhere in the wire traffic**. A page-state change alone produces no clearance receipt | I14, I16 |
 | C-23 | 1 | Drive every transition in §6.2 and §8.2. For each one, the state change and its event are observable together: no state exists whose event is missing, and no event exists whose state change was rolled back. Kill the Server between the state write and the event write → after restart, either both are present or neither is | I12 |
-| C-24 | 1 | Answer a `number` field with `1e21`, with `1e-7`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1e-6`, and `9007199254740991` (2^53 − 1) → accepted. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
+| C-24 | 1 | Answer a `number` field with a non-integer, with `1e21`, and with `2^53` → each is `422 answer_validation_failed` naming the field, and no receipt is minted. Answer with `0`, `1`, and `9007199254740991` (2^53 − 1) → accepted. A canonicalizer MUST refuse a non-integer rather than render it. Canonicalize `fixtures/signing/receipt-core.json` and `fixtures/signing/callback-body.json` and reproduce their exact byte lengths and SHA-256 digests from `signing.md` | I2, I21 |
 | C-25 | 1 | Answer request A with a key, then answer request B with the **same** key and an identical body → B is answered, naming B, with its own receipt and its own authorization. A retry of A with that key still replays A's receipt | I20, I10, I1 |
 
 Four notes for implementers:

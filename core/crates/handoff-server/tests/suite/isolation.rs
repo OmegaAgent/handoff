@@ -39,7 +39,7 @@ const TENANT_SCOPED_TABLES: &[(&str, &str)] = &[
 
 #[tokio::test]
 async fn each_tenant_reads_exactly_its_own_rows_and_nothing_of_the_others() {
-    let deployment = Deployment::start("tenants", 18102).await;
+    let deployment = Deployment::start("tenants").await;
 
     // Two requests in tenant A, one in tenant B, all under waiter references that would collide if
     // anything here were globally scoped.
@@ -148,7 +148,7 @@ async fn each_tenant_reads_exactly_its_own_rows_and_nothing_of_the_others() {
 /// defence, and this is the one that catches the day somebody forgets it.
 #[tokio::test]
 async fn row_level_security_holds_on_every_tenant_scoped_table() {
-    let deployment = Deployment::start("rls", 18103).await;
+    let deployment = Deployment::start("rls").await;
 
     // Produce rows in as many tables as the API can reach, for both tenants.
     for (machine, human, label) in [(MACHINE_A, EDITOR_A, "A"), (MACHINE_B, EDITOR_B, "B")] {

@@ -16,7 +16,7 @@ use sqlx::Row;
 /// R12 — a progressive-disclosure step.
 #[tokio::test]
 async fn a_partial_answer_records_a_step_and_never_wakes_the_waiter() {
-    let deployment = Deployment::start("r12", 18104).await;
+    let deployment = Deployment::start("r12").await;
     let waiter = "run:r12-progressive";
 
     let (status, raised) = post(
@@ -100,7 +100,7 @@ async fn a_partial_answer_records_a_step_and_never_wakes_the_waiter() {
 /// R13 — a delegation.
 #[tokio::test]
 async fn a_delegation_is_recorded_mints_deliveries_and_never_wakes_the_waiter() {
-    let deployment = Deployment::start("r13", 18105).await;
+    let deployment = Deployment::start("r13").await;
     let waiter = "run:r13-delegate";
 
     let (status, raised) = post(
@@ -212,7 +212,7 @@ async fn a_delegation_is_recorded_mints_deliveries_and_never_wakes_the_waiter() 
 /// An authorization that was real, is on the record, and is no longer spendable.
 #[tokio::test]
 async fn redeeming_an_expired_authorization_says_expired_and_not_spent() {
-    let deployment = Deployment::start("authexp", 18106).await;
+    let deployment = Deployment::start("authexp").await;
 
     let (status, raised) = post(
         &deployment.base,
@@ -281,7 +281,7 @@ async fn redeeming_an_expired_authorization_says_expired_and_not_spent() {
 /// §1.4 — a duration whose length depends on when you start it is refused, never approximated.
 #[tokio::test]
 async fn a_ttl_measured_in_months_is_rejected_rather_than_guessed() {
-    let deployment = Deployment::start("durations", 18107).await;
+    let deployment = Deployment::start("durations").await;
 
     let mut body = raise_body("run:durations", "A request with an unfixed deadline");
     body["ttl"] = serde_json::json!("P1M");
@@ -334,7 +334,7 @@ fn urlencode(text: &str) -> String {
 /// request."
 #[tokio::test]
 async fn one_key_reused_on_a_different_request_does_not_replay_the_first_answer() {
-    let deployment = Deployment::start("idemobj", 18108).await;
+    let deployment = Deployment::start("idemobj").await;
 
     let mut ids = Vec::new();
     for n in ["one", "two"] {
@@ -415,7 +415,7 @@ async fn one_key_reused_on_a_different_request_does_not_replay_the_first_answer(
 /// The same, for a withdrawal — where the consequence is an operator believing a request is off.
 #[tokio::test]
 async fn one_key_reused_on_a_different_cancel_does_not_replay_the_first() {
-    let deployment = Deployment::start("idemcancel", 18109).await;
+    let deployment = Deployment::start("idemcancel").await;
 
     let mut ids = Vec::new();
     for n in ["one", "two"] {
@@ -469,7 +469,7 @@ async fn one_key_reused_on_a_different_cancel_does_not_replay_the_first() {
 /// anyway is how a Server advertises something nobody measured.
 #[tokio::test]
 async fn continuation_state_is_refused_rather_than_stored_unprotected() {
-    let deployment = Deployment::start("continuation", 18110).await;
+    let deployment = Deployment::start("continuation").await;
 
     let (status, meta) = get(&deployment.base, "/meta", MACHINE_A).await;
     assert_eq!(status, 200);

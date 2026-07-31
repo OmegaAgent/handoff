@@ -109,90 +109,19 @@ pub fn delivery(view: &DeliveryView) -> Value {
     })
 }
 
-/// One receipt.
+/// One receipt, **exactly as it was sealed**.
 ///
-/// `actor.principal_id` is always present and is `null` for every actor that is not a person. §4.4
-/// and §9.7 both turn on that: a receipt that named a user here would be a fabricated person, and
-/// an absent key would leave a reader unable to tell "nobody" from "not recorded".
+/// This is a straight serialization of the stored record, and that is the whole design. The receipt
+/// core `signing.md` §2.2 hashes is "the receipt object excluding its `chain` member" — so the
+/// bytes a third party hashes are the bytes this endpoint returned. Re-rendering the receipt here,
+/// even into a shape that is arguably nicer, gives an auditor an object that does not reproduce the
+/// digest it carries, and the receipt's entire claim is that a party who was never given a secret
+/// can check it.
+///
+/// So there is deliberately no field-by-field construction below. Anything a client needs to see as
+/// an explicit `null` is `null` in the record itself.
 pub fn receipt(value: &Receipt) -> Value {
-    let actor = &value.actor;
-    let chain = value.chain.as_ref();
-    json!({
-        "id": value.id.to_string(),
-        "request_id": value.request_id.to_string(),
-        "org_id": value.org_id.to_string(),
-        "kind": name(&value.kind),
-        "corrects": value.corrects.map_or(Value::Null, |id| json!(id.to_string())),
-        "decision": {
-            "values": Value::Object(value.decision.values.clone()),
-            "disposition": name(&value.decision.disposition),
-            "note": text(value.decision.note.as_deref()),
-        },
-        "actor": {
-            "type": name(&actor.actor_type),
-            "principal_id": actor.principal_id.map_or(Value::Null, |id| json!(id.to_string())),
-            "display": text(actor.display.as_deref()),
-            "role_at_decision": text(actor.role_at_decision.as_deref()),
-            "auth_strength": actor.auth_strength.as_ref().map_or(Value::Null, name),
-            "reauth_at": at(actor.reauth_at),
-            "mfa_at": at(actor.mfa_at),
-            "on_behalf_of": actor.on_behalf_of.map_or(Value::Null, |id| json!(id.to_string())),
-        },
-        "decided_at": value.decided_at.to_string(),
-        "request_version": value.request_version,
-        "request_digest": value.request_digest.to_string(),
-        "rendered": value.rendered.as_ref().map_or(Value::Null, |r| json!({
-            "digest": r.digest.to_string(),
-            // `openapi.yaml` spells this `ref`; the Rust field cannot be, so the rename happens
-            // here rather than in a wire type that would then disagree with the contract.
-            "ref": text(r.reference.as_deref()),
-        })),
-        "via": {
-            "delivery_id": value.via.delivery_id.map_or(Value::Null, |id| json!(id.to_string())),
-            "channel": text(value.via.channel.as_deref()),
-            "target": value.via.target.as_ref().map_or(Value::Null, |t| json!({
-                "kind": name(&t.kind), "value": t.value,
-            })),
-            "grade_reached": value.via.grade_reached.map_or(Value::Null, |g| name(&g)),
-        },
-        "authority": {
-            "required": name(&value.authority.required),
-            "satisfied": name(&value.authority.satisfied),
-        },
-        "steps": name(&value.steps),
-        "capabilities_exercised": Value::Array(
-            value
-                .capabilities_exercised
-                .iter()
-                .map(|c| json!({
-                    "handle": c.handle.to_string(),
-                    "session_ref": c.session_ref.to_string(),
-                    "scopes": name(&c.scopes),
-                    "resolved_at": at(c.resolved_at),
-                    "released_at": at(c.released_at),
-                    "held_ms": c.held_ms.map_or(Value::Null, |v| json!(v)),
-                    "input_events": c.input_events.map_or(Value::Null, |v| json!(v)),
-                    "navigations": name(&c.navigations),
-                    // §11.5 rule 3: the digest only. The full content may be personal data and
-                    // must not be required to live in the receipt.
-                    "blast_radius_digest": c
-                        .blast_radius_digest
-                        .as_ref()
-                        .map_or(Value::Null, |d| json!(d.to_string())),
-                }))
-                .collect(),
-        ),
-        "clearance": value.clearance.as_ref().map_or(Value::Null, |c| json!({
-            "source": name(&c.source),
-            "actor": c.actor.map_or(Value::Null, |a| json!(a.to_string())),
-            "at": at(c.at),
-        })),
-        "chain": chain.map_or(Value::Null, |c| json!({
-            "height": c.height,
-            "prev_digest": c.prev_digest.as_ref().map_or(Value::Null, |d| json!(d.to_string())),
-            "digest": c.digest.to_string(),
-        })),
-    })
+    serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
 /// One authorization, with the state derived at read time rather than stored.

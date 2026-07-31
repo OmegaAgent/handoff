@@ -440,25 +440,27 @@ pub fn terminal_decision(
     }
 }
 
-/// The band in which RFC 8785's number serialization produces plain decimal notation (§1.4).
-pub const MIN_MAGNITUDE: f64 = 1e-6;
-/// The exclusive upper end of that band.
-pub const MAX_MAGNITUDE: f64 = 1e21;
 /// The largest integer an IEEE-754 double distinguishes from its neighbours, `2^53 - 1`.
 pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 /// Refuse an answer carrying a number this protocol cannot represent identically everywhere (§1.4).
 ///
-/// Two different rules, with two different reasons:
+/// **Digest-covered content carries integers only, bounded to ±(2^53 − 1).** One rule, two reasons,
+/// and they are different:
 ///
-/// - **The band** is about *notation*. Outside `1e-6 ≤ |x| < 1e21`, `Number::toString` switches to
-///   exponential form, and that switch is where independent canonicalizers disagree. A
-///   disagreement there is not cosmetic: two conforming implementations compute different digests
-///   for the same receipt, so a chain one can verify the other cannot — and nothing errors, ever.
-/// - **The safe-integer bound** is about *precision*. Beyond `2^53 - 1` a value is
-///   indistinguishable from its neighbours, so a person approving `100000000000000000001` would
-///   get a receipt saying `100000000000000000000`. A receipt that misstates what was approved is
-///   the one thing a receipt may never do.
+/// - **Formatting.** RFC 8785 inherits ECMAScript's number serialization, which independent
+///   implementations do not reproduce reliably. An earlier profile admitted any number inside
+///   `1e-6 ≤ |x| < 1e21` on the grounds that the notation is plain decimal there — true of the
+///   notation, and still not safe for the value. Both published SDKs refuse a non-integer outright,
+///   so a receipt carrying `1.5` could be minted by this server and verified by nothing we ship.
+///   That is the whole claim of the chain — a party who was never given a secret can check it —
+///   failing in a narrow window rather than a wide one.
+/// - **Precision.** Beyond `2^53 - 1` a value is indistinguishable from its neighbours, so a person
+///   approving `100000000000000000001` would get a receipt saying `100000000000000000000`. A
+///   receipt that misstates what was approved is the one thing a receipt may never do.
+///
+/// A Client with an exact decimal quantity — money, most obviously — declares the field as `text`,
+/// which sidesteps binary floating point instead of negotiating with it.
 ///
 /// Every offending field is collected rather than the first, because a surface has to be able to
 /// mark every bad input at once.
@@ -491,14 +493,15 @@ fn first_bad_number(value: &Value) -> Option<String> {
             if !x.is_finite() {
                 return Some("a number must be finite".into());
             }
-            let magnitude = x.abs();
-            if magnitude != 0.0 && !(MIN_MAGNITUDE..MAX_MAGNITUDE).contains(&magnitude) {
-                return Some(format!(
-                    "a number must be 0 or within {MIN_MAGNITUDE:e} <= |x| < {MAX_MAGNITUDE:e}, \
-                     which is the band that canonicalizes to plain decimal"
-                ));
+            if x.fract() != 0.0 {
+                return Some(
+                    "digest-covered content carries integers only, because RFC 8785 inherits a \
+                     number serialization independent implementations do not reproduce. Declare \
+                     an exact decimal quantity as a `text` field."
+                        .into(),
+                );
             }
-            if x.fract() == 0.0 && magnitude > MAX_SAFE_INTEGER {
+            if x.abs() > MAX_SAFE_INTEGER {
                 return Some(
                     "a whole number must be within +/-(2^53 - 1) so it round-trips through a \
                      double without loss"
@@ -615,25 +618,28 @@ mod tests {
     }
 
     #[test]
-    fn the_bounds_are_inclusive_at_zero_and_at_both_edges() {
+    fn integers_are_accepted_at_zero_and_at_the_safe_edge() {
         let mut values = Map::new();
         values.insert("at_zero".into(), json!(0));
-        values.insert("at_lower_bound".into(), json!(0.000001));
         values.insert(
             "at_max_safe_integer".into(),
             json!(9_007_199_254_740_991u64),
         );
-        values.insert("ordinary".into(), json!(1.5));
+        values.insert("negative".into(), json!(-42));
         assert!(check_number_bounds(&values).is_ok());
     }
 
     #[test]
-    fn a_number_below_the_band_names_its_field() {
-        let mut values = Map::new();
-        values.insert("at_lower_bound".into(), json!(0.0000001));
-        let err = check_number_bounds(&values).unwrap_err();
-        assert_eq!(err.code, ErrorCode::AnswerValidationFailed);
-        assert_eq!(err.fields()[0].name, "at_lower_bound");
+    fn a_non_integer_names_its_field() {
+        // The case that made this rule: a person answers a `number` field with 1.5, and the
+        // receipt that decision produces cannot be canonicalized by either published SDK.
+        for bad in [json!(1.5), json!(0.000_001), json!(0.000_000_1)] {
+            let mut values = Map::new();
+            values.insert("ordinary".into(), bad.clone());
+            let err = check_number_bounds(&values).unwrap_err();
+            assert_eq!(err.code, ErrorCode::AnswerValidationFailed, "{bad}");
+            assert_eq!(err.fields()[0].name, "ordinary");
+        }
     }
 
     #[test]
@@ -648,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn a_number_above_the_band_is_refused_wherever_it_is_nested() {
+    fn a_bad_number_is_refused_wherever_it_is_nested() {
         let mut values = Map::new();
         values.insert("ordinary".into(), json!({"nested": [1e21]}));
         let err = check_number_bounds(&values).unwrap_err();

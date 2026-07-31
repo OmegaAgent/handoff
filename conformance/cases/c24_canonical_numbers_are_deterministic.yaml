@@ -3,8 +3,8 @@ title: Numbers outside the deterministic band are rejected, and canonicalization
 level: 1
 invariants: [I2, I21]
 spec:
-  - "§1.4 — numbers in digest-covered objects MUST be 0 or within 1e-6 <= |x| < 1e21"
-  - "§1.4 — numbers with no fractional part MUST be within +/-(2^53 - 1)"
+  - "§1.4 — digest-covered numbers MUST be integers"
+  - "§1.4 — and MUST be within +/-(2^53 - 1)"
   - "§1.4 — a Server MUST reject a number outside either bound with 422 answer_validation_failed"
   - "§9.2 — the receipt records what the person saw, addressed by digest"
   - "§19 — fail closed: nothing is created from input the Server cannot represent"
@@ -105,21 +105,21 @@ steps:
       capture:
         req: id
 
-  - name: a number below the band is refused and names the field
+  - name: a non-integer is refused outright and names the field
     http:
       method: POST
       path: /requests/${req}/answer
       as: human_editor
       headers:
-        Idempotency-Key: "c24-below-band-${run_id}"
+        Idempotency-Key: "c24-non-integer-${run_id}"
       body:
-        values: '!json:{"at_zero":0,"at_lower_bound":0.0000001,"at_max_safe_integer":9007199254740991,"ordinary":1.5}'
+        values: '!json:{"at_zero":0,"at_lower_bound":0.0000001,"at_max_safe_integer":9007199254740991,"ordinary":2}'
       expect:
         status: 422
         body:
           - path: error.code
             equals: answer_validation_failed
-            because: "§1.4 — a number outside the bound is a per-field validation failure, not a malformed body"
+            because: "§1.4 — a number the digest cannot carry is a per-field validation failure, not a malformed body"
           - path: error.fields[0].name
             equals: at_lower_bound
             because: "§1.4 — the Server names the offending field so the surface can mark the input"
@@ -132,7 +132,7 @@ steps:
       headers:
         Idempotency-Key: "c24-unsafe-integer-${run_id}"
       body:
-        values: '!json:{"at_zero":0,"at_lower_bound":0.000001,"at_max_safe_integer":9007199254740992,"ordinary":1.5}'
+        values: '!json:{"at_zero":0,"at_lower_bound":1,"at_max_safe_integer":9007199254740992,"ordinary":2}'
       expect:
         status: 422
         body:
@@ -144,7 +144,7 @@ steps:
               §1.4 — beyond 2^53 - 1 a value is indistinguishable from its neighbours, so a receipt
               would record a figure the person did not enter
 
-  - name: a number above the band is refused
+  - name: an integer beyond the safe range is refused
     http:
       method: POST
       path: /requests/${req}/answer
@@ -152,7 +152,7 @@ steps:
       headers:
         Idempotency-Key: "c24-above-band-${run_id}"
       body:
-        values: '!json:{"at_zero":0,"at_lower_bound":0.000001,"at_max_safe_integer":9007199254740991,"ordinary":1000000000000000000000}'
+        values: '!json:{"at_zero":0,"at_lower_bound":1,"at_max_safe_integer":9007199254740991,"ordinary":1000000000000000000000}'
       expect:
         status: 422
         body:
@@ -184,13 +184,13 @@ steps:
       headers:
         Idempotency-Key: "c24-accept-${run_id}"
       body:
-        values: '!json:{"at_zero":0,"at_lower_bound":0.000001,"at_max_safe_integer":9007199254740991,"ordinary":1.5}'
+        values: '!json:{"at_zero":0,"at_lower_bound":1,"at_max_safe_integer":9007199254740991,"ordinary":2}'
       expect:
         status: 200
         body:
           - path: request.state
             equals: answered
-            because: "§1.4 — the bounds are inclusive at 0, at 1e-6, and at 2^53 - 1"
+            because: "§1.4 — zero and the safe-integer bound are both inclusive"
           - path: receipt.id
             matches: "^rcpt_[0-9A-HJKMNP-TV-Z]{26}$"
       capture:
@@ -205,7 +205,7 @@ steps:
         status: 200
         body:
           - path: decision.values.at_lower_bound
-            equals: 0.000001
+            equals: 1
             because: "§9.2 — the receipt records the typed answer as the person gave it"
           - path: decision.values.at_max_safe_integer
             equals: 9007199254740991
@@ -243,16 +243,32 @@ steps:
           signing.md §2.5 — this is the exact byte sequence the worked receipt vector is computed
           over, so an implementation that cannot reproduce it cannot verify any published receipt
 
-  - name: boundary numbers canonicalize to plain decimal, never to exponential notation
+  - name: integers canonicalize to plain decimal, sorted, with nothing to disagree about
     hook:
       hook: canonicalize
       args:
-        json: '{"lo":0.000001,"hi":9007199254740991,"zero":0}'
+        json: '{"lo":-9007199254740991,"hi":9007199254740991,"zero":0}'
       expect:
         exit_code: 0
         output_matches:
-          - '^\{"hi":9007199254740991,"lo":0\.000001,"zero":0\}$'
+          - '^\{"hi":9007199254740991,"lo":-9007199254740991,"zero":0\}$'
         because: >
-          §1.4 — one exact match pins all three at once: members sorted by code point, no
-          insignificant whitespace, and both boundary values emitted in plain decimal. An
-          implementation that emits 1e-6 here would compute a different digest for the same receipt
+          §1.4 — one exact match pins three things at once: members sorted by code point, no
+          insignificant whitespace, and both safe-integer bounds emitted in plain decimal with no
+          exponent. Every value here is exact in IEEE-754 and renders identically in every language
+
+  - name: a non-integer is refused by the canonicalizer, not rendered by it
+    hook:
+      hook: canonicalize
+      args:
+        json: '{"amount":1.5}'
+      expect:
+        exit_code_not: 0
+        output_matches:
+          - "not an integer"
+        because: >
+          §1.4 — this is the rule the whole case exists to protect. RFC 8785 inherits ECMAScript
+          number formatting, which independent implementations do not reproduce, so digest-covered
+          content carries integers only and a canonicalizer that renders 1.5 at all has produced
+          bytes no other implementation is obliged to agree with. Both published SDKs refuse it,
+          and a receipt only one implementation can canonicalize is a receipt nobody can verify

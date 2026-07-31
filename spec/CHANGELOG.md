@@ -192,3 +192,36 @@ that reached for a plausible candidate when the honest answer was "none of these
 implementations and one was the contract.
 
 **Zero evidence and the weakest evidence are different claims**, and a receipt may not blur them.
+
+### Fixed — the chain, and the numbers that made it unverifiable
+
+Two release-blocking defects found by a second independent review, both in the one artifact this
+protocol exists to make trustworthy.
+
+**The reference server computed a chain digest no other implementation could reproduce.** §2.2
+specifies a two-step construction — hash the receipt excluding its `chain` member, then hash
+`height ‖ prev_digest ‖ core_hash`. The Rust did a one-step hash that left `height` and
+`prev_digest` inside the hashed object, and a genesis receipt omitted `prev_digest` rather than
+carrying the 64 zeros. Both published SDKs implemented §2.2 correctly, so **the Python SDK verified
+0 of 11 real receipts**. A receipt exists so that a party who was never given a secret can check it;
+none of ours could.
+
+A second defect sat underneath it and only an out-of-process hasher could have exposed it: the API
+re-rendered the receipt field by field with a different null policy, spelling `rendered.ref` as
+`reference`, so the bytes an auditor hashes were not the bytes that were sealed.
+
+**Digest-covered numbers are now integers only.** Fixing the construction still left 17 of 18,
+because §1.4 admitted non-integers inside `1e-6 ≤ |x| < 1e21` while both SDKs refuse to canonicalize
+a non-integer at all. A person answering a `number` field with `1.5` produced a receipt no published
+client could verify. The band was right about notation and wrong about values: RFC 8785 inherits
+ECMAScript number formatting, which is exactly what independent implementations do not reproduce.
+Integers are exact to 2^53 − 1 and render identically everywhere. A Client with an exact decimal
+quantity sends `text`.
+
+The result is now **18 of 18 real receipts verified by an independent implementation**.
+
+Why it survived every earlier check is the part worth keeping: C-15 verified the chain using the
+same Rust that produced it, so any self-consistent construction passed. The check and the thing
+checked were one implementation. C-24 now asserts a canonicalizer **refuses** a non-integer rather
+than rendering it, and the server suite verifies a minted receipt against §2.2 written out inline,
+calling none of the production helpers.

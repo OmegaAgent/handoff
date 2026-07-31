@@ -22,3 +22,6 @@ mod isolation;
 
 #[path = "suite/transitions.rs"]
 mod transitions;
+
+#[path = "suite/chain.rs"]
+mod chain;
