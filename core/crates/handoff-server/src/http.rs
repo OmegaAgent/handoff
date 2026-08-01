@@ -64,6 +64,16 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status =
             StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Every error in this server becomes a response here, so this is the one place a 5xx can be
+        // observed without threading a reporter through the handlers. 4xx is deliberately not
+        // reported: a refused answer, an insufficient role and a replayed key are the protocol
+        // working, and reporting them would bury the failures that are ours in a stream of them.
+        #[cfg(feature = "sentry")]
+        if status.is_server_error() {
+            crate::observability::capture_server_error(&self.0);
+        }
+
         let mut response = (status, axum::Json(crate::wire::error(&self.0))).into_response();
         rate_limit_headers(response.headers_mut());
         response

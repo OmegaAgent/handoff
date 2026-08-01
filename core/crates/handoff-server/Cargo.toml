@@ -36,9 +36,14 @@ tracing-subscriber.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
+sentry = { version = "0.46.2", default-features = false, features = ["backtrace", "panic", "rustls", "reqwest"], optional = true }
+sentry-tracing = { version = "0.46.2", optional = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+
+[features]
+sentry = ["dep:sentry", "dep:sentry-tracing"]

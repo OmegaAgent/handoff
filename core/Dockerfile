@@ -30,7 +30,11 @@ COPY . .
 
 # `--locked` so the image is built from the committed Cargo.lock and cannot drift from what CI
 # tested. A build that needs to update the lockfile is a change to the repository, not to the image.
-RUN cargo build --release --locked -p handoff-server --bin handoffd \
+# `--features sentry` is OUR deployment's choice, not the crate's default. The feature is off by
+# default so a fork's binary cannot report anywhere, which is what keeps README's "no phone-home"
+# literally true; enabling it here is how this deployment opts in. Even then, no SENTRY_DSN means
+# no client and no socket.
+RUN cargo build --release --locked -p handoff-server --bin handoffd --features sentry \
     && strip target/release/handoffd
 
 FROM debian:bookworm-slim AS runtime

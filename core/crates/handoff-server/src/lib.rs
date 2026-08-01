@@ -28,6 +28,9 @@ pub mod cli;
 pub mod config;
 pub mod delivery;
 pub mod http;
+/// Error reporting, behind a feature that is off by default so the open build cannot phone home.
+#[cfg(feature = "sentry")]
+pub mod observability;
 pub mod routes;
 pub mod state;
 pub mod wire;
