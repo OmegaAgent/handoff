@@ -4,6 +4,21 @@ Ranked. Top = handle first. Non-blockers get deferred here instead of stopping t
 
 ## Stated gaps — things that do not exist, said plainly
 
+- **The deployed Postgres is a single unmanaged node with no replica, and nothing exports the chain
+  head.** `handoff-v1-db` runs one machine, 1 GB, on a 1 GB volume, and Fly states plainly that
+  unmanaged Postgres is unsupported and that operation, management and disaster recovery are the
+  operator's problem. For a service whose whole claim is receipts that outlive it and verify without
+  trust, that is the largest open exposure — larger than the sizing question that prompted this
+  entry. `SECURITY.md` already says an exported head is the only defence against truncation of a
+  chain's tail, and nothing exports one yet.
+- **`max_connections` on that node is 300, above what its memory can serve.** It was 300 on a 256 MB
+  machine, which is roughly thirty times what 49 MB of measured idle headroom could feed, and is why
+  the node died under conformance load rather than refusing a connection. Memory is now 1 GB (681 MB
+  headroom, about a hundred backends against `handoffd`'s pool of 16), so the gap no longer bites,
+  but the ceiling still is not one the machine can honour. `fly pg config update` cannot set it: it
+  fails on a flyctl bug that mis-parses the IPv6 address of an unmanaged Postgres, the same bug that
+  broke `fly postgres attach`. Reasoning and measurements in the deployment record.
+
 - ~~**Row-level security is proven on 11 of 19 tenant-scoped tables.**~~ **Closed.** Proven on
   **20 of 20**. The population was 19 because `handoff_request_dispositions` was missing from the
   test's list — neither proven nor named as unproven — and eight of the rest held rows for one

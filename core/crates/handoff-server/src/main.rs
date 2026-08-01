@@ -27,16 +27,37 @@ ENVIRONMENT:
     HANDOFF_BOOTSTRAP                 A JSON file of credentials to seed.
     HANDOFF_SWEEP_INTERVAL_MS         How often deadlines are swept. Default 500.
     HANDOFF_MAX_CONNECTIONS           Store pool size. Default 16 serving, 2 for a subcommand.
+    SENTRY_DSN                        Optional, and only honoured by a build with the `sentry`
+                                      feature. Unset means no error reporting and no egress.
 ";
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "handoff_server=info,handoff_store_postgres=info".into()),
-        )
-        .init();
+    // Held for the life of the process; dropping it flushes anything queued. `None` unless this
+    // build has the `sentry` feature AND the deployment set SENTRY_DSN, which is the default and
+    // the self-hosted case: no DSN, no client, no outbound connection.
+    #[cfg(feature = "sentry")]
+    let _reporter = handoff_server::observability::init();
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "handoff_server=info,handoff_store_postgres=info".into());
+
+    // With the feature, ERROR records are forwarded to the reporter as well as printed. That is
+    // what makes a database that will not answer visible: the store reports it as `invalid_request`
+    // (a 400, because the specification classifies by what the caller should do), so watching HTTP
+    // status alone would have shown a stream of client errors and reported nothing.
+    #[cfg(feature = "sentry")]
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(handoff_server::observability::tracing_layer())
+            .init();
+    }
+    #[cfg(not(feature = "sentry"))]
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
