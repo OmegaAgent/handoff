@@ -28,8 +28,12 @@ PORT="${HANDOFF_CRASH_PORT:-8131}"
 BASE="http://127.0.0.1:$PORT/v1"
 RUN_DIR="${HANDOFF_RUN_DIR:-$(dirname "$0")/../.run}"
 LOG="$RUN_DIR/crash-instance.log"
-MACHINE="omg_handoff_test_ka_conformance"
-HUMAN="hs_editor_one_conformance"
+# Credentials come from the environment, defaulting to the development bootstrap. Hardcoding them
+# meant this hook only worked against a deployment seeded with the tokens published in this
+# repository -- so proving C-23 against a real deployment would have required seeding PUBLIC
+# credentials into it. A hook that forces a deployment to weaken itself to be testable is a bad hook.
+MACHINE="${HANDOFF_CRASH_MACHINE_TOKEN:-omg_handoff_test_ka_conformance}"
+HUMAN="${HANDOFF_CRASH_HUMAN_TOKEN:-hs_editor_one_conformance}"
 RUN_ID="crash-$$"
 CRASH_POINT="answer_after_state_write"
 CRASH_MARKER="HANDOFF_CRASH_POINT reached"

@@ -1,0 +1,55 @@
+# handoffd on Fly, as a NEW app alongside the preserved night-hack demo.
+#
+# This deliberately does not reuse `handoff-human`. That app serves the four-hour hackathon build
+# documented in `examples/night-hack/`, it holds the paging secrets that let it ring a real phone,
+# and it currently answers `handoff.omegas.dev`. Deploying over it would replace a running service
+# with an unproven one and make rollback a redeploy. Standing the replacement up beside it makes the
+# cutover a certificate move and the rollback the same move backwards.
+#
+# NO paging secret belongs on this app. It holds no Retell, Twilio or Sprites credential, so a
+# defect here cannot call anyone. That is a property of the deployment, not a promise about the code.
+
+app = "handoff-v1"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # `[::]` and not `0.0.0.0`. Fly's private network is IPv6, so a listener bound to the IPv4
+  # wildcard is unreachable from every other machine in the organisation -- the edge proxy still
+  # serves it publicly, which is exactly what makes this hard to notice. Found by running the
+  # conformance suite from inside the network and watching every case fail to connect while the
+  # public URL answered 200. On Linux a `::` bind accepts IPv4 as well, so this is strictly wider.
+  HANDOFF_BIND = "[::]:8080"
+  # link_only cannot settle a request here. §4.3 permits a deployment to allow it; this one does
+  # not, and C-6b asserts the refusal against that declaration.
+  HANDOFF_LINK_ONLY_PERMITTED = "false"
+  HANDOFF_SWEEP_INTERVAL_MS = "500"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  # A deadline sweep that is not running is a request that never expires, and `auto_stop_machines`
+  # is therefore off rather than default: this process has periodic work that matters even when no
+  # request has arrived. §6.2 R6 treats a sweep as a transition, and a transition that does not
+  # happen is a state the record disagrees with.
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "4s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/v1/meta"
+    # /v1/meta is the right probe: it is the endpoint that reports the conformance level and the
+    # core version, so a machine that answers it is a machine that has loaded its configuration and
+    # reached its store, not merely one that has bound a port.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
